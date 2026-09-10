@@ -1,0 +1,40 @@
+{
+  "_comment": "Slither configuration for the SRX Token suite. Tuned to suppress framework-noise and surface findings that matter.",
+
+  "detectors_to_exclude": "naming-convention,solc-version,pragma,assembly,low-level-calls,calls-loop,unused-state,arbitrary-send-erc20,arbitrary-send-eth,reentrancy-no-eth",
+  "_detectors_to_exclude_rationale": [
+    "naming-convention: OZ + LayerZero use conventions Slither doesn't recognize; not relevant",
+    "solc-version: locked to ^0.8.24 intentionally; not a finding",
+    "pragma: same as solc-version",
+    "assembly: LayerZero V2 OFT base uses assembly internally; not our code",
+    "low-level-calls: BuybackBurner uses .call by design (swap calldata); reviewed in audit",
+    "calls-loop: PreSaleRound batchDeployVaults intentionally loops; capped + paginated",
+    "unused-state: __gap arrays are intentional UUPS upgrade storage reservation; confirmed false positive",
+    "arbitrary-send-erc20: StabilisationFund.recoverLiquidity is admin-only AND safeTransferFrom requires source approval; double-gated. Slither cannot see ERC20 approval state",
+    "arbitrary-send-eth: BuybackBurner.rescueETH and SRXTreasury.withdrawETH are intentionally admin-only ETH rescue/withdraw functions. Slither does not recognize OZ AccessControl role gating",
+    "reentrancy-no-eth: GuardianModule.pauseAll/emergencyUnpauseAll call admin-registered module targets which are trusted SRX-suite contracts. State writes are timestamps/counters tolerant to call-order anomalies. Trust model documented in MULTISIG_SPEC.md"
+  ],
+
+  "filter_paths": "node_modules|contracts/mocks|contracts/test|test/foundry|test/.+\\.test\\.js",
+  "_filter_paths_rationale": "Skip dependencies, test stubs, mocks, and Foundry test code",
+
+  "exclude_informational": false,
+  "exclude_low":           false,
+  "exclude_medium":        false,
+  "exclude_high":          false,
+  "exclude_optimization":  true,
+
+  "solc_remaps": [
+    "@openzeppelin/contracts=node_modules/@openzeppelin/contracts",
+    "@openzeppelin/contracts-upgradeable=node_modules/@openzeppelin/contracts-upgradeable",
+    "@layerzerolabs/oft-evm=node_modules/@layerzerolabs/oft-evm",
+    "@layerzerolabs/oapp-evm=node_modules/@layerzerolabs/oapp-evm",
+    "@layerzerolabs/lz-evm-protocol-v2=node_modules/@layerzerolabs/lz-evm-protocol-v2",
+    "@layerzerolabs/lz-evm-messagelib-v2=node_modules/@layerzerolabs/lz-evm-messagelib-v2"
+  ],
+
+  "solc_args": "--via-ir --optimize --optimize-runs 200 --evm-version cancun",
+
+  "disable_color": true,
+  "json": "slither-report.json"
+}

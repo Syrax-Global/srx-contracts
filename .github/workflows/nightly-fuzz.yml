@@ -1,0 +1,71 @@
+name: Nightly — Heavy Fuzz Campaign
+
+# Runs an extended Foundry invariant campaign every night.
+# 1024 runs × 100 depth = ~100K randomized calls per invariant.
+# Catches multi-step state corruption that the lighter PR run won't surface.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC daily
+  workflow_dispatch:       # manual trigger
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  invariant-campaign:
+    name: Foundry invariant — heavy profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install forge-std
+        run: mkdir -p lib && git clone https://github.com/foundry-rs/forge-std lib/forge-std
+
+      - name: Run heavy invariant campaign
+        run: forge test --match-path "test/foundry/invariant/*" -vvv
+
+      - name: Upload failure traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: invariant-failure-trace
+          path: |
+            foundry-out/
+            *.log
+
+  # ⛔ THE ECHIDNA JOB IS REMOVED, NOT DISABLED, AND THAT IS DELIBERATE.
+  #
+  # It reported success every night while testing nothing. Four independent
+  # faults, each individually fatal: the config would not parse (bare hex
+  # senders), crytic-compile chose Foundry in a job that never installed it,
+  # the property contract lived outside hardhat's compiled paths, and hevm
+  # defaults to a pre-Cancun fork while this codebase uses mcopy. All four were
+  # masked by `continue-on-error: true` and a trailing `|| true`.
+  #
+  # Worse than the harness: the properties could not fail. admin was hardcoded
+  # to an address the harness did not control while genesis() is admin-gated,
+  # so genesisComplete stayed false and the headline property opened with
+  # `if (!token.genesisComplete()) return true`.
+  #
+  # ⭐ A permanently-green job that tests nothing is worse than no job, because
+  # it stops anyone looking. Everything it claimed to cover is now covered by
+  # the Foundry invariant suite above, which runs, supports Cancun, and can
+  # fail this workflow. If Echidna is reinstated later it must be added with a
+  # job that is allowed to fail, and with at least one property proven able to
+  # fail before it is trusted.

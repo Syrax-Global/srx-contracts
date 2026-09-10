@@ -1,0 +1,70 @@
+# Environment — never commit
+.env
+.env.*
+!.env.example
+
+# Hardhat build artefacts
+artifacts/
+cache/
+typechain-types/
+
+# Foundry build artefacts (lib/ pulled in via `forge install`)
+foundry-out/
+foundry-cache/
+lib/
+broadcast/
+
+# Coverage
+coverage/
+coverage.json
+.solcover.js
+
+# Gas report
+gas-report.txt
+
+# Node
+node_modules/
+
+# Circuit breaker monitor state
+scripts/ops/.cb_monitor_state.json
+
+# Internal business prep — not part of the contract repo (kept as a local working doc)
+docs/LISTING_QUESTIONNAIRE.md
+
+# Role-migration Safe-batch output (per-network, generated)
+migrate_roles.*.json
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.user
+crytic-export/
+
+# Deployment address manifests hold FINAL destination addresses for TGE
+# allocations. Two documents already claimed these were ignored; they were not.
+# The example is deliberately kept.
+deploy/addresses.*.json
+!deploy/addresses.example.json
+
+# ── Confidential / investor material — MUST NOT enter a repo that will be public
+#
+# ⛔ AUDIT_PUBLICATION_PLAN.md schedules this repository to be made PUBLIC on TGE
+#    day. It tracked a "Confidential Token Incentive Side Letter" and a "Token
+#    Allocation Confirmation (Private Schedule)" — investor contract terms — plus
+#    a tokenomics wallet document. Publishing would have disclosed them.
+#
+# ⚠️ Removing the files does NOT remove them from git history. A history purge on
+#    BOTH remotes must precede publication, and must be verified against the HOST
+#    rather than by cloning: a clone only proves reachability, and a dangling
+#    object stays fetchable by SHA until the host garbage-collects.
+Tokenomics & Investor Material/
+*Confidential*.pdf
+*Private Schedule*.pdf

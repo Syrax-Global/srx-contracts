@@ -1,0 +1,59 @@
+# Foundry configuration — coexists with Hardhat
+#
+# Hardhat remains the primary test runner for unit tests, deployments, and
+# integration scripts. Foundry is used specifically for:
+#   - Invariant testing (test/foundry/invariant/)
+#   - Property-based fuzzing
+#   - Differential testing where the Foundry harness is simpler than mocha
+#
+# Run with:
+#   forge test                                # all Foundry tests
+#   forge test --match-contract Invariant     # invariant tests only
+#   forge test -vvv                            # verbose output
+
+[profile.default]
+src             = "contracts"
+out             = "foundry-out"          # separate from Hardhat's artifacts/
+libs            = ["node_modules", "lib"]
+test            = "test/foundry"
+cache_path      = "foundry-cache"        # separate from Hardhat's cache/
+solc_version    = "0.8.24"
+optimizer       = true
+optimizer_runs  = 200
+via_ir          = true
+evm_version     = "cancun"
+
+# Mock and test stub contracts that we DON'T want Foundry to compile as production code
+# (they import test-only OZ helpers that bloat the artifact set unnecessarily)
+no_match_path   = "{contracts/mocks/**,contracts/test/**}"
+
+# Invariant testing parameters — institutional baseline
+[profile.default.invariant]
+runs            = 256                    # number of randomized sequences per invariant
+depth           = 50                     # calls per sequence
+fail_on_revert  = false                  # most contracts revert on bad input — that's correct, not a failure
+call_override   = false
+dictionary_weight = 80                   # bias towards using known-interesting values
+
+# Fuzz testing parameters
+[profile.default.fuzz]
+runs            = 1000                   # 1000 randomized inputs per fuzz test
+seed            = "0x1"                  # deterministic for CI; remove for variety locally
+
+# CI profile — heavier runs for the nightly invariant campaign
+[profile.ci.invariant]
+runs            = 1024
+depth           = 100
+
+[profile.ci.fuzz]
+runs            = 10000
+
+# Etherscan keys — read from env. Same V2 key covers Ethereum + BSC.
+[etherscan]
+sepolia     = { key = "${ETHERSCAN_API_KEY}" }
+bscTestnet  = { key = "${ETHERSCAN_API_KEY}", url = "https://api-testnet.bscscan.com/api" }
+
+# RPC endpoints — for forge script + cast usage
+[rpc_endpoints]
+sepolia      = "${SEPOLIA_RPC_URL}"
+bscTestnet   = "${BSC_TESTNET_RPC_URL}"

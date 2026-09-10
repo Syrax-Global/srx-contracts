@@ -1,0 +1,186 @@
+name: CI — SRX Token
+
+# Runs on every PR and on every push to main / develop.
+# All jobs must pass before a PR can be merged (branch protection enforces this).
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+# Cancel in-progress runs when a PR receives a new push — saves CI minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FOUNDRY_PROFILE: default
+
+jobs:
+  # ── Hardhat unit tests ──────────────────────────────────────────────────────
+  hardhat:
+    name: Hardhat tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile contracts
+        run: npx hardhat compile
+
+      - name: Run unit tests
+        run: npx hardhat test
+
+  # ── Foundry tests (invariants + property fuzz) ─────────────────────────────
+  foundry:
+    name: Foundry tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node deps (for OZ + LZ remappings)
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install forge-std
+        run: mkdir -p lib && git clone https://github.com/foundry-rs/forge-std lib/forge-std
+
+      - name: Verify build
+        run: forge build
+
+      - name: Run Foundry tests (invariant + property fuzz)
+        run: forge test -vv
+
+  # ── Slither static analysis ────────────────────────────────────────────────
+  slither:
+    name: Slither static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.0
+        with:
+          slither-config: slither.config.json
+          fail-on: high
+
+  # ── Solhint linting ────────────────────────────────────────────────────────
+  solhint:
+    name: Solhint lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Run solhint
+        run: npm run lint
+
+  # ── Secret scanning ────────────────────────────────────────────────────────
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified
+
+  # ── Dependency audit ───────────────────────────────────────────────────────
+  npm-audit:
+    name: npm dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  doc-refs:
+    name: Documentation references resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⭐ The first thing an auditor does with a security package is open the
+      #    documents it cites. On 10 Sep 2026 this repo referenced ~20 documents
+      #    that had never been written, nine of them the "Primary doc" for a
+      #    threat-model domain carrying HIGH residual risk. Nothing catches that
+      #    by reading, so a machine does it. Known gaps live in an allow-list
+      #    WITH REASONS, so a gap is a decision on record rather than a silence.
+      - name: Check every referenced file exists
+        run: python3 scripts/ci/check-doc-refs.py
+
+  # ── Gate job — fails if any required job failed ────────────────────────────
+  all-checks:
+    name: All required checks passed
+    runs-on: ubuntu-latest
+    needs: [hardhat, foundry, slither, solhint, secrets, doc-refs]
+    if: always()
+    steps:
+      - name: Verify all jobs succeeded
+        run: |
+          if [[ "${{ needs.hardhat.result }}" != "success" ]] || \
+             [[ "${{ needs.foundry.result }}" != "success" ]] || \
+             [[ "${{ needs.slither.result }}" != "success" ]] || \
+             [[ "${{ needs.solhint.result }}" != "success" ]] || \
+             [[ "${{ needs.secrets.result }}" != "success" ]] || \
+             [[ "${{ needs.doc-refs.result }}" != "success" ]]; then
+            echo "One or more required jobs failed"
+            exit 1
+          fi
+          echo "All required jobs succeeded"

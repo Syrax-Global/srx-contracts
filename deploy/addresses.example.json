@@ -1,0 +1,26 @@
+{
+  "_README": "Expected-destination manifest for TGE (Round 6 / D2 fix). Copy to addresses.<network>.json (e.g. addresses.ethereum.json), fill EVERY field with the FINAL, TRIPLE-CHECKED checksummed address, and commit it to a SEPARATE secure record before TGE. scripts/verify/verify_tge_targets.js diffs the live .env/00_config values against this file and ABORTS 06_execute_tge.js on ANY mismatch. This is the last line of defence against a mis-set env var sending billions of SRX to a wrong, irreversible address. addresses.<network>.json is gitignored — keep the authoritative copy in your deployment runbook / Safe records.",
+  "network": "ethereum",
+  "chainId": 1,
+  "roles": {
+    "admin": "0x0000000000000000000000000000000000000000",
+    "timelock": "0x0000000000000000000000000000000000000000",
+    "governor": "0x0000000000000000000000000000000000000000",
+    "guardianModule": "0x0000000000000000000000000000000000000000",
+    "guardianMultisig": "0x0000000000000000000000000000000000000000",
+    "deployerMultisig": "0x0000000000000000000000000000000000000000"
+  },
+  "tgeAllocations": {
+    "_note": "Destinations MUST match 06_execute_tge.js finalAllocations exactly. Vaults are deployed contracts; liquidity/staking/treasury/strategic are the contracts or Safe wallets that receive direct allocations.",
+    "Founders":          { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "1000000000", "isVestingVault": true },
+    "CoreTeam":          { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "600000000",  "isVestingVault": true },
+    "SeedInvestors":     { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "400000000",  "isVestingVault": true },
+    "Presale":           { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "1400000000", "isVestingVault": true },
+    "EcosystemDAO":      { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "1300000000", "isVestingVault": true },
+    "Liquidity":         { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "1200000000", "isVestingVault": false },
+    "Staking":           { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "1700000000", "isVestingVault": false },
+    "Treasury":          { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "900000000",  "isVestingVault": false },
+    "StabilisationFund": { "destination": "0x0000000000000000000000000000000000000000", "amountSRX": "1500000000", "isVestingVault": false }
+  },
+  "_invariant": "Sum of amountSRX MUST equal 10000000000 (MAX_SUPPLY). verify_tge_targets.js asserts this."
+}

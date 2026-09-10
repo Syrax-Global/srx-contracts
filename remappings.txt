@@ -1,0 +1,8 @@
+@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/
+@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/
+@layerzerolabs/oft-evm/=node_modules/@layerzerolabs/oft-evm/
+@layerzerolabs/oapp-evm/=node_modules/@layerzerolabs/oapp-evm/
+@layerzerolabs/lz-evm-protocol-v2/=node_modules/@layerzerolabs/lz-evm-protocol-v2/
+@layerzerolabs/lz-evm-messagelib-v2/=node_modules/@layerzerolabs/lz-evm-messagelib-v2/
+forge-std/=lib/forge-std/src/
+solidity-bytes-utils/=node_modules/solidity-bytes-utils/

@@ -1,0 +1,43 @@
+# Known-missing references, each with a reason.
+#
+# ⛔ This is a record of gaps, not a way to silence the check. Adding a line is a
+#    decision someone made; every entry should be removable by writing the file.
+#
+# Reviewed 10 Sep 2026.
+
+# ── Planned threat-model companions. THREAT_MODEL.md states plainly that these
+#    are planned and NOT drafted, and names them precisely so the gap is visible.
+#    Several cover domains carrying HIGH residual risk — write these before the
+#    external audit rather than after.
+ECONOMIC_THREAT_MODEL.md
+BRIDGE_SECURITY_MODEL.md
+GOVERNANCE_THREAT_MODEL.md
+KEY_MANAGEMENT_CEREMONY.md
+ORACLE_CONFIG.md
+SUPPLY_CHAIN_SECURITY.md
+REGULATORY_THREAT_MODEL.md
+LAUNCH_DAY_PLAYBOOK.md
+INCIDENT_WARGAME.md
+
+# ── Repo-governance documents named by the hardening plan as future work.
+BRANCH_PROTECTION.md
+COMMIT_SIGNING.md
+RELEASE_PROCESS.md
+REPO_GOVERNANCE.md
+
+# ── Artefacts that only exist after the external audit runs.
+audits/halborn-2026-Q3.pdf
+
+# ── Internal per-round reports, deliberately not in this repository. Both
+#    docs/audits/README.md and AUDIT_SCOPE.md now say so explicitly.
+findings-2026-05-23.md
+findings-2026-05-23-round2.md
+findings-2026-05-23-round3.md
+findings-2026-05-29.md
+findings-2026-06-21-round6.md
+
+# ── Not yet written.
+CHANGELOG.md
+LISTING_QUESTIONNAIRE.md
+references/contract-checks.md
+frame.sh
