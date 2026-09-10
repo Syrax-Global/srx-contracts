@@ -53,7 +53,9 @@ contract PreSaleRoundFuzz is Test {
             address(0),                // btc feed disabled
             ADMIN,
             HARD_CAP,
-            SRX_PRICE
+            SRX_PRICE,
+            false,                     // flatBonusEnabled: these properties test the tier ladder
+            0                          // flatBonusBps
         );
 
         // Fund presale

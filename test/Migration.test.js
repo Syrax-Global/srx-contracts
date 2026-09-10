@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 // ⭐ migrationId is chain-scoped as of 9 Sep 2026: the chain id occupies the high
 //    128 bits and the per-chain counter the low 128. Before this, every chain
@@ -141,13 +141,19 @@ describe("ZkSyncMigrator", function () {
       const { migrator, admin, user1 } = await loadFixture(deployFixture);
       await migrator.connect(admin).enableMigration();
 
+      // Pin the block time instead of predicting it. "latest + 1" was only true
+      // when the tx mined within the same wall-clock second; on a slow CI runner it
+      // mined a second later and this test failed intermittently (10 Sep 2026).
+      const mintedAt = (await time.latest()) + 60;
+      await time.setNextBlockTimestamp(mintedAt);
+
       await expect(migrator.connect(user1).migrate(MIGRATE_AMOUNT))
         .to.emit(migrator, "MigrationRequest")
         .withArgs(
           await migId(1),
           user1.address,
           MIGRATE_AMOUNT,
-          await ethers.provider.getBlock("latest").then(b => b.timestamp + 1),
+          mintedAt,
           BigInt((await ethers.provider.getNetwork()).chainId),
         );
     });

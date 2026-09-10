@@ -129,7 +129,9 @@ describe("PreSaleRound", function () {
       await btcFeed.getAddress(),
       admin.address,
       HARD_CAP,
-      SRX_PRICE_8DEC
+      SRX_PRICE_8DEC,
+      false, // flatBonusEnabled — tier-ladder mode
+      0
     );
     await round.waitForDeployment();
 
@@ -205,7 +207,9 @@ describe("PreSaleRound", function () {
           await btcFeed.getAddress(),
           admin.address,
           HARD_CAP,
-          SRX_PRICE_8DEC
+          SRX_PRICE_8DEC,
+          false, // flatBonusEnabled — tier-ladder mode
+          0
         )
       ).to.be.revertedWithCustomError(round, "ZeroAddress");
     });
@@ -223,7 +227,9 @@ describe("PreSaleRound", function () {
           await btcFeed.getAddress(),
           admin.address,
           HARD_CAP,
-          0n
+          0n,
+          false, // flatBonusEnabled — tier-ladder mode
+          0
         )
       ).to.be.revertedWithCustomError(round, "ZeroAmount");
     });
@@ -628,7 +634,9 @@ describe("PreSaleRound", function () {
         await btcFeed.getAddress(),
         admin.address,
         HARD_CAP,
-        SRX_PRICE_8DEC
+        SRX_PRICE_8DEC,
+        false, // flatBonusEnabled — tier-ladder mode
+        0
       );
       await expect(
         roundNoEth.connect(investor1).invest({ value: ethers.parseEther("1") })
@@ -731,7 +739,9 @@ describe("PreSaleRound", function () {
         await btcFeed.getAddress(),
         admin.address,
         HARD_CAP,
-        SRX_PRICE_8DEC
+        SRX_PRICE_8DEC,
+        false, // flatBonusEnabled — tier-ladder mode
+        0
       );
       await expect(
         roundNoUsdc.connect(investor1).investWithUSDC(1_000_000n)
@@ -816,7 +826,9 @@ describe("PreSaleRound", function () {
         await btcFeed.getAddress(),
         admin.address,
         HARD_CAP,
-        SRX_PRICE_8DEC
+        SRX_PRICE_8DEC,
+        false, // flatBonusEnabled — tier-ladder mode
+        0
       );
       await expect(
         roundNoUsdt.connect(investor1).investWithUSDT(1_000_000n)
@@ -913,7 +925,9 @@ describe("PreSaleRound", function () {
         await btcFeed.getAddress(),
         admin.address,
         HARD_CAP,
-        SRX_PRICE_8DEC
+        SRX_PRICE_8DEC,
+        false, // flatBonusEnabled — tier-ladder mode
+        0
       );
       await expect(
         roundNoWbtc.connect(investor1).investWithWBTC(100_000_000n)

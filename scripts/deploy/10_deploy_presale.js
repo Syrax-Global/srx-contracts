@@ -21,8 +21,14 @@ const { LZ_ENDPOINTS, WALLETS } = require("./00_config");
 // $0.0125 × 10^8 = 1,250,000
 const SRX_PRICE_USD_8DEC = 1_250_000n;
 
-// ── Hard cap ───────────────────────────────────────────────────────────────────
-const HARD_CAP_SRX = ethers.parseUnits("400000000", 18); // 400M SRX (seed allocation)
+// ── Genesis round terms (Jared, 10 Sep 2026) ───────────────────────────────────
+// The 400M seed pool funds a 100M SRX cornerstone grant AND this round, so the
+// round itself is capped at 300M. Every participant gets one flat +50% founding
+// bonus: at $0.0125 that is 120 SRX per $1, so the cap is exactly a $2.5M round.
+// Both are fixed at deployment — the contract has no function that changes them.
+const HARD_CAP_SRX       = ethers.parseUnits("300000000", 18); // 300M SRX
+const FLAT_BONUS_ENABLED = true;
+const FLAT_BONUS_BPS     = 5_000n;                             // +50%
 
 // ── Token addresses ────────────────────────────────────────────────────────────
 const STABLECOINS = {
@@ -100,7 +106,8 @@ async function main() {
   const admin = WALLETS.admin;
   console.log(`Admin:     ${admin}`);
   console.log(`SRX Price: $0.0125 (${SRX_PRICE_USD_8DEC} × 10^-8 USD)`);
-  console.log(`Hard Cap:  ${ethers.formatUnits(HARD_CAP_SRX, 18)} SRX\n`);
+  console.log(`Hard Cap:  ${ethers.formatUnits(HARD_CAP_SRX, 18)} SRX`);
+  console.log(`Bonus:     ${FLAT_BONUS_ENABLED ? `flat +${Number(FLAT_BONUS_BPS) / 100}% for every participant` : "10–20% tier ladder"}\n`);
 
   // ── Step 1: Deploy or load SRXToken ────────────────────────────────────────
 
@@ -150,7 +157,9 @@ async function main() {
     btcUsd,
     admin,
     HARD_CAP_SRX,
-    SRX_PRICE_USD_8DEC
+    SRX_PRICE_USD_8DEC,
+    FLAT_BONUS_ENABLED,
+    FLAT_BONUS_BPS
   );
   await presale.waitForDeployment();
   const presaleAddress = await presale.getAddress();
@@ -180,7 +189,7 @@ async function main() {
   3. Add investors or open for on-chain investment:
        Off-chain: presaleRound.addInvestor(address, usdAmount8Dec)
                   e.g. $100,000 wire = addInvestor(addr, 10_000_000_000_000)
-                  Contract calculates SRX + tier bonus automatically.
+                  Contract calculates SRX + the flat +50% bonus automatically.
        On-chain:  investors call invest() / investWithUSDC() / investWithUSDT() / investWithWBTC()
 
   4. Deploy vaults when ready:

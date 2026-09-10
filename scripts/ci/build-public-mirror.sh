@@ -94,8 +94,22 @@ PUBLISH=(
 #                                    if wanted, but they are operational state
 
 echo "Building public mirror -> $OUT"
+
+# ⭐ PRESERVE .git IF THE MIRROR ALREADY EXISTS. The first version rm -rf'd the
+#    output and re-ran `git init`, which produces a brand-new root commit every
+#    time — so every update would have been a FORCE-PUSH over the published
+#    repository, destroying its history and breaking every clone. A mirror is a
+#    thing you update, not a thing you re-create.
+EXISTING_GIT=""
+if [ -d "$OUT/.git" ]; then
+  EXISTING_GIT="$(mktemp -d)/git"
+  mv "$OUT/.git" "$EXISTING_GIT"
+  echo "  (updating an existing mirror — history preserved)"
+fi
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
+[ -n "$EXISTING_GIT" ] && mv "$EXISTING_GIT" "$OUT/.git"
 
 for path in "${PUBLISH[@]}"; do
   if [ -e "$SRC/$path" ]; then
@@ -166,23 +180,37 @@ fi
 
 [ "$fail" -eq 0 ] || { echo; echo "⛔ VERIFICATION FAILED — do not publish this tree."; exit 1; }
 
-# ── One clean commit, no inherited history ───────────────────────────────────
+# ── Commit ───────────────────────────────────────────────────────────────────
 cd "$OUT"
-git init -q
-git add -A
-git -c user.name="Syrax" -c user.email="security@syrax.global" \
-    commit -q -m "SRX token — public release
+
+SRC_SHA="$(git -C "$SRC" rev-parse --short HEAD)"
+
+if [ ! -d .git ]; then
+  git init -q
+  MSG="SRX token — public release
 
 Smart contracts, test suite and security documentation for the SRX token.
 
-This repository is built from an allow-list of published paths. It has no
-inherited history: internal working documents, commercial material and investor
-documentation were never part of it."
+Built from an allow-list of published paths. No inherited history: internal
+working documents, commercial material and investor documentation were never
+part of this repository."
+else
+  MSG="sync: mirror of srx-token@${SRC_SHA}
+
+Rebuilt from the allow-list in scripts/ci/build-public-mirror.sh."
+fi
+
+git add -A
+if git diff --cached --quiet; then
+  echo
+  echo "✓ Mirror already matches srx-token@${SRC_SHA} — nothing to commit."
+  exit 0
+fi
+
+git -c user.name="Syrax" -c user.email="security@syrax.global" commit -q -m "$MSG"
 
 echo
-echo "✓ Mirror built at $OUT with a single commit and no inherited history."
+echo "✓ Mirror at $OUT is now srx-token@${SRC_SHA} ($(git rev-list --count HEAD) commit(s))."
 echo
 echo "⛔ NOT PUSHED. Publishing is a separate, deliberate act:"
-echo "     cd $OUT"
-echo "     git remote add origin <url-of-the-new-public-repo>"
-echo "     git push -u origin main"
+echo "     cd $OUT && git push origin main"

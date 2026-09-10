@@ -76,7 +76,10 @@ contract SRXTokenEchidna {
     function doTransfer(uint256 amount, bool toActor1) public {
         uint256 bal = token.balanceOf(address(this));
         if (bal == 0) return;
-        token.transfer(toActor1 ? ACTOR_1 : ACTOR_2, amount % (bal + 1));
+        // Checked, so a transfer that reported failure without reverting could not
+        // pass silently. OZ ERC20 reverts rather than returning false, so this does
+        // not change what the fuzzer explores.
+        require(token.transfer(toActor1 ? ACTOR_1 : ACTOR_2, amount % (bal + 1)), "transfer returned false");
     }
 
     function doApprove(uint256 amount, bool toActor1) public {

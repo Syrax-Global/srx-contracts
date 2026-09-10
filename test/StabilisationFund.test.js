@@ -506,9 +506,13 @@ describe("StabilisationFund", function () {
 
     it("emits StressEventTriggered with correct eventId", async function () {
       const { ssf, oracle, SEED } = await loadFixture(deployFixture);
+      // Pin the block time rather than predict it — "latest + 1" fails whenever
+      // the tx mines a wall-clock second later, which slow CI runners do.
+      const at = (await time.latest()) + 60;
+      await time.setNextBlockTimestamp(at);
       await expect(ssf.connect(oracle).triggerStressEvent())
         .to.emit(ssf, "StressEventTriggered")
-        .withArgs(1n, oracle.address, SEED, await time.latest() + 1);
+        .withArgs(1n, oracle.address, SEED, at);
     });
 
     it("reverts StressAlreadyActive if stress is already active", async function () {
@@ -544,9 +548,11 @@ describe("StabilisationFund", function () {
     it("emits StressEventResolved", async function () {
       const { ssf, oracle, timelock } = await loadFixture(deployFixture);
       await ssf.connect(oracle).triggerStressEvent();
+      const at = (await time.latest()) + 60; // pinned, not predicted — see above
+      await time.setNextBlockTimestamp(at);
       await expect(ssf.connect(timelock).resolveStressEvent())
         .to.emit(ssf, "StressEventResolved")
-        .withArgs(1n, 0n, 0n, await time.latest() + 1);
+        .withArgs(1n, 0n, 0n, at);
     });
 
     it("reverts if stress is not active", async function () {

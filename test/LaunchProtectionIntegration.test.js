@@ -239,7 +239,9 @@ describe("Launch Protection × Cross-Contract Integration", function () {
         ethers.ZeroAddress,            // btc feed disabled
         admin.address,
         HARD_CAP,
-        SRX_PRICE
+        SRX_PRICE,
+        false, // flatBonusEnabled — tier-ladder mode
+        0
       );
       await presale.waitForDeployment();
 
@@ -357,7 +359,9 @@ describe("Launch Protection × Cross-Contract Integration", function () {
         ethers.ZeroAddress,
         admin.address,
         ethers.parseUnits("400000000", 18),
-        1_250_000n
+        1_250_000n,
+        false, // flatBonusEnabled — tier-ladder mode
+        0
       );
       await presale.waitForDeployment();
 

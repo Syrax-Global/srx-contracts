@@ -18,7 +18,7 @@ import { VestingVault } from "../vesting/VestingVault.sol";
  *   USDT       — investor calls investWithUSDT(). Same price as USDC.
  *   WBTC       — investor calls investWithWBTC(). Price fetched live from Chainlink BTC/USD.
  *
- * Participation Tier Structure (flat — applies to entire cumulative investment):
+ * Participation Tier Structure (ladder mode — applies to the entire cumulative investment):
  *
  *   Tier              │ Cumulative USD    │ Bonus
  *   ──────────────────┼───────────────────┼──────
@@ -32,6 +32,16 @@ import { VestingVault } from "../vesting/VestingVault.sol";
  * of each investment. If a top-up crosses a tier boundary, the entire allocation
  * is recalculated at the new (higher) tier rate — the investor is retroactively
  * upgraded. Bonus SRX vests under the same terms as the principal.
+ *
+ * Flat bonus mode (the Genesis round):
+ *   A round can instead be deployed with ONE bonus rate for every participant,
+ *   whatever their size — e.g. +50% for the Genesis cohort. The mode and the rate
+ *   are constructor immutables. There is deliberately no setter: changing a bonus
+ *   mid-round reprices every existing position retroactively, the same failure
+ *   R5-02 closed for the price, and on mainnet a post-deploy admin step is one a
+ *   multisig can forget — leaving the round silently paying the ladder instead.
+ *   In flat mode the ladder above is never consulted and every tier view reports
+ *   "Flat".
  *
  * Pricing model:
  *   A single value — srxPriceUsd8Dec — stores the SRX price in USD with 8 decimal
@@ -107,6 +117,10 @@ contract PreSaleRound is ReentrancyGuard {
     uint256 public constant PRIORITY_BONUS_BPS      = 1_750; // +17.5%
     uint256 public constant INSTITUTIONAL_BONUS_BPS = 2_000; // +20%
 
+    /// @notice Ceiling for flat mode: +100%. Bounds a deploy-time typo — 50_000
+    ///         entered for "50%" would otherwise ship a +500% round.
+    uint256 public constant MAX_FLAT_BONUS_BPS = 10_000;
+
     // ── Immutables ─────────────────────────────────────────────────────────────
 
     IERC20  public immutable srxToken;
@@ -114,6 +128,9 @@ contract PreSaleRound is ReentrancyGuard {
     IERC20  public immutable usdt;       // 6-decimal; address(0) = disabled
     IERC20  public immutable wbtc;       // 8-decimal; address(0) = disabled
     address public immutable admin;
+
+    bool    public immutable flatBonusEnabled; // true = one rate for everyone (see header)
+    uint256 public immutable flatBonusBps;     // that rate; 0 in ladder mode
 
     IAggregatorV3 public immutable ethUsdFeed; // address(0) = ETH disabled
     IAggregatorV3 public immutable btcUsdFeed; // address(0) = WBTC disabled
@@ -247,6 +264,7 @@ contract PreSaleRound is ReentrancyGuard {
     error OraclePriceOutOfBounds(uint256 price, uint256 min, uint256 max);
     error InvalidPriceBounds();
     error PriceLockedAfterFirstInvestor(); // R5-02: price immutable once any investor exists
+    error InvalidFlatBonus();              // flat rate above the ceiling, or a rate given in ladder mode
 
     // ── Modifiers ──────────────────────────────────────────────────────────────
 
@@ -272,6 +290,9 @@ contract PreSaleRound is ReentrancyGuard {
      * @param _admin           Admin address (Gnosis Safe in production).
      * @param _hardCapSRX      Maximum SRX (18-dec) allocatable in this round.
      * @param _srxPriceUsd8Dec SRX price in 8-decimal USD (e.g. 1_250_000 for $0.0125).
+     * @param _flatBonusEnabled true = every participant gets `_flatBonusBps`; false = tier ladder.
+     * @param _flatBonusBps    Flat bonus in bps (5_000 = +50%), at most MAX_FLAT_BONUS_BPS.
+     *                         Must be 0 in ladder mode, so a rate cannot be passed and ignored.
      */
     constructor(
         address _srxToken,
@@ -282,12 +303,16 @@ contract PreSaleRound is ReentrancyGuard {
         address _btcUsdFeed,
         address _admin,
         uint256 _hardCapSRX,
-        uint256 _srxPriceUsd8Dec
+        uint256 _srxPriceUsd8Dec,
+        bool    _flatBonusEnabled,
+        uint256 _flatBonusBps
     ) {
         if (_srxToken == address(0)) revert ZeroAddress();
         if (_admin    == address(0)) revert ZeroAddress();
         if (_hardCapSRX == 0)        revert ZeroAmount();
         if (_srxPriceUsd8Dec == 0)   revert ZeroAmount();
+        if (_flatBonusEnabled ? _flatBonusBps > MAX_FLAT_BONUS_BPS : _flatBonusBps != 0)
+            revert InvalidFlatBonus();
 
         srxToken        = IERC20(_srxToken);
         usdc            = IERC20(_usdc);
@@ -299,6 +324,8 @@ contract PreSaleRound is ReentrancyGuard {
         hardCapSRX      = _hardCapSRX;
         srxPriceUsd8Dec = _srxPriceUsd8Dec;
         maxStaleness    = DEFAULT_MAX_STALENESS;
+        flatBonusEnabled = _flatBonusEnabled;
+        flatBonusBps     = _flatBonusBps;
     }
 
     // ── Off-chain investor management ──────────────────────────────────────────
@@ -807,7 +834,7 @@ contract PreSaleRound is ReentrancyGuard {
     ///         cumulative USD amount (8-decimal). Useful for front-end display.
     function quoteTier(uint256 cumulativeUsd8Dec)
         external
-        pure
+        view
         returns (string memory tierName, uint256 bonusBps)
     {
         bonusBps = _getTierBps(cumulativeUsd8Dec);
@@ -891,7 +918,8 @@ contract PreSaleRound is ReentrancyGuard {
     /**
      * @dev Returns the bonus BPS for a given cumulative USD (8-decimal).
      */
-    function _getTierBps(uint256 cumulativeUsd8Dec) internal pure returns (uint256) {
+    function _getTierBps(uint256 cumulativeUsd8Dec) internal view returns (uint256) {
+        if (flatBonusEnabled) return flatBonusBps;
         if (cumulativeUsd8Dec >= TIER_INSTITUTIONAL_MIN) return INSTITUTIONAL_BONUS_BPS;
         if (cumulativeUsd8Dec >= TIER_PRIORITY_MIN)      return PRIORITY_BONUS_BPS;
         if (cumulativeUsd8Dec >= TIER_ENHANCED_MIN)      return ENHANCED_BONUS_BPS;
@@ -902,7 +930,8 @@ contract PreSaleRound is ReentrancyGuard {
     /**
      * @dev Returns the tier name string for a given cumulative USD (8-decimal).
      */
-    function _tierName(uint256 cumulativeUsd8Dec) internal pure returns (string memory) {
+    function _tierName(uint256 cumulativeUsd8Dec) internal view returns (string memory) {
+        if (flatBonusEnabled) return "Flat";
         if (cumulativeUsd8Dec >= TIER_INSTITUTIONAL_MIN) return "Institutional";
         if (cumulativeUsd8Dec >= TIER_PRIORITY_MIN)      return "Priority";
         if (cumulativeUsd8Dec >= TIER_ENHANCED_MIN)      return "Enhanced";
@@ -916,9 +945,9 @@ contract PreSaleRound is ReentrancyGuard {
      *      totalSRX = cumulativeUsd8Dec × 1e18 × (10000 + bonusBps) / srxPriceUsd8Dec / 10000
      *
      *      Overflow analysis (worst case):
-     *        cumulativeUsd8Dec max = $400,000 × 1e8 = 4e13
-     *        (10000 + 2000) = 12000
-     *        4e13 × 1e18 × 12000 = 4.8e35 — well within uint256 (max ~1.15e77)
+     *        largest factor = 10000 + MAX_FLAT_BONUS_BPS = 20000
+     *        even $1B cumulative = 1e17 (8-dec): 1e17 × 1e18 × 20000 = 2e39
+     *        — far within uint256 (max ~1.15e77)
      */
     function _computeTotalSRXWithBonus(uint256 cumulativeUsd8Dec) internal view returns (uint256) {
         uint256 bonusBps = _getTierBps(cumulativeUsd8Dec);
@@ -938,6 +967,13 @@ contract PreSaleRound is ReentrancyGuard {
      *      so a tier is never inflated).
      */
     function _usdFromSrx(uint256 srxAmount) internal view returns (uint256) {
+        // Flat mode is one linear map, so the inversion is exact. Without this branch
+        // the ladder inversion below would record a +50% investor as having paid about
+        // 36% more than they did ($10,000 recorded as ~$13,636).
+        if (flatBonusEnabled) {
+            return srxAmount * srxPriceUsd8Dec * 10_000 / (1e18 * (10_000 + flatBonusBps));
+        }
+
         uint256[5] memory mins = [
             uint256(0),
             TIER_STANDARD_MIN,

@@ -15,8 +15,8 @@
     "reentrancy-no-eth: GuardianModule.pauseAll/emergencyUnpauseAll call admin-registered module targets which are trusted SRX-suite contracts. State writes are timestamps/counters tolerant to call-order anomalies. Trust model documented in MULTISIG_SPEC.md"
   ],
 
-  "filter_paths": "node_modules|contracts/mocks|contracts/test|test/foundry|test/.+\\.test\\.js",
-  "_filter_paths_rationale": "Skip dependencies, test stubs, mocks, and Foundry test code",
+  "filter_paths": "node_modules|contracts/mocks|contracts/test|contracts/echidna|test/foundry|test/.+\\.test\\.js",
+  "_filter_paths_rationale": "Skip dependencies, test stubs, mocks, Foundry test code and the Echidna harness. contracts/echidna is test code by SECURITY.md's own definition; it sits under contracts/ only so Hardhat compiles it, and its unchecked-transfer finding failed CI on every push from 10 Sep 2026 while no deployable contract was affected. The finding itself was also fixed in the harness.",
 
   "exclude_informational": false,
   "exclude_low":           false,
