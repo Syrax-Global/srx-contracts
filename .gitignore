@@ -9,9 +9,11 @@ cache/
 typechain-types/
 
 # Foundry build artefacts (lib/ pulled in via `forge install`)
+# ⚠️ Anchored to the repo root: an unanchored "lib/" also ignored
+# scripts/deploy/lib/, so the TGE destination controls would never have been committed.
 foundry-out/
 foundry-cache/
-lib/
+/lib/
 broadcast/
 
 # Coverage

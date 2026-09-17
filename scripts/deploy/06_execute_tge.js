@@ -24,16 +24,33 @@
  *  [ ] Staking contract deployed (STAKING_<NETWORK> set in .env)
  *  [ ] SRXToken genesisComplete == false
  *  [ ] TGEDistributor distributed == false
- *  [ ] Allocation sum verified == 10,000,000,000 SRX
- *  [ ] All wallet addresses triple-checked against tokenomics doc
- *  [ ] All vesting vault addresses set in .env
+ *  [ ] deploy/addresses.<network>.json written from the signed-off records
+ *      (every destination, every vault beneficiary, every role) — the script
+ *      REFUSES to run without it on any network other than hardhat/localhost
  *  [ ] Admin wallet has sufficient ETH for gas
+ *
+ * ⭐ The destination checks are no longer a separate command to remember: this
+ *    script runs them itself (scripts/deploy/lib/tge_targets.js) before any
+ *    transaction, stops on any failure, and then sends EXACTLY the list it
+ *    checked. Allocation sum, destinations, manifest match, role holders, and each
+ *    vault's token, beneficiary and schedule are all covered there.
  *
  * Run: npx hardhat run scripts/deploy/06_execute_tge.js --network sepolia
  */
 const { ethers, network } = require("hardhat");
 const readline = require("readline");
-const { ALLOCATIONS, WALLETS, VESTING } = require("./00_config");
+const { ALLOCATIONS } = require("./00_config");
+const { runTgeTargetChecks } = require("./lib/tge_targets");
+
+// Only the getters the destination controls read. Kept inline so the check does
+// not depend on compiled artifacts matching the deployed vault.
+const VAULT_ABI = [
+  "function token() view returns (address)",
+  "function beneficiary() view returns (address)",
+  "function cliffDuration() view returns (uint256)",
+  "function vestingDuration() view returns (uint256)",
+  "function tgeUnlockBps() view returns (uint256)",
+];
 
 function env(key) {
   const val = process.env[key];
@@ -64,25 +81,47 @@ async function main() {
 
   const srxTokenAddr  = env(`SRX_TOKEN_${NET}`);
   const tgeAddr       = env(`TGE_DISTRIBUTOR_${NET}`);
-  const stakingAddr   = process.env[`STAKING_${NET}`];
-  const treasuryAddr  = env(`TREASURY_${NET}`);
-  const ssfAddr       = env(`STABILISATION_FUND_${NET}`);
-
-  // Vesting vault addresses — needed for step 3 (triggerTGE)
-  const vaultAddresses = {
-    founders:  env(`VESTING_FOUNDERS_${NET}`),
-    coreTeam:  env(`VESTING_CORE_TEAM_${NET}`),
-    seed:      env(`VESTING_SEED_${NET}`),
-    presale:   env(`VESTING_PRESALE_${NET}`),
-    ecosystem: env(`VESTING_ECOSYSTEM_${NET}`),
-  };
-
   const token = await ethers.getContractAt("SRXToken", srxTokenAddr);
   const tge   = await ethers.getContractAt("TGEDistributor", tgeAddr);
 
+  // ── Destination controls — BEFORE anything else, and fatal ───────────────
+  //
+  // ⛔ This used to be a separate script (verify_tge_targets.js) that nothing
+  //    here called. It is now the first thing that runs, and finalAllocations
+  //    below IS the list it checked.
+
+  console.log("--- Destination controls ---");
+  const { chainId } = await ethers.provider.getNetwork();
+  const gate = await runTgeTargetChecks({
+    networkName: network.name,
+    chainId,
+    provider: ethers.provider,
+    vaultAt: (addr) => new ethers.Contract(addr, VAULT_ABI, ethers.provider),
+    tokenAddress: srxTokenAddr,
+  });
+  if (gate.skipped) {
+    console.warn(`⚠️  No manifest at ${gate.manifestPath} — allowed only on ${network.name}.`);
+  }
+  if (gate.failures.length > 0) {
+    for (const f of gate.failures) console.error(`❌ ${f}`);
+    throw new Error(`${gate.failures.length} destination check(s) failed — TGE NOT executed. Nothing was sent.`);
+  }
+  const finalAllocations = gate.allocations;
+  for (const a of finalAllocations) {
+    console.log(`✅ ${a.label.padEnd(18)} ${a.destination}  ${ethers.formatUnits(a.amount, 18)} SRX`);
+  }
+  const byLabel     = Object.fromEntries(finalAllocations.map((a) => [a.label, a.destination]));
+  const stakingAddr = byLabel.Staking;
+  const ssfAddr     = byLabel.StabilisationFund;
+
+  // Vesting vault addresses — needed for step 3 (triggerTGE)
+  const vaultAddresses = Object.fromEntries(
+    finalAllocations.filter((a) => a.isVestingVault).map((a) => [a.label, a.destination])
+  );
+
   // ── Pre-flight checks ────────────────────────────────────────────────────
 
-  console.log("--- Pre-flight checks ---");
+  console.log("\n--- Pre-flight checks ---");
 
   if (await token.genesisComplete()) throw new Error("Genesis already complete. Aborting.");
   console.log("✅ Genesis not yet executed");
@@ -124,22 +163,10 @@ async function main() {
   //
   // TGEDistributor.setAllocations() is idempotent before distribution.
   // We call it here (just before genesis) to ensure the final allocation
-  // table is correct regardless of what was set in Step 3. The strategic
-  // reserve destination is the StabilisationFund proxy, not a raw wallet.
+  // table is correct regardless of what was set in Step 3. finalAllocations is
+  // the list the destination controls above checked — not a second copy of it.
 
   console.log(`\n[0/4] Configuring TGEDistributor allocations (strategic → SSF)...`);
-
-  const finalAllocations = [
-    { destination: vaultAddresses.founders,  amount: ALLOCATIONS.founders,      isVestingVault: true,  label: "Founders"    },
-    { destination: vaultAddresses.coreTeam,  amount: ALLOCATIONS.coreTeam,      isVestingVault: true,  label: "CoreTeam"    },
-    { destination: vaultAddresses.seed,      amount: ALLOCATIONS.seedInvestors, isVestingVault: true,  label: "SeedInvestors" },
-    { destination: vaultAddresses.presale,   amount: ALLOCATIONS.presale,       isVestingVault: true,  label: "Presale"     },
-    { destination: vaultAddresses.ecosystem, amount: ALLOCATIONS.ecosystem,     isVestingVault: true,  label: "EcosystemDAO" },
-    { destination: WALLETS.liquidity,        amount: ALLOCATIONS.liquidity,     isVestingVault: false, label: "Liquidity"   },
-    { destination: stakingAddr || WALLETS.staking, amount: ALLOCATIONS.staking, isVestingVault: false, label: "Staking"     },
-    { destination: treasuryAddr,             amount: ALLOCATIONS.treasury,      isVestingVault: false, label: "Treasury"    },
-    { destination: ssfAddr,                  amount: ALLOCATIONS.strategic,     isVestingVault: false, label: "StabilisationFund" },
-  ];
 
   const allocTx = await tge.setAllocations(finalAllocations);
   await allocTx.wait();
@@ -197,10 +224,9 @@ async function main() {
 
   console.log(`\n[4/4] Registering staking allocation as ecosystem incentive pool...`);
 
-  if (!stakingAddr) {
-    console.warn(`  ⚠️  STAKING_${NET} not set — skipping notifyRewardAmount.`);
-    console.warn(`      Run manually: staking.notifyRewardAmount(${ethers.formatUnits(ALLOCATIONS.staking, 18)} SRX)`);
-  } else {
+  // STAKING_<NET> is required by the destination controls, so there is no
+  // "staking address unset" branch any more.
+  {
     const staking     = await ethers.getContractAt("SRXStaking", stakingAddr);
     const stakingBal  = await token.balanceOf(stakingAddr);
     console.log(`  Staking contract balance: ${ethers.formatUnits(stakingBal, 18)} SRX`);

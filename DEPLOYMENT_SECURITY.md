@@ -8,7 +8,7 @@
 
 | # | Threat | Impact | Mitigation |
 |---|--------|--------|------------|
-| D2-T1 | TGE sends supply to a wrong address (mis-set `.env`/`00_config` value) | 9–17% of supply lost irreversibly | `verify_tge_targets.js` + manifest (below) |
+| D2-T1 | TGE sends supply to a wrong address (mis-set `.env`/`00_config` value) | 9–17% of supply lost irreversibly | Built into `06_execute_tge.js` (`scripts/deploy/lib/tge_targets.js`) + manifest (below) |
 | D2-T2 | Deployer key compromise (single hot EOA key in `.env`) | Total launch control: genesis, all initial roles | Hardware-wallet signing (below) |
 | D2-T3 | Genesis is multi-tx; reorg/interruption between steps | 10B SRX stranded in TGEDistributor mid-sequence | Recovery procedure (below) |
 | D2-T4 | Wrong constructor args (LZ endpoint / oracle feed per chain) | Bridge or presale wired to a wrong/hostile contract | Per-chain arg manifest + verification |
@@ -20,26 +20,35 @@
 ## D2-1 — Destination allowlist gate (closes D2-T1)
 
 `06_execute_tge.js` distributes 10B SRX to destinations read from `.env`/`00_config.js`. A single
-wrong value is unrecoverable. **New control:**
+wrong value is unrecoverable. **The control (built in since 17 Sep 2026):**
 
 1. `cp deploy/addresses.example.json deploy/addresses.<network>.json`; fill EVERY field with the
-   final, triple-checked, checksummed address. Keep the authoritative copy in the Safe records /
-   `TGE_DEPLOYMENT_RUNBOOK.md` — the file is gitignored.
-2. Run the read-only gate: `npx hardhat run scripts/verify/verify_tge_targets.js --network <net>`.
-   It reconstructs the exact allocation set `06_execute_tge.js` will use, diffs every destination
-   + amount + role holder against the manifest, re-asserts Σ == MAX_SUPPLY, and **exits non-zero on
-   any mismatch**.
-3. **Wire it as a hard pre-flight** — add to `06_execute_tge.js` immediately before `genesis()`:
-   ```js
-   const { execSync } = require("child_process");
-   try { execSync(`npx hardhat run scripts/verify/verify_tge_targets.js --network ${network.name}`,
-                  { stdio: "inherit" }); }
-   catch { throw new Error("TGE target verification FAILED — aborting genesis."); }
-   ```
-   (Or run it manually and refuse to proceed unless it prints `✅ ALL TGE TARGETS VERIFIED`.)
+   final, triple-checked, checksummed address — every destination, every vesting vault's
+   beneficiary, and every role. Keep the authoritative copy in the Safe records — the file is
+   gitignored.
+2. **`06_execute_tge.js` checks everything itself, before its first transaction, and stops on any
+   failure.** The checks live in `scripts/deploy/lib/tge_targets.js`, and the script then sends
+   exactly the list it checked. They cover:
+   - every destination set, valid, non-zero and distinct;
+   - destination, amount and vault flag equal to the manifest, with no missing or extra entries;
+   - the manifest's network and chain id;
+   - Σ == MAX_SUPPLY;
+   - role holders — on a real network an unpinned role fails;
+   - on chain: contract code at every destination except Liquidity, and each vesting vault paying
+     SRX to the manifest's beneficiary on the schedule in `00_config.js`.
 
-**Negative test before trusting it:** temporarily change one `.env` destination, run the gate,
-confirm it aborts with a clear mismatch. Then restore.
+   Without a manifest the script refuses to run on any network other than hardhat/localhost.
+3. **Dry run while preparing:** `npx hardhat run scripts/verify/verify_tge_targets.js --network <net>`
+   runs the same checks without sending anything, and exits non-zero on any failure.
+4. **No built-in addresses on a real network.** `00_config.js`'s wallet addresses are testnet
+   defaults only. On any other network an unset variable, a built-in testnet address, the zero
+   address or a bad checksum is a hard error.
+
+Tests: `test/TgeDestinationControls.test.js`. Every control above was mutation-checked: disabling
+it turns the suite red.
+
+**Negative test before trusting it on the day:** change one `.env` destination, run the dry run,
+confirm it stops with a clear mismatch. Then restore.
 
 ---
 

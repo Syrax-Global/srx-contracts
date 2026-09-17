@@ -52,7 +52,9 @@ PUBLISH=(
   "slither.config.json"
   ".npmrc"
   ".gitignore"
-  ".github/workflows"
+  # Named one by one, not the whole folder — see attribution-check.yml below.
+  ".github/workflows/ci.yml"
+  ".github/workflows/nightly-fuzz.yml"
 
   # Security package
   "SECURITY.md"
@@ -92,6 +94,14 @@ PUBLISH=(
 #   SRX_TOKEN_INNOVATION_ROADMAP.md  forward-looking commercial material
 #   .openzeppelin/                   deployment manifests — publish deliberately
 #                                    if wanted, but they are operational state
+#   .github/workflows/attribution-check.yml
+#                                    the internal commit-message check. It names
+#                                    the tools it blocks, so publishing it would
+#                                    itself be the statement it exists to prevent;
+#                                    the tool-attribution scan below rightly
+#                                    refuses it. The public repo's commits are
+#                                    made by this script, and every published
+#                                    file is scanned before it is committed.
 
 echo "Building public mirror -> $OUT"
 

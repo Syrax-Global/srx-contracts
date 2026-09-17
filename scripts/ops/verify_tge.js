@@ -82,7 +82,9 @@ async function main() {
   for (const { label, addr, expected } of checks) {
     const bal = await token.balanceOf(addr);
     const expectedWei = ethers.parseUnits(expected, 18);
-    const ok = bal === expectedWei;
+    // ⛔ This result was printed and then left out of the verdict, so a wrong
+    //    treasury balance, or tokens left in the distributor, still PASSED.
+    const ok = check(bal === expectedWei, `${label} balance ${ethers.formatUnits(bal, 18)} SRX != ${expected}`);
     console.log(`  ${label.padEnd(20)}: ${ethers.formatUnits(bal, 18).padStart(16)} SRX  ${ok ? "✅" : "❌"} (expect ${expected})`);
   }
 
