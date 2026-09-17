@@ -25,7 +25,6 @@ entry point for auditors, exchange listing teams, integrators, and the community
 ### Engineering & Governance
 - [Repository Policy](../REPO_POLICY.md) — visibility, branch model, secrets
 - [Release & Versioning](../RELEASING.md) — semver convention, release procedure
-- [Institutional Hardening Plan](../INSTITUTIONAL_HARDENING_PLAN.md) — the 4-week roadmap
 
 ### Exchange / Listing
 - [CEX Listing Questionnaire](LISTING_QUESTIONNAIRE.md) — pre-filled due-diligence answers

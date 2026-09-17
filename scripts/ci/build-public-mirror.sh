@@ -211,6 +211,27 @@ Rebuilt from the allow-list in scripts/ci/build-public-mirror.sh."
 fi
 
 git add -A
+
+# 4. every document reference resolves IN THE PUBLISHED TREE
+#
+# ⛔ The public repo's CI failed this check on every sync from 10 Sep to 17 Sep:
+#    its README pointed at .openzeppelin/ and docs/README.md at an internal plan,
+#    both deliberately left out of the mirror. The private repo passed, because
+#    the files exist THERE. Only the published tree can answer this, so it is
+#    checked here, after staging, and a failing tree is never committed.
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import sys" >/dev/null 2>&1; then
+  git reset -q
+  echo "⛔ python3 is not available, so the document-reference check cannot run — refusing to commit."
+  exit 1
+fi
+if ! python3 scripts/ci/check-doc-refs.py; then
+  git reset -q
+  echo
+  echo "⛔ VERIFICATION FAILED — a published document references a file the mirror does not contain."
+  exit 1
+fi
+echo "  ✓ every document reference resolves in the published tree"
+
 if git diff --cached --quiet; then
   echo
   echo "✓ Mirror already matches srx-token@${SRC_SHA} — nothing to commit."

@@ -12,9 +12,9 @@ cross-chain migration path.
 
 ⚠️ **Testnet only. Not deployed to any mainnet.**
 
-Deployed on Sepolia and BSC testnet. `.openzeppelin/` contains a `sepolia.json`
-manifest and no mainnet manifest. Mainnet deployment is gated on an external
-audit that has not yet been performed.
+Deployed on Sepolia and BSC testnet only; there is no mainnet deployment and no
+mainnet upgrade manifest. Mainnet deployment is gated on an external audit that
+has not yet been performed.
 
 ⛔ **Nothing here should be read as a statement that Syrax Global FZCO holds any
 licence.** It does not. Regulatory applications are in progress and no licensed
