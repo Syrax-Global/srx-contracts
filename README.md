@@ -6,6 +6,14 @@ cross-chain migration path.
 
 **Solidity 0.8.24 · Hardhat + Foundry · MIT**
 
+> **Maintained by Syrax Global FZCO** (Dubai, United Arab Emirates) and published from the
+> company's official GitHub organisation, [`Syrax-Global`](https://github.com/Syrax-Global).
+> No other GitHub account or organisation using the "Syrax" name is affiliated with us, with
+> one exception: [`@SyraxGlobal`](https://github.com/SyraxGlobal), a company-held account that
+> currently hosts our website repositories and will move into the organisation.
+> ⚠️ Contract addresses should only ever be taken from this repository or from
+> [syrax.global](https://www.syrax.global) — never from a third party claiming to be Syrax.
+
 ---
 
 ## Status
