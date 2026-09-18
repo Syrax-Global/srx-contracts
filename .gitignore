@@ -70,3 +70,60 @@ deploy/addresses.*.json
 Tokenomics & Investor Material/
 *Confidential*.pdf
 *Private Schedule*.pdf
+
+# ─── Syrax baseline ───────────────────────────────────────────────────────────
+# The minimum every Syrax repository ignores. Append, never replace: a repository
+# keeps its own language- and framework-specific rules on top of this.
+#
+# ⛔ .gitignore does NOT untrack a file that is already committed. If one of these
+# is already in the repository, adding the rule changes nothing — it has to be
+# untracked deliberately, and removing it from the files does not remove it from
+# history. Raise it rather than deleting it quietly.
+
+# Credentials and configuration — never committed, in any form
+.env
+.env.*
+!.env.example
+!.env.sample
+!.envsample
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
+secrets.json
+service-account*.json
+
+# Dependencies — restored from a lockfile, never committed
+node_modules/
+vendor/
+venv/
+.venv/
+__pycache__/
+*.egg-info/
+
+# Logs — a log in a repository is a leak waiting to happen
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Build output and caches
+dist/
+build/
+out/
+.next/
+coverage/
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# Local machine noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
