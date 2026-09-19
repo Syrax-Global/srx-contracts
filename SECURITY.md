@@ -103,7 +103,7 @@ reporters in OFAC-restricted jurisdictions cannot receive payment.
 | Internal R3 | 2026-05-23 | Internal | Perspectives 3–7 + Trust Matrix | `docs/audits/` |
 | Internal R4 | 2026-05-29 | Internal | All 7 mandatory perspectives | `docs/audits/` |
 | Internal R5 | 2026-06-12 | Internal | All 7, fresh-eyes — remediation code as primary surface | `docs/audits/` |
-| External | TBD (pre-mainnet) | External firm | Halborn / Trail of Bits | Pending |
+| External | TBD (pre-mainnet) | External firm | Not yet commissioned | Pending |
 
 Across five internal rounds, 42 findings were identified and all actionable items
 remediated (0 Critical / High / Medium outstanding; the 2 Round-4 High findings were
