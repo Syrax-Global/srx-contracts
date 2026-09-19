@@ -25,8 +25,9 @@ mainnet upgrade manifest. Mainnet deployment is gated on an external audit that
 has not yet been performed.
 
 ⛔ **Nothing here should be read as a statement that Syrax Global FZCO holds any
-licence.** It does not. Regulatory applications are in progress and no licensed
-activity is offered.
+licence.** It does not, it has not applied for one, and no licensed activity is
+offered. Any regulated activity would require a separate licensed entity, and none
+has been established.
 
 ## The contracts
 
