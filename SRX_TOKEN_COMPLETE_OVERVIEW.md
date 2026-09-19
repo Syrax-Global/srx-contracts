@@ -942,7 +942,7 @@ continue to hold and use SRX on those chains. The OFT bridge continues to operat
 
 **Testnet operation started:** 13 May 2026
 **Minimum testnet period:** 2 weeks (ends approximately 27 May 2026)
-**External audit:** Required before mainnet — Halborn or equivalent Tier 1 firm
+**External audit:** Required before mainnet — an independent tier-1 firm. Not yet commissioned
 **Mainnet deployment:** After audit completion only
 
 **Deployer wallet (Sepolia test only — NOT for mainnet):**
