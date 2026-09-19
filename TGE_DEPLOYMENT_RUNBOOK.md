@@ -39,7 +39,7 @@ be treated as part of the same sequence for accounting integrity.
 Complete EVERY item and get sign-off from two team members before running.
 
 ### Smart Contract Readiness
-- [ ] External security audit complete (Halborn or equiv.)
+- [ ] External security audit complete
 - [ ] All contracts deployed to mainnet and verified on Etherscan
 - [ ] All contract addresses recorded in deployment registry
 - [ ] All admin roles transferred to Gnosis Safe (≥3/5 multisig) — SC-006 requirement
