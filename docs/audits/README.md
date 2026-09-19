@@ -84,9 +84,10 @@ outcome: **the dominant risk was deployment-time role topology, not contract log
 
 ## External Audit
 
-An independent external audit (Halborn or Trail of Bits) is a **mandatory blocking
-gate before any mainnet deployment**. The external report will be published in this
-directory alongside the internal history when complete.
+An independent external audit is a **mandatory blocking gate before any mainnet
+deployment**. It is planned; it has not been commissioned and no auditor is engaged.
+Any external report will be published in this directory alongside the internal history
+when one exists.
 
 ---
 
