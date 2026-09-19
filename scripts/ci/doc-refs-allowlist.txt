@@ -26,7 +26,6 @@ RELEASE_PROCESS.md
 REPO_GOVERNANCE.md
 
 # ── Artefacts that only exist after the external audit runs.
-audits/halborn-2026-Q3.pdf
 
 # ── Internal per-round reports, deliberately not in this repository. Both
 #    docs/audits/README.md and AUDIT_SCOPE.md now say so explicitly.
