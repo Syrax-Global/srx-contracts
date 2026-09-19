@@ -98,7 +98,7 @@ reporters in OFAC-restricted jurisdictions cannot receive payment.
 
 | Round | Date | Type | Methodology | Report |
 |---|---|---|---|---|
-| Internal R1 | 2026-05-23 | Internal | Halborn-reference (code correctness) | `docs/audits/` |
+| Internal R1 | 2026-05-23 | Internal | Code correctness | `docs/audits/` |
 | Internal R2 | 2026-05-23 | Internal | Alternate-perspective re-audit | `docs/audits/` |
 | Internal R3 | 2026-05-23 | Internal | Perspectives 3–7 + Trust Matrix | `docs/audits/` |
 | Internal R4 | 2026-05-29 | Internal | All 7 mandatory perspectives | `docs/audits/` |
