@@ -4,7 +4,7 @@
 
 | Phase | Visibility | Trigger |
 |---|---|---|
-| Pre-audit (now) | **Private** | Default until Halborn audit complete |
+| Pre-audit (now) | **Private** | Default until the external audit is complete |
 | Post-audit | **Public** | After audit report published + all findings resolved |
 | Mainnet | **Public** | Permanently public from TGE onwards |
 
