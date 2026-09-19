@@ -52,7 +52,7 @@ If a secret is accidentally committed:
 ## External Audit
 
 Before making the repo public:
-- [ ] Halborn audit complete, report received
+- [ ] External audit complete, report received
 - [ ] All Critical and High findings resolved
 - [ ] Resolution commits reviewed and signed off by auditor
 - [ ] TGE_DEPLOYMENT_RUNBOOK.md reviewed and approved
