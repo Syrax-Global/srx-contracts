@@ -1,7 +1,10 @@
 # SRX Token — External Audit Scope & Handoff Package
 
-Prepared for external audit engagement (CertiK / Halborn / Trail of Bits / OpenZeppelin).
+Prepared so that an external audit can begin quickly once an engagement is agreed.
 This document gives an auditor everything needed to (a) quote accurately and (b) start fast.
+
+⚠️ **No external audit has been commissioned and none has begun.** No auditor is
+engaged and no firm named anywhere in this repository has reviewed this code.
 
 ---
 
