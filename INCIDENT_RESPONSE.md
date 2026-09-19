@@ -72,8 +72,9 @@ within 15 minutes of the first alert.
    Token transfers have been temporarily paused as a precaution.
    Funds are being assessed. Update in 1 hour."*
 
-10. **Engage Halborn** — Contact your Halborn account manager for
-    emergency incident support.
+10. **Engage external incident support** — If an external security firm is under
+    contract at that time, contact them. **No firm is engaged at present**, so if one
+    is needed the CTO appoints it as part of the response.
 
 ### Recovery (2 hours onwards)
 
