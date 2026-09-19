@@ -7,7 +7,7 @@
 >
 > **Standing recommendation:** internal exhaustiveness (this document set) is what makes an
 > external audit cheaper and faster — it is **not** a replacement for one. A named external
-> audit (Halborn / Trail of Bits / OpenZeppelin) remains the on-chain mainnet gate; exchanges,
+> audit remains the on-chain mainnet gate; exchanges,
 > investors, and insurers require it, and it brings differently-tooled, independent, accountable
 > review that same-lineage internal rounds structurally cannot.
 
