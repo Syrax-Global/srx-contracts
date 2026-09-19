@@ -196,7 +196,7 @@ Prevention:
 | Contact | Purpose |
 |---|---|
 | security@layerzero.network | LayerZero bridge issues |
-| Halborn account manager | Audit firm emergency support |
+| External security firm (none engaged at present) | Emergency incident support |
 | OpenZeppelin Defender support | Monitoring platform issues |
 | Chainlink support | Oracle feed issues |
 
