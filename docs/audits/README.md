@@ -6,10 +6,13 @@ to an engaged auditor on request. The consolidated report
 (`SRX_TOKEN_CONSOLIDATED_AUDIT_REPORT.pdf`) is the public artefact.
 
 
-This directory publishes the audit history of the SRX token suite. Internal audit
-reports were produced using a Halborn/Trail-of-Bits/OpenZeppelin-referenced
-methodology (manual review, economic attack modeling, invariant verification,
-threat-chain construction, deployment-gate enforcement).
+This directory publishes the **internal** review history of the SRX token suite.
+Reviews followed published industry practice (manual review, economic attack
+modeling, invariant verification, threat-chain construction, deployment-gate
+enforcement).
+
+⚠️ **These were internal reviews, not an external audit.** No external firm has
+reviewed this code, and none is engaged.
 
 > **All findings listed below have been remediated.** Reports are published for
 > transparency; no unresolved Critical or High issues remain in the code.
