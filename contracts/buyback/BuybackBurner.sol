@@ -42,9 +42,17 @@ interface ISRXToken {
  *   The gateway fee splitter will forward the configured share of fee revenue here
  *   automatically. When the balance reaches a threshold, an executor triggers the burn.
  *
- * ⚠ Slippage protection:
- *   buyAndBurnWithToken() requires a minSrxOut parameter. The executor must compute
- *   this off-chain using a DEX quote minus maxSlippageBps tolerance. Never pass 0.
+ * ⚠ What bounds a swap (pre-external-audit sweep BB-M2, Jared 23 Sep 2026):
+ *   The executor supplies the swap calldata, and nothing on-chain can price SRX
+ *   before a pool exists, so minSrxOut alone cannot stop a compromised executor
+ *   from routing the output elsewhere and burning 1 wei. What bounds the damage:
+ *     - a per-swap and a rolling 24-hour cap PER TOKEN, set by the admin; a token
+ *       with no caps cannot be swapped at all (fail closed);
+ *     - the router is approved for exactly amountIn and reset to zero after the
+ *       call, and the swap may not spend more than amountIn;
+ *     - the router address is set by the admin only.
+ *   maxSlippageBps is guidance for the executor's off-chain quote; the contract
+ *   does not read it, because it has no price to apply it to.
  *
  * ⚠ BURN_ROLE prerequisite:
  *   This contract must be granted BURN_ROLE on SRXToken before burnHeld() can succeed.
@@ -77,11 +85,21 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Running total of SRX burned by this contract across all time.
     uint256 public totalBurned;
 
+    /// @notice Largest single swap per input token. 0 = the token cannot be swapped.
+    mapping(address => uint256) public maxAmountPerSwap;
+    /// @notice Most of an input token that may be swapped in any rolling 24 hours.
+    mapping(address => uint256) public dailySwapLimit;
+    /// @notice Start of the current 24-hour window, per input token.
+    mapping(address => uint256) public swapWindowStart;
+    /// @notice Amount swapped in the current window, per input token.
+    mapping(address => uint256) public swappedInWindow;
+
     // ── Events ─────────────────────────────────────────────────────────────────
 
     event BurnExecuted(uint256 srxAmount, uint256 newTotalBurned);
     event SwapAndBurnExecuted(address indexed tokenIn, uint256 amountIn, uint256 srxBurned);
     event SwapRouterUpdated(address indexed newRouter);
+    event SwapLimitsSet(address indexed token, uint256 perSwap, uint256 perDay);
     event MaxSlippageUpdated(uint256 newBps);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event ETHRescued(address indexed to, uint256 amount);
@@ -97,6 +115,8 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
     error SwapProducedInsufficientSRX(uint256 received, uint256 minimum);
     error ETHTransferFailed();
     error InsufficientETH();
+    error SwapLimitExceeded(address token, uint256 amount, uint256 available);
+    error SwapOverspent(uint256 spent, uint256 amountIn);
 
     // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -172,12 +192,21 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
         if (amountIn   == 0)          revert ZeroAmount();
         if (minSrxOut  == 0)          revert ZeroAmount();
 
-        uint256 srxBefore = srxToken.balanceOf(address(this));
+        _consumeSwapLimit(tokenIn, amountIn);
 
-        // Approve router to spend tokenIn, execute swap
-        IERC20(tokenIn).safeIncreaseAllowance(swapRouter, amountIn);
+        uint256 srxBefore = srxToken.balanceOf(address(this));
+        uint256 inBefore  = IERC20(tokenIn).balanceOf(address(this));
+
+        // ⛔ This was safeIncreaseAllowance, which ADDED to any leftover allowance,
+        //    so a router that pulled less than approved kept a growing allowance.
+        //    Approve exactly amountIn, and clear it after the call.
+        IERC20(tokenIn).forceApprove(swapRouter, amountIn);
         (bool success, ) = swapRouter.call(swapCalldata);
         require(success, "BuybackBurner: swap call failed");
+        IERC20(tokenIn).forceApprove(swapRouter, 0);
+
+        uint256 spent = inBefore - IERC20(tokenIn).balanceOf(address(this));
+        if (spent > amountIn) revert SwapOverspent(spent, amountIn);
 
         // Verify slippage
         uint256 srxReceived = srxToken.balanceOf(address(this)) - srxBefore;
@@ -209,6 +238,32 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
      *         Cannot exceed MAX_SLIPPAGE_CAP (50%).
      * @param bps New slippage tolerance in basis points (e.g. 200 = 2%).
      */
+    /**
+     * @notice Set the swap caps for one input token. Both 0 disables that token.
+     * @param perSwap Largest single swap, in the token's own decimals.
+     * @param perDay  Most that may be swapped in any rolling 24 hours.
+     */
+    function setSwapLimits(address token, uint256 perSwap, uint256 perDay) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (token == address(0)) revert ZeroAddress();
+        maxAmountPerSwap[token] = perSwap;
+        dailySwapLimit[token]   = perDay;
+        emit SwapLimitsSet(token, perSwap, perDay);
+    }
+
+    function _consumeSwapLimit(address token, uint256 amount) internal {
+        uint256 perSwap = maxAmountPerSwap[token];
+        if (amount > perSwap) revert SwapLimitExceeded(token, amount, perSwap);
+        if (block.timestamp >= swapWindowStart[token] + 1 days) {
+            swapWindowStart[token] = block.timestamp;
+            swappedInWindow[token] = 0;
+        }
+        uint256 used  = swappedInWindow[token];
+        uint256 limit = dailySwapLimit[token];
+        uint256 available = limit > used ? limit - used : 0;
+        if (amount > available) revert SwapLimitExceeded(token, amount, available);
+        swappedInWindow[token] = used + amount;
+    }
+
     function setMaxSlippageBps(uint256 bps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (bps > MAX_SLIPPAGE_CAP) revert SlippageExceedsCap(bps, MAX_SLIPPAGE_CAP);
         maxSlippageBps = bps;

@@ -10,7 +10,19 @@
  *   • GOVERNANCE_ROLE is held by the Timelock (never deployer).
  *   • PAUSER_ROLE is held by the GuardianModule (never deployer).
  *   • SPENDER_ROLE (Treasury) is held by the Timelock (never deployer).
- *   • DEFAULT_ADMIN_ROLE is held by the admin Safe (never the deployer EOA).
+ *   • DEFAULT_ADMIN_ROLE is held by the Timelock — NOT the admin Safe.
+ *   • The admin Safe holds NO admin, governance, upgrade, spend, pause or burn
+ *     role anywhere, is not the token's bridge owner or LayerZero delegate, and
+ *     is neither admin nor proposer of the Timelock.
+ *
+ * ⛔ DELAY-ONLY AT LAUNCH (Jared, 23 Sep 2026; pre-external-audit sweep GOV-H1).
+ *    This gate used to REQUIRE the admin Safe to hold DEFAULT_ADMIN_ROLE. From
+ *    there one Safe batch could grant itself SPENDER_ROLE and empty the treasury,
+ *    re-grant UPGRADER_ROLE and upgrade anything, or use GOVERNANCE_ROLE on the
+ *    StabilisationFund to send all 1.5B SRX anywhere — all without the 48-hour
+ *    delay the documentation promises. And as Timelock admin it could make itself
+ *    proposer and schedule updateDelay(0). Every power now sits behind the delay;
+ *    the Safe keeps only what GuardianModule gives it (emergency pause).
  *
  * It exits with code 1 (failing CI / the deploy pipeline) if ANY assertion fails.
  * Running this and seeing "ALL CHECKS PASSED" is a BLOCKING mainnet gate.
@@ -46,6 +58,9 @@ const ROLE = {
   GUARDIAN_ROLE: ethers.id("GUARDIAN_ROLE"),
   DEPLOYER_ROLE: ethers.id("DEPLOYER_ROLE"),
   ORACLE_REPORTER_ROLE: ethers.id("ORACLE_REPORTER_ROLE"),
+  BURN_ROLE: ethers.id("BURN_ROLE"),
+  PROPOSER_ROLE: ethers.id("PROPOSER_ROLE"),
+  CANCELLER_ROLE: ethers.id("CANCELLER_ROLE"),
 };
 
 function envAddr(key, { required = true } = {}) {
@@ -80,11 +95,15 @@ async function main() {
   // ── Resolve the topology ───────────────────────────────────────────────────
   const admin     = envAddr("ADMIN_ADDRESS");            // admin Safe
   const timelock  = envAddr("TIMELOCK");                 // SRXTimelock
+  const governor  = envAddr("GOVERNOR");                 // SRXGovernor
+  const srxToken  = envAddr("SRX_TOKEN");                // SRXToken (Ethereum hub)
   const guardianM = envAddr("GUARDIAN_MODULE");          // GuardianModule (PAUSER holder)
   const guardianMS = envAddr("GUARDIAN_MULTISIG", { required: false }); // SSF GUARDIAN_ROLE
   const deployerMS = envAddr("DEPLOYER_MULTISIG", { required: false }); // SSF DEPLOYER_ROLE
 
   const contracts = {
+    SRXToken:          { addr: srxToken,                 artifact: "SRXToken" },
+    SRXTimelock:       { addr: timelock,                 artifact: "SRXTimelock" },
     SRXTreasury:       { addr: envAddr("TREASURY"),      artifact: "SRXTreasury" },
     SRXStaking:        { addr: envAddr("STAKING"),       artifact: "SRXStaking" },
     FeeController:     { addr: envAddr("FEE_CONTROLLER"), artifact: "FeeController" },
@@ -94,32 +113,50 @@ async function main() {
   // ── Expectation matrix: [role, mustHold[], mustNotHold[]] ───────────────────
   // mustNotHold ALWAYS includes the deployer EOA (SC-TRUST-002 core requirement).
   const baseForbidden = [deployerAddr];
+  const noSafe = [deployerAddr, admin];
 
   const expectations = {
+    SRXToken: [
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["GOVERNANCE_ROLE",    [timelock], noSafe],
+      ["PAUSER_ROLE",        [guardianM],noSafe],
+      ["BURN_ROLE",          [],         noSafe],
+    ],
+    SRXTimelock: [
+      // OZ v5 TimelockController: DEFAULT_ADMIN_ROLE is the timelock admin. Only
+      // the timelock itself may hold it, or its own delay is not a delay.
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["PROPOSER_ROLE",      [governor], noSafe],
+      // The Safe MAY keep CANCELLER (set in 02_deploy_governance): a veto on a
+      // hostile proposal. It can stop an operation, never start one.
+      ["CANCELLER_ROLE",     [governor], baseForbidden],
+    ],
     SRXTreasury: [
-      ["DEFAULT_ADMIN_ROLE", [admin],    [...baseForbidden]],
-      ["UPGRADER_ROLE",      [timelock], [...baseForbidden, admin]],
-      ["GOVERNANCE_ROLE",    [timelock], [...baseForbidden]],
-      ["PAUSER_ROLE",        [guardianM],[...baseForbidden]],
-      ["SPENDER_ROLE",       [timelock], [...baseForbidden]],
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["UPGRADER_ROLE",      [timelock], noSafe],
+      ["GOVERNANCE_ROLE",    [timelock], noSafe],
+      ["PAUSER_ROLE",        [guardianM],noSafe],
+      ["SPENDER_ROLE",       [timelock], noSafe],
     ],
     SRXStaking: [
-      ["DEFAULT_ADMIN_ROLE", [admin],    [...baseForbidden]],
-      ["UPGRADER_ROLE",      [timelock], [...baseForbidden, admin]],
-      ["GOVERNANCE_ROLE",    [timelock], [...baseForbidden]],
-      ["PAUSER_ROLE",        [guardianM],[...baseForbidden]],
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["UPGRADER_ROLE",      [timelock], noSafe],
+      ["GOVERNANCE_ROLE",    [timelock], noSafe],
+      ["PAUSER_ROLE",        [guardianM],noSafe],
     ],
     FeeController: [
-      ["DEFAULT_ADMIN_ROLE", [admin],    [...baseForbidden]],
-      ["UPGRADER_ROLE",      [timelock], [...baseForbidden, admin]],
-      ["GOVERNANCE_ROLE",    [timelock], [...baseForbidden]],
-      ["PAUSER_ROLE",        [guardianM],[...baseForbidden]],
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["UPGRADER_ROLE",      [timelock], noSafe],
+      ["GOVERNANCE_ROLE",    [timelock], noSafe],
+      ["PAUSER_ROLE",        [guardianM],noSafe],
     ],
     StabilisationFund: [
-      ["DEFAULT_ADMIN_ROLE", [admin],    [...baseForbidden]],
-      ["UPGRADER_ROLE",      [timelock], [...baseForbidden, admin]],
-      ["GOVERNANCE_ROLE",    [timelock], [...baseForbidden]],
-      ["PAUSER_ROLE",        [guardianM],[...baseForbidden]],
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["UPGRADER_ROLE",      [timelock], noSafe],
+      // ⛔ The Safe held GOVERNANCE_ROLE here from initialize() and nothing forbade
+      //    it: deployLiquidity's governance path has no stress, cap or allowlist.
+      ["GOVERNANCE_ROLE",    [timelock], noSafe],
+      ["PAUSER_ROLE",        [guardianM],noSafe],
       // SSF tiered roles: distinct multisigs, never the same address (SC-TRUST checks)
       // ⛔ These two were SPREAD OUT OF THE MATRIX when their optional env vars
       //    were unset — no skip message, no warning — and the script still
@@ -136,7 +173,7 @@ async function main() {
   // ⚠️ Coverage is 4 of 11 privileged contracts. The omitted ones hold mint,
   //    burn and bridge authority, so this gate says nothing about them. Stated
   //    every run rather than left as a silence a reader must notice.
-  const UNCOVERED = ["SRXToken", "GuardianModule", "VestingVault", "BuybackBurner",
+  const UNCOVERED = ["GuardianModule", "VestingVault", "BuybackBurner",
                      "PreSaleRound", "SRXOFTNative", "ZkSyncMigrator", "SRXAirdrop"];
 
   console.log(`\n🔐 SRX role-topology verification — network: ${network.name}`);
@@ -182,6 +219,26 @@ async function main() {
         }
       }
     }
+    console.log("");
+  }
+
+  // ── Bridge authority (N-02): the OApp owner and the LayerZero delegate ─────
+  // They control peers, enforced options, the message inspector and the DVN /
+  // library configuration — the bridge's real authority, outside AccessControl.
+  {
+    const token = await ethers.getContractAt("SRXToken", srxToken);
+    const owner = ethers.getAddress(await token.owner());
+    checks++;
+    if (owner === timelock) console.log(`✅ SRXToken.owner() is the Timelock`);
+    else { failures++; console.log(`❌ SRXToken.owner() is ${owner}, expected the Timelock ${timelock}`); }
+    const pending = ethers.getAddress(await token.pendingOwner());
+    if (pending !== ZERO) { failures++; console.log(`❌ SRXToken has a pending owner ${pending} — finish or cancel the transfer`); }
+    const endpoint = new ethers.Contract(await token.endpoint(),
+      ["function delegates(address) view returns (address)"], ethers.provider);
+    const delegate = ethers.getAddress(await endpoint.delegates(srxToken));
+    checks++;
+    if (delegate === timelock) console.log(`✅ LayerZero delegate is the Timelock`);
+    else { failures++; console.log(`❌ LayerZero delegate is ${delegate}, expected the Timelock ${timelock}`); }
     console.log("");
   }
 

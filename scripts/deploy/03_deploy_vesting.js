@@ -19,6 +19,7 @@
  */
 const { ethers, network } = require("hardhat");
 const { WALLETS, ALLOCATIONS, VESTING } = require("./00_config");
+const { createAdminBatch } = require("./lib/adminTx");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -106,6 +107,11 @@ async function main() {
   // ⭐ Declaring it up front also makes an UNDERFUNDED vault fail here, at setup,
   //    instead of silently shorting the beneficiary years into the schedule.
 
+  // declareExpectedAllocation() is gated by each vault's immutable `admin` field
+  // (set to WALLETS.admin above), not the deployer — same SC-TRUST-002 pattern as
+  // TGEDistributor.setAllocations() below. One batch covers both groups of calls.
+  const batch = createAdminBatch("03_vesting");
+
   console.log("\nDeclaring expected allocations on each vault...");
   const declarations = [
     ["Founders",      foundersVault,  ALLOCATIONS.founders],
@@ -115,8 +121,7 @@ async function main() {
     ["EcosystemDAO",  ecosystemVault, ALLOCATIONS.ecosystem],
   ];
   for (const [label, vault, amount] of declarations) {
-    await (await vault.declareExpectedAllocation(amount)).wait();
-    console.log(`  ✓ ${label.padEnd(14)} ${ethers.formatUnits(amount, 18)} SRX`);
+    await batch.send(vault, "declareExpectedAllocation", [amount], `${label} vault: declareExpectedAllocation(${ethers.formatUnits(amount, 18)} SRX)`);
   }
 
   // ── Deploy TGEDistributor ─────────────────────────────────────────────────
@@ -144,8 +149,10 @@ async function main() {
     { destination: WALLETS.strategic,    amount: ALLOCATIONS.strategic,     isVestingVault: false, label: "Strategic" },
   ];
 
-  await (await tge.setAllocations(allocations)).wait();
-  console.log("✅ Allocations configured");
+  // TGEDistributor.setAllocations() is gated the same way — its immutable
+  // `admin` field is WALLETS.admin (passed above), not the deployer.
+  await batch.send(tge, "setAllocations", [allocations], "TGEDistributor.setAllocations(...)");
+  await batch.flush();
 
   console.log(`\n✅ All vesting vaults and TGEDistributor deployed`);
   console.log(`\n⚠️  Save to .env:`);

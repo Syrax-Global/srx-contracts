@@ -65,6 +65,8 @@ contract VestingVault {
     event TGETriggered(uint256 timestamp);
     event Released(address indexed beneficiary, uint256 amount);
     event Revoked(address indexed revokeRecipient, uint256 unvestedAmount);
+    /// @notice Tokens moved out of a vault by its admin leave a public record.
+    event DonatedTokensRescued(address indexed recipient, uint256 amount);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -334,6 +336,7 @@ contract VestingVault {
             uint256 surplus;
             unchecked { surplus = held - owed; }
             token.safeTransfer(recipient, surplus);
+            emit DonatedTokensRescued(recipient, surplus);
             return;
         }
 
@@ -347,5 +350,6 @@ contract VestingVault {
         if (liveBalance == 0) revert NoDonatedTokens();
 
         token.safeTransfer(recipient, liveBalance);
+        emit DonatedTokensRescued(recipient, liveBalance);
     }
 }

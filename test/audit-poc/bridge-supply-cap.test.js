@@ -10,6 +10,17 @@ function oftMsg(to, amountSD) {
   return ethers.concat([b32(to), ethers.toBeHex(amountSD, 8)]);
 }
 
+
+// A real outbound bridge send (burns here, records the outflow to REMOTE_EID).
+// ⭐ Since N-01 (23 Sep 2026) Ethereum re-credits a chain only up to what it sent
+//    there, so a scenario that brings SRX back must send it out first.
+async function bridgeOut(token, from, amountLD, peer) {
+  await token.setPeer(REMOTE_EID, peer);
+  const sp = { dstEid: REMOTE_EID, to: peer, amountLD, minAmountLD: amountLD,
+               extraOptions: "0x", composeMsg: "0x", oftCmd: "0x" };
+  await token.connect(from).send(sp, { nativeFee: 0n, lzTokenFee: 0n }, from.address);
+}
+
 describe("ZZ bridge-lens PoC", function () {
   async function fixture() {
     const [admin, attacker] = await ethers.getSigners();
@@ -24,7 +35,7 @@ describe("ZZ bridge-lens PoC", function () {
     await token.connect(admin).genesis(admin.address);
 
     const Native = await ethers.getContractFactory("SRXOFTNative");
-    const native = await Native.deploy(epAddr, admin.address);
+    const native = await Native.deploy(epAddr, admin.address, REMOTE_EID); // hub (N-01)
     await native.waitForDeployment();
 
     // impersonate the endpoint so we can call lzReceive as it would
@@ -38,7 +49,10 @@ describe("ZZ bridge-lens PoC", function () {
   // ✅ FIXED 9 Sep 2026 — SRXToken._update now enforces MAX_SUPPLY on every mint.
   //    This case previously PASSED, minting to 2e28 against a 1e28 cap. It is now
   //    a regression test: it asserts the mint is REFUSED.
-  it("A: [FIXED] an inbound credit that would exceed MAX_SUPPLY is refused", async function () {
+  // ✅ Strengthened 23 Sep 2026 (N-01): before any SRX has been sent to a chain,
+  //    NOTHING can be credited from it — the per-chain outflow check refuses it
+  //    before the supply cap is even reached.
+  it("A: [FIXED] an inbound credit beyond what was sent to that chain is refused", async function () {
     const { admin, attacker, token, epSigner } = await fixture();
 
     const MAX = await token.MAX_SUPPLY();
@@ -53,7 +67,7 @@ describe("ZZ bridge-lens PoC", function () {
       token.connect(epSigner).lzReceive(
         origin, ethers.ZeroHash, oftMsg(attacker.address, amountSD), ethers.ZeroAddress, "0x"
       )
-    ).to.be.revertedWithCustomError(token, "SupplyCapExceeded");
+    ).to.be.revertedWithCustomError(token, "UnbackedInboundCredit");
 
     // supply is unchanged — the cap held rather than merely reverting late
     expect(await token.totalSupply()).to.equal(MAX);
@@ -71,9 +85,9 @@ describe("ZZ bridge-lens PoC", function () {
   it("B: [OPEN] a bridge credit below the cap still bypasses maxWalletBalance", async function () {
     const { admin, attacker, token, epSigner } = await fixture();
 
-    // burn 2B so the supply cap is not what stops us
-    await token.connect(admin).grantRole(await token.BURN_ROLE(), admin.address);
-    await token.connect(admin).buyAndBurn(ethers.parseUnits("2000000000", 18));
+    // send 2B out over the bridge, so a 1B return is backed and the supply cap
+    // is not what stops us
+    await bridgeOut(token, admin, ethers.parseUnits("2000000000", 18), b32(attacker.address));
 
     const walletCap = ethers.parseUnits("100000000", 18);
     await token.connect(admin).setMaxWalletBalance(walletCap);

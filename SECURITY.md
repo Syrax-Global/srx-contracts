@@ -103,15 +103,16 @@ reporters in OFAC-restricted jurisdictions cannot receive payment.
 | Internal R3 | 2026-05-23 | Internal | Perspectives 3–7 + Trust Matrix | `docs/audits/` |
 | Internal R4 | 2026-05-29 | Internal | All 7 mandatory perspectives | `docs/audits/` |
 | Internal R5 | 2026-06-12 | Internal | All 7, fresh-eyes — remediation code as primary surface | `docs/audits/` |
+| Proof pass 1 | 2026-09-10 | Internal | Executable proofs only | `REMEDIATION.md` |
+| Proof pass 2 | 2026-09-23 | Internal | Full pre-external-audit sweep, contracts and deploy path | `REMEDIATION.md` |
 | External | TBD (pre-mainnet) | External firm | Not yet commissioned | Pending |
 
-Across five internal rounds, 42 findings were identified and all actionable items
-remediated (0 Critical / High / Medium outstanding; the 2 Round-4 High findings were
-governance/deployment-topology issues, both fixed via `UPGRADER_ROLE` separation and the
-`verify_roles.js` deployment gate). The Round-5 fresh-eyes pass — a different model
-re-auditing with the Round-4 remediations themselves as primary attack surface — found only
-Low/Informational items, all remediated. Verification coverage:
-- **663 Hardhat tests** + **7 Foundry invariant/property suites** (51,200+ randomized calls, 0 reverts).
+Across rounds R1–R5, 42 findings were identified and all actionable items remediated. Those
+rounds did not catch everything: two later proof passes, which count a finding only once a
+test demonstrates it, found 31 defects on 10 September and, on 23 September, a Critical, three
+Highs and a further deployment High. Fixes and the items still open are in `REMEDIATION.md`.
+Verification coverage:
+- **817 Hardhat tests** (1 pending, 23 Sep 2026) + **7 Foundry invariants** (256 runs × depth 50) and **3 property-fuzz tests** (1,000 runs each).
 - Slither static analysis in CI (`fail-on: high`).
 - Foundry invariant campaign (nightly, in CI). Echidna is a local harness only.
 

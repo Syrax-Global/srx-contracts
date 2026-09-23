@@ -332,8 +332,272 @@ describe("N-02 — bridge ownership is two-step and cannot be renounced", functi
     await expect(token.connect(next).renounceOwnership())
       .to.be.revertedWithCustomError(token, "OwnershipCannotBeRenounced");
     const N = await ethers.getContractFactory("SRXOFTNative");
-    const native = await N.deploy(await ep.getAddress(), admin.address);
+    const native = await N.deploy(await ep.getAddress(), admin.address, 40161);
     await expect(native.connect(admin).renounceOwnership())
       .to.be.revertedWithCustomError(native, "OwnershipCannotBeRenounced");
+  });
+});
+
+// ── N-01: hub-and-spoke bridge accounting ─────────────────────────────────────
+describe("N-01 — the bridge cannot create SRX beyond what Ethereum sent out", function () {
+  const HUB = 40161, SPOKE = 40102, OTHER = 30110;
+  const b32 = (a) => ethers.zeroPadValue(a, 32);
+  const msgTo = (to, amountLD) => ethers.concat([b32(to), ethers.toBeHex(amountLD / 10n ** 12n, 8)]);
+  async function impersonate(addr) {
+    await ethers.provider.send("hardhat_impersonateAccount", [addr]);
+    await ethers.provider.send("hardhat_setBalance", [addr, "0x21e19e0c9bab2400000"]);
+    return ethers.getSigner(addr);
+  }
+
+  it("Ethereum re-credits a chain only up to what it sent there, and not before genesis", async function () {
+    const [admin, attacker] = await ethers.getSigners();
+    const Ep = await ethers.getContractFactory("MockLZEndpoint");
+    const ep = await Ep.deploy(HUB);
+    const T = await ethers.getContractFactory("SRXToken");
+    const token = await T.deploy(await ep.getAddress(), admin.address);
+    const epSigner = await impersonate(await ep.getAddress());
+    const peer = b32(attacker.address);
+    await token.connect(admin).setPeer(SPOKE, peer);
+    const origin = (n) => ({ srcEid: SPOKE, sender: peer, nonce: n });
+
+    // Before genesis nothing can arrive (it used to be able to, and then brick genesis).
+    await expect(token.connect(epSigner).lzReceive(origin(1), ethers.ZeroHash, msgTo(attacker.address, E(1)), ethers.ZeroAddress, "0x"))
+      .to.be.revertedWithCustomError(token, "UnbackedInboundCredit");
+
+    await token.connect(admin).genesis(admin.address);
+    const sp = { dstEid: SPOKE, to: peer, amountLD: E(4_000_000_000), minAmountLD: E(4_000_000_000),
+                 extraOptions: "0x", composeMsg: "0x", oftCmd: "0x" };
+    await token.connect(admin).send(sp, { nativeFee: 0n, lzTokenFee: 0n }, admin.address);
+    expect(await token.outstandingByEid(SPOKE)).to.equal(E(4_000_000_000));
+
+    // A forged return of more than was sent is refused...
+    await expect(token.connect(epSigner).lzReceive(origin(2), ethers.ZeroHash, msgTo(attacker.address, E(4_000_000_001)), ethers.ZeroAddress, "0x"))
+      .to.be.revertedWithCustomError(token, "UnbackedInboundCredit");
+    // ...and the real return is accepted, after which the chain is square.
+    await token.connect(epSigner).lzReceive(origin(3), ethers.ZeroHash, msgTo(attacker.address, E(4_000_000_000)), ethers.ZeroAddress, "0x");
+    expect(await token.outstandingByEid(SPOKE)).to.equal(0n);
+    expect(await token.totalSupply()).to.equal(E(10_000_000_000));
+  });
+
+  it("a remote chain sends to, and accepts from, the Ethereum hub only", async function () {
+    const [admin, user] = await ethers.getSigners();
+    const Ep = await ethers.getContractFactory("MockLZEndpoint");
+    const ep = await Ep.deploy(SPOKE);
+    const N = await ethers.getContractFactory("SRXOFTNative");
+    const native = await N.deploy(await ep.getAddress(), admin.address, HUB);
+    const epSigner = await impersonate(await ep.getAddress());
+    const hubPeer = b32(admin.address), otherPeer = b32(user.address);
+    await native.connect(admin).setPeer(HUB, hubPeer);
+    await native.connect(admin).setPeer(OTHER, otherPeer);
+
+    await expect(native.connect(epSigner).lzReceive({ srcEid: OTHER, sender: otherPeer, nonce: 1 }, ethers.ZeroHash,
+      msgTo(user.address, E(10)), ethers.ZeroAddress, "0x")).to.be.revertedWithCustomError(native, "NotHub");
+
+    await native.connect(epSigner).lzReceive({ srcEid: HUB, sender: hubPeer, nonce: 1 }, ethers.ZeroHash,
+      msgTo(user.address, E(10)), ethers.ZeroAddress, "0x");
+    const sp = (dst) => ({ dstEid: dst, to: otherPeer, amountLD: E(1), minAmountLD: E(1),
+                           extraOptions: "0x", composeMsg: "0x", oftCmd: "0x" });
+    await expect(native.connect(user).send(sp(OTHER), { nativeFee: 0n, lzTokenFee: 0n }, user.address))
+      .to.be.revertedWithCustomError(native, "NotHub");
+    await native.connect(user).send(sp(HUB), { nativeFee: 0n, lzTokenFee: 0n }, user.address);
+  });
+});
+
+// ── BB-M2: a compromised executor's reach is bounded ──────────────────────────
+describe("BB-M2 — the buy-and-burn swap is capped, and leaves no approvals behind", function () {
+  async function burnerFixture() {
+    const [admin, attacker] = await ethers.getSigners();
+    const { token } = await srxToken(admin);
+    const B = await ethers.getContractFactory("BuybackBurner");
+    const burner = await B.deploy(await token.getAddress(), admin.address);
+    await token.connect(admin).grantRole(await token.BURN_ROLE(), await burner.getAddress());
+    const R = await ethers.getContractFactory("MockSwapRouter");
+    const router = await R.deploy();
+    await token.connect(admin).transfer(await router.getAddress(), E(1_000_000));
+    const M = await ethers.getContractFactory("MockERC20");
+    const usdc = await M.deploy("USD Coin", "USDC", 6);
+    await usdc.mint(await burner.getAddress(), 1_000_000n * 10n ** 6n);
+    await burner.connect(admin).setSwapRouter(await router.getAddress());
+    const call = (pull, srxOut, to) => router.interface.encodeFunctionData("swap",
+      [usdc.getAddress ? usdc.target : usdc, pull, token.target, srxOut, to]);
+    return { admin, attacker, token, burner, router, usdc, call };
+  }
+  const U = (n) => BigInt(n) * 10n ** 6n;
+
+  it("a token with no caps cannot be swapped at all", async function () {
+    const { admin, attacker, burner, usdc, call } = await burnerFixture();
+    // Before the fix: the whole 1M USDC balance went for 1 wei of SRX.
+    await expect(burner.connect(admin).buyAndBurnWithToken(usdc.target, U(1_000_000), 1n,
+      call(U(1_000_000), 1n, attacker.address))).to.be.revertedWithCustomError(burner, "SwapLimitExceeded");
+  });
+
+  it("per-swap and rolling daily caps bound what one key can spend", async function () {
+    const { admin, burner, usdc, call } = await burnerFixture();
+    await burner.connect(admin).setSwapLimits(usdc.target, U(10_000), U(25_000));
+    const b = burner.target;
+    await expect(burner.connect(admin).buyAndBurnWithToken(usdc.target, U(10_001), 1n, call(U(10_001), E(1), b)))
+      .to.be.revertedWithCustomError(burner, "SwapLimitExceeded");
+    await burner.connect(admin).buyAndBurnWithToken(usdc.target, U(10_000), 1n, call(U(10_000), E(100), b));
+    await burner.connect(admin).buyAndBurnWithToken(usdc.target, U(10_000), 1n, call(U(10_000), E(100), b));
+    await expect(burner.connect(admin).buyAndBurnWithToken(usdc.target, U(10_000), 1n, call(U(10_000), E(100), b)))
+      .to.be.revertedWithCustomError(burner, "SwapLimitExceeded");
+    await time.increase(86_400);
+    await burner.connect(admin).buyAndBurnWithToken(usdc.target, U(10_000), 1n, call(U(10_000), E(100), b));
+    expect(await burner.totalBurned()).to.equal(E(300));
+  });
+
+  it("the router keeps no allowance after a swap that pulled less than approved", async function () {
+    const { admin, burner, router, usdc, call } = await burnerFixture();
+    await burner.connect(admin).setSwapLimits(usdc.target, U(10_000), U(100_000));
+    await burner.connect(admin).buyAndBurnWithToken(usdc.target, U(10_000), 1n, call(U(4_000), E(10), burner.target));
+    // Before the fix: 6,000 USDC of allowance was left for the router, and grew.
+    expect(await usdc.allowance(burner.target, router.target)).to.equal(0n);
+  });
+});
+
+// ── Batch 3: presale refunds, pause, vault surplus, oracle details ────────────
+const U6 = (n) => BigInt(n) * 10n ** 6n;
+
+describe("PSR-06 — an investor who paid on-chain can always be refunded exactly what they paid", function () {
+  it("a paying investor cannot be removed or cut without a refund; refundInvestor returns ETH and USDC in full", async function () {
+    const { admin, i1, r, usdc } = await presale();
+    await r.connect(i1).investWithUSDC(U6(10_000));
+    await r.connect(i1).invest({ value: E(1) });
+    // Before the fix, removeInvestor deleted the allocation and kept the money.
+    await expect(r.connect(admin).removeInvestor(i1.address)).to.be.revertedWithCustomError(r, "HasOnChainPayment");
+    await expect(r.connect(admin).updateAllocation(i1.address, E(1))).to.be.revertedWithCustomError(r, "HasOnChainPayment");
+
+    expect(await r.paidOnChain(i1.address, usdc.target)).to.equal(U6(10_000));
+    expect(await r.paidOnChain(i1.address, ethers.ZeroAddress)).to.equal(E(1));
+    await r.connect(admin).refundInvestor(i1.address);
+    expect(await r.totalAllocated()).to.equal(0n);
+    expect(await r.investorCount()).to.equal(0n);
+
+    await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalances(usdc, [r, i1], [-U6(10_000), U6(10_000)]);
+    await expect(r.connect(i1).claimRefund(ethers.ZeroAddress)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
+    await expect(r.connect(i1).claimRefund(usdc.target)).to.be.revertedWithCustomError(r, "ZeroAmount");
+  });
+
+  it("money owed as refunds cannot be withdrawn by the admin", async function () {
+    const { admin, i1, i2, r, usdc } = await presale();
+    await usdc.mint(i2.address, U6(5_000));
+    await usdc.connect(i2).approve(r.target, ethers.MaxUint256);
+    await r.connect(i1).investWithUSDC(U6(10_000));
+    await r.connect(i2).investWithUSDC(U6(5_000));
+    await r.connect(admin).refundInvestor(i1.address);
+    // Only the 5,000 from i2 is the admin's to take; the 10,000 from i1 stays for i1.
+    await expect(r.connect(admin).withdrawUSDC(admin.address)).to.changeTokenBalance(usdc, admin, U6(5_000));
+    await r.connect(i1).claimRefund(usdc.target);
+    expect(await usdc.balanceOf(r.target)).to.equal(0n);
+  });
+
+  it("a refund is refused while the contract does not hold it, and works once the funds are returned", async function () {
+    const { admin, i1, r, usdc } = await presale();
+    await r.connect(i1).investWithUSDC(U6(10_000));
+    await r.connect(admin).withdrawUSDC(admin.address);
+    await expect(r.connect(admin).refundInvestor(i1.address)).to.be.revertedWithCustomError(r, "RefundUnderfunded");
+    await usdc.connect(admin).transfer(r.target, U6(10_000));
+    await r.connect(admin).refundInvestor(i1.address);
+    await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalance(usdc, i1, U6(10_000));
+  });
+});
+
+describe("PSR-08 — a mistaken transfer to a presale vault is recoverable and cannot vest", function () {
+  it("the vault grant is declared at creation, and the surplus is rescued through the presale", async function () {
+    const { admin, i1, r, token } = await presale();
+    await r.connect(admin).addInvestor(i1.address, 10_000n * 10n ** 8n);
+    await r.connect(admin).deployVault(i1.address);
+    const vault = await ethers.getContractAt("VestingVault", await r.getVault(i1.address));
+    const grant = (await r.investors(i1.address)).srxAllocation;
+    expect(await vault.expectedAllocation()).to.equal(grant);
+
+    await token.connect(admin).transfer(vault.target, E(1_000)); // the mistake
+    await r.connect(admin).batchTriggerTGE(0, 1);
+    expect(await vault.initialAllocation()).to.equal(grant);     // it did not become part of the grant
+    // Before the fix the presale, as the vault admin, had no way to call the rescue.
+    await expect(r.connect(admin).rescueVaultSurplus(i1.address, admin.address))
+      .to.changeTokenBalance(token, admin, E(1_000));
+    // G-I1: a rescue leaves a public record on the vault.
+    await token.connect(admin).transfer(vault.target, E(5));
+    await expect(r.connect(admin).rescueVaultSurplus(i1.address, admin.address))
+      .to.emit(vault, "DonatedTokensRescued").withArgs(admin.address, E(5));
+  });
+});
+
+describe("PSR-10 — purchases can be halted without ending the round", function () {
+  it("setPaused stops on-chain purchases, admin records still work, and it can be undone", async function () {
+    const { admin, i1, i2, r } = await presale();
+    await expect(r.connect(i1).setPaused(true)).to.be.revertedWithCustomError(r, "OnlyAdmin");
+    await r.connect(admin).setPaused(true);
+    await expect(r.connect(i1).investWithUSDC(U6(10_000))).to.be.revertedWithCustomError(r, "PurchasesPaused");
+    await expect(r.connect(i1).invest({ value: E(1) })).to.be.revertedWithCustomError(r, "PurchasesPaused");
+    await r.connect(admin).addInvestor(i2.address, 100n * 10n ** 8n);
+    await r.connect(admin).setPaused(false);
+    await r.connect(i1).investWithUSDC(U6(10_000));
+  });
+});
+
+describe("PSR-12 — oracle and payment-token details", function () {
+  it("the price views apply the purchase checks: a negative or future-dated answer is refused", async function () {
+    const [admin] = await ethers.getSigners();
+    const { token } = await srxToken(admin);
+    const F = await ethers.getContractFactory("MockChainlinkFeed");
+    const feed = await F.deploy(2_500n * 10n ** 8n);
+    const R = await ethers.getContractFactory("PreSaleRound");
+    const r = await R.deploy(token.target, ethers.ZeroAddress, ethers.ZeroAddress, ethers.ZeroAddress,
+      feed.target, ethers.ZeroAddress, admin.address, E(1_000_000), 1_250_000n, true, 5_000n);
+    await feed.setPrice(-1);
+    // Before the fix currentEthPrice() returned 2^256 - 1 for this.
+    await expect(r.currentEthPrice()).to.be.revertedWithCustomError(r, "InvalidOraclePrice");
+    await feed.setPrice(2_500n * 10n ** 8n);
+    await feed.setUpdatedAt((await time.latest()) + 3600);
+    // Before the fix a future updatedAt panicked (arithmetic underflow) on purchase.
+    await expect(r.invest({ value: E(1) })).to.be.revertedWithCustomError(r, "InvalidOraclePrice");
+  });
+
+  it("no staleness setting can exceed 25 hours", async function () {
+    const { admin, r } = await presale();
+    await expect(r.connect(admin).setMaxStaleness(30 * 86_400)).to.be.revertedWithCustomError(r, "StalenessTooLong");
+    await expect(r.connect(admin).setFeedStaleness(0, 0, 30 * 86_400)).to.be.revertedWithCustomError(r, "StalenessTooLong");
+    await r.connect(admin).setFeedStaleness(3_900, 3_900, 90_000);
+  });
+
+  it("a stablecoin feed above $1 does not credit more than the dollar paid", async function () {
+    const { admin, i1, r, usdc } = await presale();
+    const baseline = await r.quoteStable(U6(10_000), i1.address);
+    const F = await ethers.getContractFactory("MockChainlinkFeed");
+    const feed = await F.deploy(105_000_000n); // USDC at $1.05
+    await r.connect(admin).setStablecoinFeeds(feed.target, ethers.ZeroAddress);
+    await r.connect(i1).investWithUSDC(U6(10_000));
+    expect((await r.investors(i1.address)).srxAllocation).to.equal(baseline);
+    expect(await usdc.balanceOf(r.target)).to.equal(U6(10_000));
+  });
+
+  it("a fee-charging USDT is credited at what arrived, not the nominal amount", async function () {
+    const [admin, i1] = await ethers.getSigners();
+    const { token } = await srxToken(admin);
+    const Fee = await ethers.getContractFactory("MockFeeOnTransferERC20");
+    const usdt = await Fee.deploy(6, 100); // 1% fee
+    const R = await ethers.getContractFactory("PreSaleRound");
+    const r = await R.deploy(token.target, ethers.ZeroAddress, usdt.target, ethers.ZeroAddress,
+      ethers.ZeroAddress, ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, true, 5_000n);
+    await token.connect(admin).transfer(r.target, E(300_000_000));
+    await usdt.mint(i1.address, U6(10_000));
+    await usdt.connect(i1).approve(r.target, ethers.MaxUint256);
+    await r.connect(i1).investWithUSDT(U6(10_000));
+    const inv = await r.investors(i1.address);
+    expect(inv.cumulativeUsd8Dec).to.equal(9_900n * 10n ** 8n);     // 9,900 arrived
+    expect(await r.paidOnChain(i1.address, usdt.target)).to.equal(U6(9_900));
+  });
+});
+
+describe("G-I2 — changing the fee floor and ceiling leaves a public record", function () {
+  it("setFeeLimits emits FeeLimitsUpdated with the old and new values", async function () {
+    const [admin, staking] = await ethers.getSigners();
+    const FC = await ethers.getContractFactory("FeeController");
+    const fc = await upgrades.deployProxy(FC, [staking.address, admin.address], { kind: "uups" });
+    const [oldMin, oldMax] = [await fc.minFeeBps(), await fc.maxFeeBps()];
+    await expect(fc.connect(admin).setFeeLimits(0n, 500n))
+      .to.emit(fc, "FeeLimitsUpdated").withArgs(oldMin, oldMax, 0n, 500n);
   });
 });

@@ -145,7 +145,7 @@ async function runBscTestnet() {
 
   try {
     const Factory = await ethers.getContractFactory("SRXOFTNative");
-    oft = await Factory.deploy(LZ_ENDPOINT_BSC, deployer.address);
+    oft = await Factory.deploy(LZ_ENDPOINT_BSC, deployer.address, SEPOLIA_EID); // hub: Sepolia (N-01)
     await oft.waitForDeployment();
     oftAddr = await oft.getAddress();
 

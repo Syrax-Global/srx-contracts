@@ -16,6 +16,7 @@
  */
 const { ethers, upgrades, network } = require("hardhat");
 const { WALLETS } = require("./00_config");
+const { createAdminBatch } = require("./lib/adminTx");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -46,8 +47,12 @@ async function main() {
   console.log("\nGranting BURN_ROLE on SRXToken to Treasury...");
   const token = await ethers.getContractAt("SRXToken", srxToken);
   const BURN_ROLE = await token.BURN_ROLE();
-  await (await token.grantRole(BURN_ROLE, treasuryAddress)).wait();
-  console.log(`BURN_ROLE granted to Treasury`);
+
+  // grantRole on SRXToken is DEFAULT_ADMIN_ROLE-gated, held by WALLETS.admin (the
+  // admin Safe on mainnet) — not the deployer. SC-TRUST-002: route through it.
+  const batch = createAdminBatch("05_treasury");
+  await batch.send(token, "grantRole", [BURN_ROLE, treasuryAddress], "SRXToken.grantRole(BURN_ROLE, Treasury)");
+  await batch.flush();
 
   console.log(`\n✅ SRXTreasury deployed`);
   console.log(`\n⚠️  Save to .env:`);

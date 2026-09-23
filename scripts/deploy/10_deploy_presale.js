@@ -8,6 +8,17 @@
  *   ETH and WBTC rates are calculated live via Chainlink oracles — no manual updates needed.
  *   USDC and USDT are treated as $1 each.
  *
+ * Launch configuration (pre-external-audit sweep, 23 Sep 2026):
+ *   PSR-04 — the contract's defaults are not a launch configuration: a 5-minute
+ *   staleness blocks the ETH/BNB path (Chainlink's heartbeat is an hour), price
+ *   bounds are off, and stablecoins are assumed to be $1. This script now sets all
+ *   of them, plus the $2,500 minimum, from PRESALE_CONFIG below — directly if the
+ *   deployer is the admin (testnets), otherwise as a Safe Transaction Builder file
+ *   for the admin Safe to sign. Every feed's on-chain description is checked
+ *   first, so a wrong address stops the script instead of pricing SRX.
+ *   PSR-11 — the admin is immutable. On mainnet the script refuses unless the
+ *   admin is a contract (the Safe): an EOA admin could never be replaced.
+ *
  * Usage:
  *   npx hardhat run scripts/deploy/10_deploy_presale.js --network sepolia
  *   npx hardhat run scripts/deploy/10_deploy_presale.js --network ethereum
@@ -81,6 +92,32 @@ const CHAINLINK_FEEDS = {
   },
 };
 
+// ── Launch configuration (PSR-04). All prices 8-decimal USD. ──────────────────
+// Feed addresses and descriptions checked on-chain 23 Sep 2026; the script
+// re-checks the description at run time. Stablecoin feeds are Ethereum and BNB
+// Chain mainnet only — on testnets the contract's $1 default stands.
+const USD8 = (n) => BigInt(Math.round(n * 1e8));
+const BOUNDS = {
+  ETH: [USD8(100), USD8(20_000)],
+  BNB: [USD8(10), USD8(5_000)],
+  BTC: [USD8(10_000), USD8(500_000)],
+  STABLE: [USD8(0.5), USD8(2)],
+};
+const STALENESS = { native: 3_900, btc: 3_900, stable: 90_000 }; // heartbeat + margin (1h, 1h, 24h)
+const MIN_CONTRIBUTION_USD8 = USD8(2_500);                         // the Genesis page's stated minimum
+const STABLE_FEEDS = {
+  ethereum: { usdc: "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", usdt: "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D" },
+  bsc:      { usdc: "0x51597f405303C4377E36123cBc172b13269EA163", usdt: "0xB97Ad0E74fa7d920791E90258A6E2085088b4320" },
+};
+const MAINNETS = ["ethereum", "bsc"];
+
+async function requireFeed(address, expected) {
+  const feed = new ethers.Contract(address, ["function description() view returns (string)"], ethers.provider);
+  const got = await feed.description();
+  if (got !== expected) throw new Error(`Feed ${address} describes itself as "${got}", expected "${expected}"`);
+  console.log(`  ✓ ${address} is "${got}"`);
+}
+
 // ── Existing token address (optional — leave blank to deploy fresh) ────────────
 const EXISTING_TOKEN = {
   sepolia:  process.env.SRX_TOKEN_SEPOLIA  || "",
@@ -104,6 +141,10 @@ async function main() {
   console.log(`${"=".repeat(60)}\n`);
 
   const admin = WALLETS.admin;
+  // PSR-11: the presale admin is immutable. On mainnet it must be the Safe.
+  if (MAINNETS.includes(net) && (await ethers.provider.getCode(admin)) === "0x") {
+    throw new Error(`Admin ${admin} has no code. On ${net} the presale admin must be the admin Safe — it can never be changed.`);
+  }
   console.log(`Admin:     ${admin}`);
   console.log(`SRX Price: $0.0125 (${SRX_PRICE_USD_8DEC} × 10^-8 USD)`);
   console.log(`Hard Cap:  ${ethers.formatUnits(HARD_CAP_SRX, 18)} SRX`);
@@ -114,9 +155,9 @@ async function main() {
   let tokenAddress = EXISTING_TOKEN[net];
 
   if (tokenAddress) {
-    console.log(`[1/2] Using existing SRXToken at: ${tokenAddress}`);
+    console.log(`[1/3] Using existing SRXToken at: ${tokenAddress}`);
   } else {
-    console.log(`[1/2] Deploying SRXToken...`);
+    console.log(`[1/3] Deploying SRXToken...`);
     const lzEndpoint = LZ_ENDPOINTS[net];
     if (!lzEndpoint) throw new Error(`No LayerZero endpoint for network "${net}"`);
 
@@ -138,7 +179,7 @@ async function main() {
   const isEthChain = ["sepolia", "ethereum"].includes(net);
   const nativeSymbol = isEthChain ? "ETH" : "BNB";
 
-  console.log(`[2/2] Deploying PreSaleRound...`);
+  console.log(`[2/3] Deploying PreSaleRound...`);
   console.log(`  SRX Token:             ${tokenAddress}`);
   console.log(`  USDC:                  ${usdc  === ethers.ZeroAddress ? "disabled" : usdc}`);
   console.log(`  USDT:                  ${usdt  === ethers.ZeroAddress ? "disabled" : usdt}`);
@@ -166,6 +207,43 @@ async function main() {
 
   console.log(`\n  ✅ PreSaleRound deployed: ${presaleAddress}`);
 
+  // ── Step 3: Launch configuration (PSR-04) ──────────────────────────────────
+  console.log(`\n[3/3] Launch configuration — checking feeds...`);
+  await requireFeed(nativeTokenFeed, `${nativeSymbol} / USD`);
+  await requireFeed(btcUsd, "BTC / USD");
+  const stable = STABLE_FEEDS[net];
+  if (stable) {
+    await requireFeed(stable.usdc, "USDC / USD");
+    await requireFeed(stable.usdt, "USDT / USD");
+  }
+  const calls = [
+    ["setFeedStaleness", [STALENESS.native, STALENESS.btc, STALENESS.stable]],
+    ["setOraclePriceBounds", [...BOUNDS[nativeSymbol], ...BOUNDS.BTC]],
+    ["setStablecoinPriceBounds", BOUNDS.STABLE],
+    ...(stable ? [["setStablecoinFeeds", [stable.usdc, stable.usdt]]] : []),
+    ["setMinContribution", [MIN_CONTRIBUTION_USD8]],
+  ];
+  if (MAINNETS.includes(net) && !stable) throw new Error(`No stablecoin feeds configured for ${net}`);
+
+  if (ethers.getAddress(admin) === ethers.getAddress(deployer.address)) {
+    for (const [fn, args] of calls) {
+      await (await presale[fn](...args)).wait();
+      console.log(`  ✅ ${fn}(${args.join(", ")})`);
+    }
+  } else {
+    const fs = require("fs");
+    const file = `presale_config.${net}.json`;
+    fs.writeFileSync(file, JSON.stringify({
+      version: "1.0",
+      chainId: (await ethers.provider.getNetwork()).chainId.toString(),
+      createdAt: Math.floor(Date.now() / 1000),
+      meta: { name: `PreSaleRound launch configuration (${net})`, description: "PSR-04: staleness, price bounds, stablecoin feeds, minimum contribution. Sign BEFORE opening the round." },
+      transactions: calls.map(([fn, args]) => ({ to: presaleAddress, value: "0", data: presale.interface.encodeFunctionData(fn, args) })),
+    }, null, 2));
+    console.log(`  📝 The admin Safe must sign ${calls.length} configuration calls: ${file}`);
+    console.log(`  ⛔ Do not open the round until they have executed.`);
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
 
   console.log(`\n${"=".repeat(60)}`);
@@ -184,7 +262,9 @@ async function main() {
 
   2. Fund the PreSaleRound with SRX tokens.
      On testnet: call genesis(presaleAddress) on the SRXToken as admin.
-     On mainnet: handled by TGEDistributor (not yet — presale only for now).
+     On mainnet: OPEN DECISION (PSR-03) — the funding source and which chain(s)
+     carry the round are not settled. The cap is per contract, so a round on two
+     chains is two caps.
 
   3. Add investors or open for on-chain investment:
        Off-chain: presaleRound.addInvestor(address, usdAmount8Dec)
@@ -192,11 +272,15 @@ async function main() {
                   Contract calculates SRX + the flat +50% bonus automatically.
        On-chain:  investors call invest() / investWithUSDC() / investWithUSDT() / investWithWBTC()
 
-  4. Deploy vaults when ready:
-       presaleRound.batchDeployVaults()
+  4. Deploy vaults when ready, in batches of 20-50:
+       presaleRound.batchDeployVaults(startIndex, endIndex)
+     ⛔ BEFORE SRXToken's maxWalletBalance is switched on (PSR-09): a new vault
+        cannot be exempted in advance, so a large allocation would revert.
 
   ⚠️  ETH and WBTC rates update automatically from Chainlink — no manual price updates needed.
-  ⚠️  If the SRX price changes (not just ETH/BTC), call setSRXPrice() with the new 8-decimal value.
+  ⚠️  The SRX price is locked once the first investor exists (R5-02). To change it,
+      finalize this round and deploy a new one. setSRXPrice() only works before that.
+  ⚠️  A failed KYC on someone who paid on-chain: refundInvestor(addr), never removeInvestor.
   ⚠️  Do NOT call batchTriggerTGE() until the full token launch.
   `);
 }
