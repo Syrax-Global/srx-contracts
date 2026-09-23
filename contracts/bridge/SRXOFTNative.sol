@@ -50,6 +50,15 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
     error ZeroAmount();
     /// @notice A mint would take this chain's supply above MAX_SUPPLY.
     error SupplyCapExceeded(uint256 resultingSupply, uint256 cap);
+    /// @notice This chain sends to, and accepts from, the Ethereum hub only.
+    error NotHub(uint32 eid, uint32 hubEid);
+
+    /// @notice LayerZero endpoint id of the Ethereum hub (SRXToken). Fixed at deployment.
+    /// @dev ⛔ N-01: with every chain peered to every other, SRX moved spoke to spoke
+    ///      without Ethereum seeing it, so Ethereum could not bound what came back.
+    ///      Hub-and-spoke (Jared, 23 Sep 2026): Ethereum tracks what it sent to
+    ///      each chain; this contract refuses any other route.
+    uint32 public immutable hubEid;
 
     // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -92,12 +101,15 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
      */
     constructor(
         address _lzEndpoint,
-        address _admin
+        address _admin,
+        uint32  _hubEid
     )
         OFT("Syrax Token", "SRX", _lzEndpoint, _admin)
         Ownable(_admin)
     {
         if (_admin == address(0)) revert ZeroAddress();
+        if (_hubEid == 0) revert NotHub(0, 0);
+        hubEid = _hubEid;
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(PAUSER_ROLE,        _admin);
         // BURN_ROLE granted to admin so buyAndBurn() is immediately usable.
@@ -166,6 +178,24 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
     }
 
     // ── Internal Overrides ─────────────────────────────────────────────────────
+
+    function _debit(address _from, uint256 _amountLD, uint256 _minAmountLD, uint32 _dstEid)
+        internal
+        override
+        returns (uint256 amountSentLD, uint256 amountReceivedLD)
+    {
+        if (_dstEid != hubEid) revert NotHub(_dstEid, hubEid);
+        return super._debit(_from, _amountLD, _minAmountLD, _dstEid);
+    }
+
+    function _credit(address _to, uint256 _amountLD, uint32 _srcEid)
+        internal
+        override
+        returns (uint256 amountReceivedLD)
+    {
+        if (_srcEid != hubEid) revert NotHub(_srcEid, hubEid);
+        return super._credit(_to, _amountLD, _srcEid);
+    }
 
     function _update(address from, address to, uint256 value)
         internal

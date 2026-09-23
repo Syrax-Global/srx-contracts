@@ -67,7 +67,21 @@ import { VestingVault } from "../vesting/VestingVault.sol";
  *      individual VestingVaults — one per investor.
  *   5. At token launch, admin calls batchTriggerTGE() to start all vesting clocks.
  *   6. Admin calls withdrawETH() / withdrawUSDC() / withdrawUSDT() / withdrawWBTC()
- *      to collect raised funds.
+ *      to collect raised funds. Money owed back to refunded investors is
+ *      ring-fenced and cannot be withdrawn (PSR-06).
+ *
+ * Refunds (PSR-06, pre-external-audit sweep, 23 Sep 2026):
+ *   Every on-chain payment is recorded per investor and per asset. If an investor
+ *   must be removed (e.g. failed KYC), refundInvestor() removes the allocation and
+ *   makes exactly what they paid claimable by them through claimRefund(). It
+ *   refuses unless the contract holds enough to pay every outstanding refund, so
+ *   a refund on the books is always payable. An investor who has paid on-chain
+ *   cannot be removed or have their allocation changed any other way. Off-chain
+ *   (SAFT / wire) amounts are refunded off-chain, as they were received.
+ *
+ * Launch ordering (PSR-09): deploy every vault BEFORE SRXToken's maxWalletBalance
+ *   is switched on. A vault is a new address and cannot be exempted in advance,
+ *   so an allocation above the wallet limit would make deployVault revert.
  *
  * Vesting terms (seed-equivalent, hardcoded):
  *   TGE unlock : 0%
@@ -98,6 +112,15 @@ contract PreSaleRound is ReentrancyGuard {
     // setMaxStaleness() if oracle reliability requires it during deployment.
 
     uint256 public constant DEFAULT_MAX_STALENESS = 300; // 5 minutes
+
+    /// @notice Ceiling for every staleness setting (PSR-12). Chainlink's slowest
+    ///         relevant heartbeat is 24h (stablecoin/USD on Ethereum); an hour of
+    ///         margin above it. Unbounded, a typo could disable the check.
+    uint256 public constant MAX_STALENESS_LIMIT = 25 hours;
+
+    /// @notice A stablecoin is never credited above par (PSR-12): a feed reading
+    ///         $1.02 would otherwise give 2% more SRX than the dollar paid.
+    uint256 public constant STABLE_PAR_USD8DEC = 1e8;
 
     // ── Participation tier thresholds (cumulative USD in 8-decimal format) ────
     //
@@ -229,6 +252,16 @@ contract PreSaleRound is ReentrancyGuard {
 
     uint256 public totalAllocated;
 
+    /// @notice Purchases halted by the admin (PSR-10). Admin actions are unaffected.
+    bool public paused;
+
+    /// @notice What each investor paid on-chain, per asset. address(0) = ETH.
+    mapping(address => mapping(address => uint256)) public paidOnChain;
+    /// @notice Refunds owed and not yet claimed, per investor and asset.
+    mapping(address => mapping(address => uint256)) public refundOwed;
+    /// @notice Sum of refundOwed per asset — ring-fenced from every withdrawal.
+    mapping(address => uint256) public totalRefundOwed;
+
     // ── Events ─────────────────────────────────────────────────────────────────
 
     event InvestorAdded(address indexed investor, uint256 srxAmount, bool offChain);
@@ -260,6 +293,11 @@ contract PreSaleRound is ReentrancyGuard {
     event StablecoinFeedsUpdated(address indexed usdcFeed, address indexed usdtFeed);
     event StablecoinPriceBoundsUpdated(uint256 minStablePriceUsd8Dec, uint256 maxStablePriceUsd8Dec);
     event FeedStalenessUpdated(uint256 ethMaxStaleness, uint256 btcMaxStaleness, uint256 stableMaxStaleness);
+    event PaymentReceived(address indexed investor, address indexed asset, uint256 amount, uint256 usd8Dec);
+    event RefundOwed(address indexed investor, address indexed asset, uint256 amount);
+    event RefundClaimed(address indexed investor, address indexed asset, uint256 amount);
+    event PausedSet(bool paused);
+    event VaultSurplusRescued(address indexed investor, address indexed vault, address indexed recipient);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -285,6 +323,10 @@ contract PreSaleRound is ReentrancyGuard {
     error AllocationNotRepresentable(uint256 srxAmount);          // PSR-02: inside a tier jump
     error BelowMinimumContribution(uint256 usd8Dec, uint256 minimum); // PSR-05
     error UnsupportedFeedDecimals(address feed, uint8 decimals); // every price here is 8-decimal USD
+    error HasOnChainPayment(address investor);                  // PSR-06: use refundInvestor
+    error RefundUnderfunded(address asset, uint256 owed, uint256 held); // PSR-06: return funds first
+    error PurchasesPaused();                                    // PSR-10
+    error StalenessTooLong(uint256 seconds_, uint256 limit);    // PSR-12
 
     // ── Modifiers ──────────────────────────────────────────────────────────────
 
@@ -295,6 +337,11 @@ contract PreSaleRound is ReentrancyGuard {
 
     modifier notFinalized() {
         if (finalized) revert RoundFinalized();
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert PurchasesPaused();
         _;
     }
 
@@ -394,6 +441,9 @@ contract PreSaleRound is ReentrancyGuard {
         if (inv.srxAllocation == 0)  revert NoAllocation();
         if (inv.vault != address(0)) revert VaultAlreadyDeployed();
         if (newSrxAmount == 0)       revert ZeroAmount();
+        // PSR-06: an on-chain payer's allocation is what their payment bought.
+        // Changing it here would take or give SRX with no money moving.
+        if (_hasOnChainPayment(investor)) revert HasOnChainPayment(investor);
 
         uint256 oldAmount = inv.srxAllocation;
         uint256 newTotal  = totalAllocated - oldAmount + newSrxAmount;
@@ -420,6 +470,46 @@ contract PreSaleRound is ReentrancyGuard {
      *      to an off-chain index mapping to make removal O(1) (A3-L-01 note).
      */
     function removeInvestor(address investor) external onlyAdmin notFinalized {
+        // ⛔ PSR-06: this deleted an on-chain payer's allocation and kept their
+        //    ETH or stablecoins. A payer is removed only by refundInvestor().
+        if (_hasOnChainPayment(investor)) revert HasOnChainPayment(investor);
+        _removeInvestor(investor);
+    }
+
+    /**
+     * @notice Remove an investor who paid on-chain and make what they paid
+     *         claimable by them (PSR-06). Allowed until their vault is deployed,
+     *         including after finalize() — a failed KYC can surface late.
+     * @dev Refuses unless the contract holds every outstanding refund of each
+     *      asset involved. If raised funds were already withdrawn, return them
+     *      first. Off-chain amounts on the same investor are refunded off-chain.
+     */
+    function refundInvestor(address investor) external onlyAdmin nonReentrant {
+        if (!_hasOnChainPayment(investor)) revert NoAllocation();
+        _removeInvestor(investor);
+        _oweRefund(investor, address(0));
+        _oweRefund(investor, address(usdc));
+        _oweRefund(investor, address(usdt));
+        _oweRefund(investor, address(wbtc));
+    }
+
+    /// @notice Claim a refund made owing by refundInvestor(). Paid to the caller —
+    ///         the address that made the payment — and to no one else.
+    function claimRefund(address asset) external nonReentrant {
+        uint256 amount = refundOwed[msg.sender][asset];
+        if (amount == 0) revert ZeroAmount();
+        refundOwed[msg.sender][asset] = 0;
+        totalRefundOwed[asset] -= amount;
+        if (asset == address(0)) {
+            (bool ok,) = msg.sender.call{ value: amount }("");
+            if (!ok) revert ETHTransferFailed();
+        } else {
+            IERC20(asset).safeTransfer(msg.sender, amount);
+        }
+        emit RefundClaimed(msg.sender, asset, amount);
+    }
+
+    function _removeInvestor(address investor) private {
         Investor storage inv = investors[investor];
         if (inv.srxAllocation == 0)  revert NoAllocation();
         if (inv.vault != address(0)) revert VaultAlreadyDeployed();
@@ -439,6 +529,50 @@ contract PreSaleRound is ReentrancyGuard {
         emit InvestorRemoved(investor);
     }
 
+    function _oweRefund(address investor, address asset) private {
+        uint256 paid = paidOnChain[investor][asset];
+        if (paid == 0) return;
+        paidOnChain[investor][asset] = 0;
+        refundOwed[investor][asset] += paid;
+        uint256 owed = totalRefundOwed[asset] + paid;
+        totalRefundOwed[asset] = owed;
+        uint256 held = _held(asset);
+        if (held < owed) revert RefundUnderfunded(asset, owed, held);
+        emit RefundOwed(investor, asset, paid);
+    }
+
+    function _hasOnChainPayment(address investor) private view returns (bool) {
+        return paidOnChain[investor][address(0)] != 0
+            || paidOnChain[investor][address(usdc)] != 0
+            || paidOnChain[investor][address(usdt)] != 0
+            || paidOnChain[investor][address(wbtc)] != 0;
+    }
+
+    function _held(address asset) private view returns (uint256) {
+        return asset == address(0) ? address(this).balance : IERC20(asset).balanceOf(address(this));
+    }
+
+    /// @dev What the admin may withdraw of an asset: everything but owed refunds.
+    function _withdrawable(address asset) private view returns (uint256) {
+        uint256 held = _held(asset);
+        uint256 owed = totalRefundOwed[asset];
+        return held > owed ? held - owed : 0;
+    }
+
+    /// @dev Pull a payment token and return what actually arrived (PSR-12: a
+    ///      fee-on-transfer switch on USDT must not be credited at face value).
+    function _pull(IERC20 token, uint256 amount) private returns (uint256 received) {
+        uint256 before = token.balanceOf(address(this));
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        received = token.balanceOf(address(this)) - before;
+        if (received == 0) revert ZeroAmount();
+    }
+
+    function _recordPayment(address asset, uint256 amount, uint256 usd8Dec) private {
+        paidOnChain[msg.sender][asset] += amount;
+        emit PaymentReceived(msg.sender, asset, amount, usd8Dec);
+    }
+
     // ── On-chain: ETH ─────────────────────────────────────────────────────────
 
     /**
@@ -448,7 +582,7 @@ contract PreSaleRound is ReentrancyGuard {
      *         Crossing a tier boundary on top-up retroactively upgrades the full allocation.
      *         Reverts if the investor's vault has already been deployed (allocation locked).
      */
-    function invest() external payable notFinalized nonReentrant {
+    function invest() external payable notFinalized whenNotPaused nonReentrant {
         if (address(ethUsdFeed) == address(0)) revert CurrencyDisabled();
         if (msg.value == 0) revert ZeroAmount();
         if (investors[msg.sender].vault != address(0)) revert VaultAlreadyDeployed();
@@ -456,6 +590,7 @@ contract PreSaleRound is ReentrancyGuard {
         uint256 usdValue8Dec = _ethToUsd8Dec(msg.value);
         if (usdValue8Dec == 0) revert ZeroAmount();
 
+        _recordPayment(address(0), msg.value, usdValue8Dec);
         _processInvestment(msg.sender, usdValue8Dec, false);
     }
 
@@ -468,15 +603,16 @@ contract PreSaleRound is ReentrancyGuard {
      *         Crossing a tier boundary retroactively upgrades the full allocation.
      *         Reverts if the investor's vault has already been deployed (allocation locked).
      */
-    function investWithUSDC(uint256 usdcAmount) external notFinalized nonReentrant {
+    function investWithUSDC(uint256 usdcAmount) external notFinalized whenNotPaused nonReentrant {
         if (address(usdc) == address(0)) revert CurrencyDisabled();
         if (usdcAmount == 0) revert ZeroAmount();
         if (investors[msg.sender].vault != address(0)) revert VaultAlreadyDeployed();
 
-        usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
+        uint256 received = _pull(usdc, usdcAmount);
 
         // SC-OPS-002: use Chainlink USDC/USD feed if set, else default to $1
-        uint256 usdValue8Dec = _stableToUsd8Dec(usdcAmount, usdcUsdFeed, usdcDecimals);
+        uint256 usdValue8Dec = _stableToUsd8Dec(received, usdcUsdFeed, usdcDecimals);
+        _recordPayment(address(usdc), received, usdValue8Dec);
         _processInvestment(msg.sender, usdValue8Dec, false);
     }
 
@@ -489,15 +625,17 @@ contract PreSaleRound is ReentrancyGuard {
      *         Crossing a tier boundary retroactively upgrades the full allocation.
      *         Reverts if the investor's vault has already been deployed (allocation locked).
      */
-    function investWithUSDT(uint256 usdtAmount) external notFinalized nonReentrant {
+    function investWithUSDT(uint256 usdtAmount) external notFinalized whenNotPaused nonReentrant {
         if (address(usdt) == address(0)) revert CurrencyDisabled();
         if (usdtAmount == 0) revert ZeroAmount();
         if (investors[msg.sender].vault != address(0)) revert VaultAlreadyDeployed();
 
-        usdt.safeTransferFrom(msg.sender, address(this), usdtAmount);
+        // PSR-12: USDT has a dormant transfer fee; credit what arrived, not the nominal.
+        uint256 received = _pull(usdt, usdtAmount);
 
         // SC-OPS-002: use Chainlink USDT/USD feed if set, else default to $1
-        uint256 usdValue8Dec = _stableToUsd8Dec(usdtAmount, usdtUsdFeed, usdtDecimals);
+        uint256 usdValue8Dec = _stableToUsd8Dec(received, usdtUsdFeed, usdtDecimals);
+        _recordPayment(address(usdt), received, usdValue8Dec);
         _processInvestment(msg.sender, usdValue8Dec, false);
     }
 
@@ -510,16 +648,17 @@ contract PreSaleRound is ReentrancyGuard {
      *         Crossing a tier boundary retroactively upgrades the full allocation.
      *         Reverts if the investor's vault has already been deployed (allocation locked).
      */
-    function investWithWBTC(uint256 wbtcAmount) external notFinalized nonReentrant {
+    function investWithWBTC(uint256 wbtcAmount) external notFinalized whenNotPaused nonReentrant {
         if (address(wbtc) == address(0) || address(btcUsdFeed) == address(0)) revert CurrencyDisabled();
         if (wbtcAmount == 0) revert ZeroAmount();
         if (investors[msg.sender].vault != address(0)) revert VaultAlreadyDeployed();
 
-        wbtc.safeTransferFrom(msg.sender, address(this), wbtcAmount);
+        uint256 received = _pull(wbtc, wbtcAmount);
 
-        uint256 usdValue8Dec = _wbtcToUsd8Dec(wbtcAmount);
+        uint256 usdValue8Dec = _wbtcToUsd8Dec(received);
         if (usdValue8Dec == 0) revert ZeroAmount();
 
+        _recordPayment(address(wbtc), received, usdValue8Dec);
         _processInvestment(msg.sender, usdValue8Dec, false);
     }
 
@@ -544,6 +683,9 @@ contract PreSaleRound is ReentrancyGuard {
         vault     = address(v);
         inv.vault = vault;
         srxToken.safeTransfer(vault, amount);
+        // PSR-08: declare the grant, so a mistaken transfer to the vault is
+        // recoverable as surplus (rescueVaultSurplus) and cannot vest.
+        v.declareExpectedAllocation(amount);
 
         emit VaultDeployed(investor, vault, amount);
     }
@@ -579,6 +721,7 @@ contract PreSaleRound is ReentrancyGuard {
             );
             inv.vault = address(v);
             srxToken.safeTransfer(address(v), amount);
+            v.declareExpectedAllocation(amount); // PSR-08
             emit VaultDeployed(investor, address(v), amount);
         }
     }
@@ -615,6 +758,23 @@ contract PreSaleRound is ReentrancyGuard {
         VestingVault(vaultAddr).revoke(revokeRecipient);
     }
 
+    /// @notice Recover tokens sent to an investor's vault by mistake (PSR-08). This
+    ///         contract is every presale vault's admin, so without a pass-through the
+    ///         vault's own rescue path could never be called. Only the surplus above
+    ///         the declared grant moves; the investor's allocation cannot.
+    function rescueVaultSurplus(address investor, address recipient) external onlyAdmin {
+        address vaultAddr = investors[investor].vault;
+        if (vaultAddr == address(0)) revert NoAllocation();
+        VestingVault(vaultAddr).rescueDonatedTokens(recipient);
+        emit VaultSurplusRescued(investor, vaultAddr, recipient);
+    }
+
+    /// @notice Halt or resume purchases (PSR-10). finalize() is one-way; this is not.
+    function setPaused(bool _paused) external onlyAdmin {
+        paused = _paused;
+        emit PausedSet(_paused);
+    }
+
     // ── Admin config ───────────────────────────────────────────────────────────
 
     function finalize() external onlyAdmin notFinalized {
@@ -648,6 +808,7 @@ contract PreSaleRound is ReentrancyGuard {
      */
     function setMaxStaleness(uint256 _maxStaleness) external onlyAdmin {
         if (_maxStaleness == 0) revert ZeroAmount();
+        if (_maxStaleness > MAX_STALENESS_LIMIT) revert StalenessTooLong(_maxStaleness, MAX_STALENESS_LIMIT);
         maxStaleness = _maxStaleness;
         emit MaxStalenessUpdated(_maxStaleness);
     }
@@ -732,6 +893,9 @@ contract PreSaleRound is ReentrancyGuard {
      * @param _stable Stablecoin feed staleness override in seconds (0 = use maxStaleness).
      */
     function setFeedStaleness(uint256 _eth, uint256 _btc, uint256 _stable) external onlyAdmin {
+        if (_eth > MAX_STALENESS_LIMIT)    revert StalenessTooLong(_eth, MAX_STALENESS_LIMIT);
+        if (_btc > MAX_STALENESS_LIMIT)    revert StalenessTooLong(_btc, MAX_STALENESS_LIMIT);
+        if (_stable > MAX_STALENESS_LIMIT) revert StalenessTooLong(_stable, MAX_STALENESS_LIMIT);
         ethMaxStaleness    = _eth;
         btcMaxStaleness    = _btc;
         stableMaxStaleness = _stable;
@@ -749,7 +913,7 @@ contract PreSaleRound is ReentrancyGuard {
 
     function withdrawETH(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        uint256 bal = address(this).balance;
+        uint256 bal = _withdrawable(address(0));
         if (bal == 0) revert ZeroAmount();
         (bool ok,) = to.call{ value: bal }("");
         if (!ok) revert ETHTransferFailed();
@@ -767,7 +931,7 @@ contract PreSaleRound is ReentrancyGuard {
      */
     function withdrawETHAmount(address to, uint256 amount) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        if (amount == 0 || amount > address(this).balance) revert ZeroAmount();
+        if (amount == 0 || amount > _withdrawable(address(0))) revert ZeroAmount();
         (bool ok,) = to.call{ value: amount }("");
         if (!ok) revert ETHTransferFailed();
         emit ETHWithdrawn(to, amount);
@@ -775,7 +939,7 @@ contract PreSaleRound is ReentrancyGuard {
 
     function withdrawUSDC(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        uint256 bal = usdc.balanceOf(address(this));
+        uint256 bal = _withdrawable(address(usdc));
         if (bal == 0) revert ZeroAmount();
         usdc.safeTransfer(to, bal);
         emit USDCWithdrawn(to, bal);
@@ -783,7 +947,7 @@ contract PreSaleRound is ReentrancyGuard {
 
     function withdrawUSDT(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        uint256 bal = usdt.balanceOf(address(this));
+        uint256 bal = _withdrawable(address(usdt));
         if (bal == 0) revert ZeroAmount();
         usdt.safeTransfer(to, bal);
         emit USDTWithdrawn(to, bal);
@@ -791,7 +955,7 @@ contract PreSaleRound is ReentrancyGuard {
 
     function withdrawWBTC(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        uint256 bal = wbtc.balanceOf(address(this));
+        uint256 bal = _withdrawable(address(wbtc));
         if (bal == 0) revert ZeroAmount();
         wbtc.safeTransfer(to, bal);
         emit WBTCWithdrawn(to, bal);
@@ -839,17 +1003,17 @@ contract PreSaleRound is ReentrancyGuard {
     }
 
     /// @notice Current ETH/USD price from Chainlink (8 decimal places).
+    /// @dev PSR-12: runs the same checks as a purchase. It returned the raw answer,
+    ///      so a negative price read as ~1.16e77 and a stale one as current.
     function currentEthPrice() external view returns (uint256) {
         if (address(ethUsdFeed) == address(0)) revert CurrencyDisabled();
-        (, int256 price,,, ) = ethUsdFeed.latestRoundData();
-        return uint256(price);
+        return _readFeed(ethUsdFeed, ethMaxStaleness, minEthPriceUsd8Dec, maxEthPriceUsd8Dec);
     }
 
     /// @notice Current BTC/USD price from Chainlink (8 decimal places).
     function currentBtcPrice() external view returns (uint256) {
         if (address(btcUsdFeed) == address(0)) revert CurrencyDisabled();
-        (, int256 price,,, ) = btcUsdFeed.latestRoundData();
-        return uint256(price);
+        return _readFeed(btcUsdFeed, btcMaxStaleness, minBtcPriceUsd8Dec, maxBtcPriceUsd8Dec);
     }
 
     // ── Tier views ─────────────────────────────────────────────────────────────
@@ -1054,19 +1218,31 @@ contract PreSaleRound is ReentrancyGuard {
      *      At ETH=$2500: 1e18 × 250_000_000_000 / 1e18 = 250_000_000_000 ($2500 in 8-dec)
      */
     function _ethToUsd8Dec(uint256 ethAmount) internal view returns (uint256) {
-        (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) = ethUsdFeed.latestRoundData();
-        if (price <= 0)                                  revert InvalidOraclePrice();
-        // SC-ECON-002: per-feed staleness override (0 = global maxStaleness)
-        uint256 ethStale = ethMaxStaleness != 0 ? ethMaxStaleness : maxStaleness;
-        if (block.timestamp - updatedAt > ethStale)      revert StalePriceFeed();
-        if (answeredInRound < roundId)                   revert IncompleteRound();
-        // SC-OPS-001 fix: reject implausibly low/high oracle prices
-        uint256 priceU = uint256(price);
-        if (minEthPriceUsd8Dec != 0 && priceU < minEthPriceUsd8Dec)
-            revert OraclePriceOutOfBounds(priceU, minEthPriceUsd8Dec, maxEthPriceUsd8Dec);
-        if (maxEthPriceUsd8Dec != 0 && priceU > maxEthPriceUsd8Dec)
-            revert OraclePriceOutOfBounds(priceU, minEthPriceUsd8Dec, maxEthPriceUsd8Dec);
+        uint256 priceU = _readFeed(ethUsdFeed, ethMaxStaleness, minEthPriceUsd8Dec, maxEthPriceUsd8Dec);
         return ethAmount * priceU / 1e18;
+    }
+
+    /**
+     * @dev Every oracle read goes through here: a positive answer, fresh within the
+     *      feed's staleness (its override, else the global), from a complete round,
+     *      and inside the configured bounds (SC-OPS-001, SC-ECON-002).
+     *      PSR-12: an updatedAt in the future used to panic on the subtraction; it
+     *      is now reported as a bad feed.
+     */
+    function _readFeed(IAggregatorV3 feed, uint256 staleOverride, uint256 minP, uint256 maxP)
+        internal
+        view
+        returns (uint256 priceU)
+    {
+        (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
+        if (price <= 0)                                  revert InvalidOraclePrice();
+        if (updatedAt > block.timestamp)                 revert InvalidOraclePrice();
+        uint256 stale = staleOverride != 0 ? staleOverride : maxStaleness;
+        if (block.timestamp - updatedAt > stale)         revert StalePriceFeed();
+        if (answeredInRound < roundId)                   revert IncompleteRound();
+        priceU = uint256(price);
+        if (minP != 0 && priceU < minP) revert OraclePriceOutOfBounds(priceU, minP, maxP);
+        if (maxP != 0 && priceU > maxP) revert OraclePriceOutOfBounds(priceU, minP, maxP);
     }
 
     /**
@@ -1075,18 +1251,7 @@ contract PreSaleRound is ReentrancyGuard {
      *      At BTC=$60000: 1e8 × 6_000_000_000_000 / 1e8 = 6_000_000_000_000 ($60,000 in 8-dec)
      */
     function _wbtcToUsd8Dec(uint256 wbtcAmount) internal view returns (uint256) {
-        (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) = btcUsdFeed.latestRoundData();
-        if (price <= 0)                                  revert InvalidOraclePrice();
-        // SC-ECON-002: per-feed staleness override (0 = global maxStaleness)
-        uint256 btcStale = btcMaxStaleness != 0 ? btcMaxStaleness : maxStaleness;
-        if (block.timestamp - updatedAt > btcStale)      revert StalePriceFeed();
-        if (answeredInRound < roundId)                   revert IncompleteRound();
-        // SC-OPS-001 fix: reject implausibly low/high oracle prices
-        uint256 priceU = uint256(price);
-        if (minBtcPriceUsd8Dec != 0 && priceU < minBtcPriceUsd8Dec)
-            revert OraclePriceOutOfBounds(priceU, minBtcPriceUsd8Dec, maxBtcPriceUsd8Dec);
-        if (maxBtcPriceUsd8Dec != 0 && priceU > maxBtcPriceUsd8Dec)
-            revert OraclePriceOutOfBounds(priceU, minBtcPriceUsd8Dec, maxBtcPriceUsd8Dec);
+        uint256 priceU = _readFeed(btcUsdFeed, btcMaxStaleness, minBtcPriceUsd8Dec, maxBtcPriceUsd8Dec);
         return wbtcAmount * priceU / (10 ** uint256(wbtcDecimals));
     }
 
@@ -1117,18 +1282,9 @@ contract PreSaleRound is ReentrancyGuard {
                 ? stableAmount / (10 ** uint256(tokenDecimals - 8))
                 : stableAmount * (10 ** uint256(8 - tokenDecimals));
         }
-        (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
-        if (price <= 0)                                  revert InvalidOraclePrice();
-        // SC-ECON-002: per-feed staleness override (0 = global maxStaleness)
-        uint256 stableStale = stableMaxStaleness != 0 ? stableMaxStaleness : maxStaleness;
-        if (block.timestamp - updatedAt > stableStale)   revert StalePriceFeed();
-        if (answeredInRound < roundId)                   revert IncompleteRound();
-        // SC-OPS-001 fix: reject implausibly low/high stablecoin prices
-        uint256 priceU = uint256(price);
-        if (minStablePriceUsd8Dec != 0 && priceU < minStablePriceUsd8Dec)
-            revert OraclePriceOutOfBounds(priceU, minStablePriceUsd8Dec, maxStablePriceUsd8Dec);
-        if (maxStablePriceUsd8Dec != 0 && priceU > maxStablePriceUsd8Dec)
-            revert OraclePriceOutOfBounds(priceU, minStablePriceUsd8Dec, maxStablePriceUsd8Dec);
+        uint256 priceU = _readFeed(feed, stableMaxStaleness, minStablePriceUsd8Dec, maxStablePriceUsd8Dec);
+        // PSR-12: never above par — below-par is honoured, above-par is not paid.
+        if (priceU > STABLE_PAR_USD8DEC) priceU = STABLE_PAR_USD8DEC;
         return stableAmount * priceU / (10 ** uint256(tokenDecimals));
     }
 

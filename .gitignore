@@ -127,3 +127,7 @@ coverage/
 Thumbs.db
 *.swp
 .idea/
+
+# Safe Transaction Builder batches written by the deploy and ops scripts (DEP-01, PSR-04)
+safe_batch.*.json
+presale_config.*.json

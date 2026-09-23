@@ -1,14 +1,26 @@
 # SRX Token — Gnosis Safe Multisig Specification
 
-## Why a Multisig
+## Why a Multisig — and what it may and may not hold
 
-All privileged roles in the SRX token suite are currently held by an EOA
-(Externally Owned Account) deployer. This is acceptable on testnet. It is a
-critical security risk on mainnet.
+At deployment the privileged roles are held by the admin Safe (the deploy scripts
+pass it as admin) and never by the deployer EOA. One compromised private key
+must never equal loss of protocol control, so the Safe is a 3-of-5.
 
-Before TGE, every privileged role MUST be transferred to a Gnosis Safe with
-a minimum 3-of-5 threshold. A single EOA holding admin rights means one
-compromised private key = total loss of protocol control.
+⭐ **Delay-only at launch (decided 23 Sep 2026, pre-external-audit sweep GOV-H1).**
+Before mainnet is considered ready, every administrative power over the core
+contracts moves behind the **48-hour SRXTimelock**, whose only proposer is the
+SRXGovernor. The admin Safe keeps exactly two powers on the core contracts:
+
+- **emergency pause**, exercised through GuardianModule, and
+- **a veto** — `CANCELLER_ROLE` on the Timelock. It can stop a scheduled
+  operation; it cannot start one.
+
+⛔ This replaces the earlier end state, in which the Safe kept `DEFAULT_ADMIN_ROLE`
+on every contract. From there one Safe batch could grant itself `SPENDER_ROLE` and
+withdraw the treasury, re-grant `UPGRADER_ROLE` and upgrade any contract, or use
+the StabilisationFund's `GOVERNANCE_ROLE` to move all 1.5B SRX — none of it
+delayed, although the documentation promised a 48-hour delay. As Timelock admin it
+could also make itself a proposer and schedule `updateDelay(0)`.
 
 ---
 
@@ -36,68 +48,47 @@ No two signers should share the same physical location.
 
 ---
 
-## Roles to Transfer at TGE
+## Launch role topology
 
-The following roles must be transferred from the EOA deployer to the Gnosis
-Safe before any mainnet deployment is considered complete.
+Enforced by `scripts/verify/verify_roles.js` (the mainnet gate) for the six
+contracts marked **gated**; the gate fails if any of these holders is wrong, and
+fails if the Safe or the deployer holds any role it does not list.
 
-### SRXToken
-| Role | bytes32 | Transfer to |
+### Core contracts — everything behind the Timelock (gated)
+
+| Contract | `DEFAULT_ADMIN` | `GOVERNANCE` | `UPGRADER` | `SPENDER` | `PAUSER` | Other |
+|---|---|---|---|---|---|---|
+| SRXToken | Timelock | Timelock | — | — | GuardianModule | `BURN_ROLE`: contracts only (Treasury, Migrator, BuybackBurner), never the Safe. `owner()` and the LayerZero delegate: Timelock |
+| SRXTimelock | Timelock itself | — | — | — | — | `PROPOSER`: Governor only. `CANCELLER`: Governor, and the Safe (veto) |
+| SRXTreasury | Timelock | Timelock | Timelock | Timelock | GuardianModule | |
+| SRXStaking | Timelock | Timelock | Timelock | — | GuardianModule | |
+| FeeController | Timelock | Timelock | Timelock | — | GuardianModule | `GATEWAY_ROLE`: the Syrax backend |
+| StabilisationFund | Timelock | Timelock | Timelock | — | GuardianModule | `DEPLOYER_ROLE` / `GUARDIAN_ROLE`: two distinct multisigs (bounded fast paths) |
+
+Consequence, stated plainly: after the hand-over, **genesis, new `BURN_ROLE`
+grants, LayerZero peers and DVN configuration, fee changes, upgrades and every
+treasury spend are Governor proposals with a 48-hour delay.** Do every launch
+wiring step that needs an admin *before* phase 2 of the migration.
+
+### Operational contracts — Safe-administered by design (not gated)
+
+These run day-to-day operations where a 48-hour delay would stop the product
+working. Each is listed with what its administrator can reach, because that is
+the trust assumption an investor or auditor is being asked to accept.
+
+| Contract | Administrator | What the administrator can reach |
 |---|---|---|
-| `DEFAULT_ADMIN_ROLE` | `0x00` | Gnosis Safe |
-| `PAUSER_ROLE` | `keccak256("PAUSER_ROLE")` | Gnosis Safe |
-| `GOVERNANCE_ROLE` | `keccak256("GOVERNANCE_ROLE")` | Gnosis Safe |
-| `BURN_ROLE` | `keccak256("BURN_ROLE")` | BuybackBurner contract |
-
-### BuybackBurner
-| Role | Transfer to |
-|---|---|
-| `DEFAULT_ADMIN_ROLE` | Gnosis Safe |
-| `OPERATOR_ROLE` | Gnosis Safe or automated operator |
-
-### SRXTreasury
-| Role | Transfer to |
-|---|---|
-| `DEFAULT_ADMIN_ROLE` | Gnosis Safe |
-| `SPENDER_ROLE` | Gnosis Safe |
-
-### StabilisationFund
-| Role | Transfer to |
-|---|---|
-| `DEFAULT_ADMIN_ROLE` | Gnosis Safe |
-| `OPERATOR_ROLE` | Gnosis Safe |
-
-### SRXStaking, FeeController, VestingVault, PreSaleRound, SRXAirdrop
-| Role | Transfer to |
-|---|---|
-| `DEFAULT_ADMIN_ROLE` | Gnosis Safe |
-| All operational roles | Gnosis Safe or designated operator |
-
-**SC-TRUST-004 — PreSaleRound admin is omnipotent over investor funds.**
-The PreSaleRound `admin` (a single address, no Timelock) can `withdrawETH/USDC/USDT/WBTC`,
-`recoverSRX` (sweep all undeployed SRX), and `revokeVault` on any investor. For any
-mainnet round, `admin` MUST be a Gnosis Safe (≥3/5). This is a disclosed custodial-presale
-trust assumption — document it to investors and verify the admin address on-chain before
-opening the round.
-
-### SRXOFTNative / SRXToken (Bridge — `setPeer`)
-| Role | Transfer to |
-|---|---|
-| `owner()` (OApp owner — controls `setPeer`) | **SRXTimelock** (preferred) or Gnosis Safe |
-| `DEFAULT_ADMIN_ROLE` | Gnosis Safe |
-
-**SC-LZ-001 — `setPeer` is `onlyOwner`, not Timelock-gated by default.**
-`setPeer` registers cross-chain peers; a malicious peer enables mint-without-burn.
-Preferred remediation: transfer Ownable ownership of `SRXToken` and `SRXOFTNative` to the
-**SRXTimelock** so peer changes inherit the 48h delay. If operational speed requires the
-owner to remain a Gnosis Safe, that is an ACCEPTED risk only if (a) the owner is a hardened
-≥3/5 Safe and (b) the GuardianModule holds `PAUSER_ROLE` so a suspect peer change can be
-frozen (the `setPeer` override is `whenNotPaused`). Record the chosen owner on-chain and in
-the deployment runbook.
+| PreSaleRound | Safe (immutable `admin`) | The raised funds, **minus every refund owed** (ring-fenced, PSR-06); undeployed SRX (`recoverSRX`); `revokeVault` on any investor. It cannot change the price once the first investor exists, or remove a paying investor without refunding them. **SC-TRUST-004**: disclosed custodial-presale trust. On mainnet the deploy script refuses an admin with no code (PSR-11) |
+| BuybackBurner | Safe (`DEFAULT_ADMIN`), executor key (`EXECUTOR_ROLE`) | Only what is sent to the burner. Every swap is capped per token, per swap and per 24 hours; a token with no caps cannot be swapped; approvals are exact and reset (BB-M2) |
+| SRXAirdrop | Safe | The SRX loaded into the current round, recoverable only after its deadline; a live round lasts at least 7 days and its deadline cannot move earlier (N-06) |
+| ZkSyncMigrator | Safe (`DEFAULT_ADMIN`, `GOVERNANCE`), oracle (`ORACLE_ROLE`) | Migration settlement records; the SRX it burns comes only from the migrating user |
+| VestingVault | Its creator (TGEDistributor or PreSaleRound) | `triggerTGE`, `revoke`, and surplus rescue above the declared grant (PSR-08) |
+| GuardianModule | Safe (guardian), Timelock (`GOVERNANCE`) | Pause only. The guardian cannot re-open a tripped circuit breaker (G-L1) |
+| SRXOFTNative (spokes) | The Safe on that chain, via `owner()` (Ownable2Step, cannot be renounced) | Peers and LayerZero configuration on that chain. ⚠️ **Open (SPOKE-01):** no Timelock is deployed on the spoke chains and `migrate_roles.js` covers the Ethereum hub only, so spoke configuration is not delayed. What bounds it: a spoke accepts messages from its hub only, and the hub re-credits a chain only up to what it sent there (N-01) — a bad spoke configuration can harm holders on that chain but cannot mint unbacked SRX back onto Ethereum |
 
 ---
 
-## Transfer Procedure
+## Hand-over procedure
 
 ### Step 1 — Deploy the Safe
 
@@ -108,91 +99,72 @@ Owners: [addr1, addr2, addr3, addr4, addr5]
 Threshold: 3
 ```
 
-Record the Safe address in `TGE_DEPLOYMENT_RUNBOOK.md`.
+Record the Safe address in `TGE_DEPLOYMENT_RUNBOOK.md`, and set it as
+`ADMIN_ADDRESS` before running any deploy script.
 
-### Step 2 — Grant roles to Safe BEFORE revoking EOA
+### Step 2 — Deploy and wire
 
-For each contract, grant the role to the Safe first:
-```solidity
-token.grantRole(DEFAULT_ADMIN_ROLE, SAFE_ADDRESS);
+Run the deploy scripts. The deployer EOA never holds a role: every constructor
+and initializer names the Safe (or the Timelock) directly, and
+`02_deploy_governance.js` names the Governor as Timelock proposer in the
+Timelock's constructor. Finish every step that needs an admin — genesis,
+`BURN_ROLE` grants, bridge peers, DVN configuration, the presale launch
+configuration — before Step 3's phase 2.
+
+### Step 3 — Migrate to the launch topology
+
+`scripts/ops/migrate_roles.js` computes the minimal set of operations and is
+idempotent (steps already correct on-chain are skipped). It has two phases,
+because the token's two-step ownership transfer needs the Timelock to accept:
+
 ```
-
-Verify the Safe holds the role on-chain before the next step.
-
-**Tooling — generate the migration batch automatically.** Rather than hand-crafting
-each grant/revoke, use the migration tool. It computes the minimal set of operations to
-reach the audited end state and is idempotent (skips anything already correct):
-
-```
-# Mainnet: produce a Gnosis Safe Transaction Builder JSON for owners to review + sign
+# Phase 1 — reversible. Grants to the Timelock, GuardianModule and Governor; the Safe
+# gives up every operational role; token delegate + ownership transfer; the Timelock's
+# acceptance of ownership is scheduled.
 npm run migrate:roles -- --network ethereum
-# → writes migrate_roles.ethereum.json; import at app.safe.global → Transaction Builder
+# → migrate_roles.phase1.ethereum.json; import at app.safe.global → Transaction Builder
 
-# Testnet / mainnet-fork rehearsal: execute directly (signer must hold DEFAULT_ADMIN_ROLE)
-MIGRATE_EXECUTE=1 npm run migrate:roles -- --network sepolia
+# Wait the Timelock delay (48 hours on mainnet).
+
+# Phase 2 — IRREVERSIBLE. Executes the acceptance, then the Safe removes its own
+# admin rights, the Timelock admin last. Refuses to run before the delay has passed.
+MIGRATE_FINALIZE=1 npm run migrate:roles -- --network ethereum
 ```
 
-The irreversible final handover (revoking the admin Safe's own `DEFAULT_ADMIN_ROLE` in
-favour of the Timelock) is only included with `MIGRATE_FINALIZE=1`. Flags are read from
-env vars (reliable with `hardhat run`) or `--execute`/`--finalize` CLI args. Always run
-`npm run verify:roles` afterwards to confirm the end state.
-
-### Step 3 — Revoke EOA roles
-
-Only after the Safe is confirmed to hold every role:
-```solidity
-token.revokeRole(DEFAULT_ADMIN_ROLE, EOA_DEPLOYER);
-```
+Testnet or fork rehearsal: add `MIGRATE_EXECUTE=1` to execute directly from the
+loaded signer. The whole sequence is rehearsed end to end, against a throwaway
+local chain, by `scripts/ops/rehearse_role_migration.js`. It requires:
+- the gate to FAIL on the as-deployed topology;
+- phase 2 to refuse before the delay;
+- the gate to pass afterwards;
+- a re-run to be a no-op.
 
 ### Step 4 — Verify
 
-Confirm on Etherscan:
-- EOA has NO roles on any contract
-- Safe holds DEFAULT_ADMIN_ROLE on every contract
-- `token.owner()` returns the Safe address
-
-**Automated gate (SC-TRUST-001 / SC-TRUST-002):** run the role-topology verifier.
-It fails (exit 1) unless the deployer EOA holds zero roles, `UPGRADER_ROLE` is held
-only by the Timelock, and governance/pause/spender roles are correctly homed:
 ```
 npm run verify:roles -- --network ethereum
 ```
-This MUST print `✅ ALL CHECKS PASSED` before mainnet is considered ready.
-
-### Step 4a — UPGRADER_ROLE migration (SC-TRUST-001)
-
-The four UUPS contracts (SRXTreasury, SRXStaking, FeeController, StabilisationFund)
-gate `_authorizeUpgrade` on a dedicated `UPGRADER_ROLE` — separate from
-`GOVERNANCE_ROLE` — so upgrade authority can be homed exclusively on the Timelock.
-At deployment `UPGRADER_ROLE` is granted to the admin (and the Timelock, for Treasury)
-for bootstrap. Before mainnet:
-```solidity
-contract.grantRole(UPGRADER_ROLE, TIMELOCK_ADDRESS);   // ensure Timelock holds it
-contract.revokeRole(UPGRADER_ROLE, ADMIN_SAFE);        // remove from admin
-contract.revokeRole(UPGRADER_ROLE, EOA_DEPLOYER);      // remove from deployer
-```
-After migration, an upgrade can ONLY be executed via a governance proposal that the
-Timelock queues and executes after the 48-hour delay — closing the instant-drain path.
+This MUST print `✅ ALL CHECKS PASSED` before mainnet is considered ready. Set
+`DEPLOYER_EOA`, `DEPLOYER_MULTISIG` and `GUARDIAN_MULTISIG`, or the run reports
+itself INCOMPLETE rather than passing.
 
 ### Step 5 — Test a Safe transaction
 
-Execute a low-risk Safe transaction (e.g. read a view function via Safe UI)
-to confirm the 3/5 threshold signing flow works before relying on it in
-production.
+Execute a low-risk Safe transaction (e.g. a pause and unpause through
+GuardianModule on testnet) to confirm the 3/5 signing flow works before relying
+on it in production.
 
 ---
 
 ## Operational Signing Policy
 
-| Action | Required signers |
+| Action | Who |
 |---|---|
-| Grant/revoke any role | 3 of 5 |
-| Pause token transfers | 3 of 5 |
-| Execute genesis | 3 of 5 |
-| Upgrade any UUPS contract | 3 of 5 |
-| Change oracle price bounds | 3 of 5 |
-| Trigger StabilisationFund stress event | 3 of 5 |
-| Rescue tokens from any contract | 3 of 5 |
+| Emergency pause | Safe, 3 of 5, via GuardianModule |
+| Cancel a scheduled Timelock operation (veto) | Safe, 3 of 5 |
+| Grant/revoke any core role, upgrade, treasury spend, fee change, peer change | Governor proposal → Timelock, 48 h |
+| Presale, airdrop, buyback caps, migrator operations | Safe, 3 of 5 |
+| Change presale oracle bounds or staleness | Safe, 3 of 5 |
 
 ---
 
@@ -202,11 +174,11 @@ The following must be true before `v1.0.0` is deployed:
 
 - [ ] Gnosis Safe deployed and signer keys verified
 - [ ] 3/5 test transaction executed successfully
-- [ ] All roles granted to Safe
-- [ ] `UPGRADER_ROLE` migrated to Timelock; revoked from admin + deployer (SC-TRUST-001)
-- [ ] All EOA roles revoked
-- [ ] `npm run verify:roles` prints `✅ ALL CHECKS PASSED` (SC-TRUST-002)
+- [ ] Every admin-dependent launch step done (genesis, `BURN_ROLE`, peers, DVNs)
+- [ ] `migrate_roles.js` phase 1 executed, delay elapsed, phase 2 executed
+- [ ] `npm run verify:roles` prints `✅ ALL CHECKS PASSED`, with no INCOMPLETE advisories (SC-TRUST-001/002)
 - [ ] On-chain verification complete (Etherscan role checks)
-- [ ] PreSaleRound payment-token decimals verified: `USDC.decimals()==6`, `USDT.decimals()==6`, `WBTC.decimals()==8` (R5-07 — a misconfigured token silently mis-values investments)
+- [ ] PreSaleRound deployed with the Safe as admin, and its launch configuration (`presale_config.<net>.json`, PSR-04) executed before the round opens
 - [ ] PreSaleRound `srxPriceUsd8Dec` set to the final value BEFORE the first investor is recorded (R5-02 — price locks on first investor)
+- [ ] Presale vaults deployed BEFORE SRXToken `maxWalletBalance` is switched on (PSR-09)
 - [ ] Safe address recorded in `TGE_DEPLOYMENT_RUNBOOK.md`

@@ -376,11 +376,18 @@ describe("TGE destination controls", function () {
       const src = read("scripts/deploy/06_execute_tge.js");
       const gateAt = src.indexOf("await runTgeTargetChecks(");
       expect(gateAt, "gate call").to.be.greaterThan(-1);
-      // Match the calls, not the header comment that names them.
-      for (const tx of ["await tge.setAllocations(", "await token.genesis(", "await tge.distribute(",
-                        "await vault.triggerTGE(", "await staking.notifyRewardAmount("]) {
+      // DEP-01: every admin-only call goes through the admin batch — executed directly
+      // when the signer is the admin, queued for the Safe otherwise. Match the real
+      // calls, and require that none is still sent directly from the deployer.
+      for (const tx of ['batch.send(tge, "setAllocations", [finalAllocations]', 'batch.send(token, "genesis", [tgeAddr]',
+                        'batch.send(tge, "distribute"', 'batch.send(vault, "triggerTGE"',
+                        'batch.send(staking, "notifyRewardAmount"']) {
         const at = src.indexOf(tx);
         expect(at, tx).to.be.greaterThan(gateAt);
+      }
+      for (const direct of ["await tge.setAllocations(", "await token.genesis(", "await tge.distribute(",
+                            "await vault.triggerTGE(", "await staking.notifyRewardAmount("]) {
+        expect(src, "sent directly: " + direct).to.not.include(direct);
       }
       expect(src).to.match(/if \(gate\.failures\.length > 0\) \{[\s\S]{0,200}throw new Error/);
       expect(src).to.match(/const finalAllocations = gate\.allocations;/);

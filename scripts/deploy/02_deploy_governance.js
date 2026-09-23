@@ -4,8 +4,16 @@
  * Deploys the governance stack. The governor is wired to the timelock.
  * The timelock is wired to the governor (proposer) and allows open execution.
  *
- * The admin (Gnosis Safe) holds CANCELLER_ROLE on the timelock as guardian
- * during the 6-month transition period.
+ * The governor is named as proposer IN THE TIMELOCK CONSTRUCTOR, using its
+ * predicted address, so it receives PROPOSER_ROLE and CANCELLER_ROLE at birth.
+ * ⛔ This previously deployed the timelock with no proposers and then called
+ *    timelock.grantRole() from the deployer — but the timelock's admin is the
+ *    Safe, not the deployer, so both calls revert on any real deployment. And
+ *    making the deployer an admin, even briefly, would break SC-TRUST-002.
+ *
+ * The admin Safe's CANCELLER_ROLE (a veto on hostile proposals — it can stop an
+ * operation, never start one) is granted by the Safe itself in
+ * scripts/ops/migrate_roles.js phase 1.
  *
  * Prerequisites: SRXToken deployed (Step 1).
  *
@@ -29,15 +37,18 @@ async function main() {
   console.log("\nDeploying SRXTimelock...");
   const SRXTimelock = await ethers.getContractFactory("SRXTimelock");
 
-  // Proposers and executors are set after governor is deployed.
-  // We deploy with empty arrays and wire them post-deployment.
+  // The governor is deployed immediately after the timelock, from the same
+  // account, so its address is the deployer's next-but-one CREATE address.
+  const nonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
+  const predictedGovernor = ethers.getCreateAddress({ from: deployer.address, nonce: nonce + 1 });
+
   const timelock = await SRXTimelock.deploy(
     // Derived from the network: 48h on anything not explicitly a testnet, and a
     // hard error rather than a silent short delay. See 00_config.js.
     GOVERNANCE.timelockDelayFor(network.name),
-    [],          // proposers — add governor after deploy
+    [predictedGovernor],   // proposers — the governor (also made canceller)
     [ethers.ZeroAddress],  // executors — open execution
-    admin        // admin (guardian, Gnosis Safe)
+    admin                  // admin (Gnosis Safe) — removed by migrate_roles phase 2
   );
   await timelock.waitForDeployment();
   const timelockAddress = await timelock.getAddress();
@@ -51,17 +62,15 @@ async function main() {
   const governorAddress = await governor.getAddress();
   console.log(`SRXGovernor deployed: ${governorAddress}`);
 
-  // ── Wire governor as proposer on timelock ────────────────────────────────────
-  console.log("\nGranting PROPOSER_ROLE to governor on timelock...");
-  const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();
-  const CANCELLER_ROLE = await timelock.CANCELLER_ROLE();
-
-  await (await timelock.grantRole(PROPOSER_ROLE, governorAddress)).wait();
-  console.log(`PROPOSER_ROLE granted to governor`);
-
-  // Admin holds CANCELLER_ROLE as guardian during transition
-  await (await timelock.grantRole(CANCELLER_ROLE, admin)).wait();
-  console.log(`CANCELLER_ROLE granted to admin (guardian)`);
+  // ── Confirm the governor landed where the timelock expects it ───────────────
+  if (governorAddress !== predictedGovernor) {
+    throw new Error(`Governor deployed at ${governorAddress}, but the timelock names ${predictedGovernor} ` +
+      "as proposer. Another transaction from the deployer intervened. Redeploy both; do not wire this pair.");
+  }
+  if (!(await timelock.hasRole(await timelock.PROPOSER_ROLE(), governorAddress))) {
+    throw new Error("Governor is not a proposer on the timelock");
+  }
+  console.log(`Governor is proposer and canceller on the timelock`);
 
   console.log(`\n✅ Governance deployed`);
   console.log(`SRXTimelock:  ${timelockAddress}`);
@@ -69,8 +78,8 @@ async function main() {
   console.log(`\n⚠️  Save to .env:`);
   console.log(`TIMELOCK_${network.name.toUpperCase()}=${timelockAddress}`);
   console.log(`GOVERNOR_${network.name.toUpperCase()}=${governorAddress}`);
-  console.log(`\n⚠️  After 6 months post-TGE: transfer CANCELLER_ROLE to security council`);
-  console.log(`⚠️  At DAO milestone: admin renounces DEFAULT_ADMIN_ROLE on timelock`);
+  console.log(`\n⚠️  Before launch, scripts/ops/migrate_roles.js moves every admin power behind this`);
+  console.log(`   timelock (the Safe keeps only its veto). verify_roles.js blocks mainnet otherwise.`);
 }
 
 main().catch((err) => {

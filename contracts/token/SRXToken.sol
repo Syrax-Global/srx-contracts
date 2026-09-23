@@ -105,6 +105,27 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     error TransferExceedsMaxAmount(uint256 amount, uint256 limit);
     /// @notice A mint would take totalSupply above MAX_SUPPLY.
     error SupplyCapExceeded(uint256 resultingSupply, uint256 cap);
+    /// @notice An inbound bridge credit exceeds what this chain has sent to its source.
+    error UnbackedInboundCredit(uint32 srcEid, uint256 amount, uint256 outstanding);
+
+    // ── Bridge accounting (N-01) ───────────────────────────────────────────────
+    //
+    // ⛔ N-01: the supply cap was checked PER CHAIN. Each chain compared its own
+    //    totalSupply with 10B, so a compromised peer or DVN could credit up to
+    //    10B minus local supply on every chain — N chains could hold N × 10B.
+    //
+    // ⭐ Hub-and-spoke (Jared, 23 Sep 2026). Ethereum is the only chain every
+    //    other chain talks to (SRXOFTNative enforces that end), and Ethereum
+    //    records how much SRX it has sent to each chain. It re-credits from a
+    //    chain only up to that amount. A forged message on a remote chain can
+    //    therefore never come back to Ethereum as more than was really sent
+    //    there, and nothing can be credited here before genesis.
+
+    /// @notice SRX sent from this chain to each remote chain and not yet returned.
+    mapping(uint32 => uint256) public outstandingByEid;
+
+    event BridgeOutflow(uint32 indexed dstEid, uint256 amount, uint256 outstanding);
+    event BridgeInflow(uint32 indexed srcEid, uint256 amount, uint256 outstanding);
     error WalletExceedsMaxBalance(uint256 resultingBalance, uint256 limit);
 
     error OwnershipCannotBeRenounced();
@@ -323,6 +344,29 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     }
 
     // ── Internal Overrides ─────────────────────────────────────────────────────
+
+    function _debit(address _from, uint256 _amountLD, uint256 _minAmountLD, uint32 _dstEid)
+        internal
+        override
+        returns (uint256 amountSentLD, uint256 amountReceivedLD)
+    {
+        (amountSentLD, amountReceivedLD) = super._debit(_from, _amountLD, _minAmountLD, _dstEid);
+        uint256 outstanding = outstandingByEid[_dstEid] + amountSentLD;
+        outstandingByEid[_dstEid] = outstanding;
+        emit BridgeOutflow(_dstEid, amountSentLD, outstanding);
+    }
+
+    function _credit(address _to, uint256 _amountLD, uint32 _srcEid)
+        internal
+        override
+        returns (uint256 amountReceivedLD)
+    {
+        uint256 outstanding = outstandingByEid[_srcEid];
+        if (_amountLD > outstanding) revert UnbackedInboundCredit(_srcEid, _amountLD, outstanding);
+        unchecked { outstandingByEid[_srcEid] = outstanding - _amountLD; }
+        emit BridgeInflow(_srcEid, _amountLD, outstanding - _amountLD);
+        return super._credit(_to, _amountLD, _srcEid);
+    }
 
     /**
      * @dev Hooks into every token transfer to:

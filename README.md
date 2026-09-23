@@ -52,7 +52,7 @@ has been established.
 
 ```bash
 npm ci
-npx hardhat test          # 726 tests
+npx hardhat test          # 817 passing, 1 pending (23 Sep 2026)
 forge test                # 7 invariants + 3 property-fuzz tests
 ```
 

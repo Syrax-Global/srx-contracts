@@ -32,6 +32,7 @@
 const { ethers, network } = require("hardhat");
 const readline             = require("readline");
 const { WALLETS }          = require("./00_config");
+const { createAdminBatch } = require("./lib/adminTx");
 
 function env(key) {
   const val = process.env[key];
@@ -86,19 +87,24 @@ async function main() {
   const migratorAddr = await migrator.getAddress();
   console.log(`  ZkSyncMigrator: ${migratorAddr}`);
 
+  // Every step below is gated by a role whose admin is WALLETS.admin (the admin
+  // Safe on mainnet), never the deployer (SC-TRUST-002). adminTx routes each call
+  // to whichever of those is actually loaded as the signer, so there is no longer
+  // a "deployer cannot do this" branch to fall into — it either executes now or
+  // is queued for the admin Safe to execute.
+  const batch = createAdminBatch("09_migrator");
+
   // ── 2. Grant GOVERNANCE_ROLE to Timelock ────────────────────────────────
 
   console.log("\n[2/3] Granting GOVERNANCE_ROLE to Timelock...");
   const GOV_ROLE = await migrator.GOVERNANCE_ROLE();
-  await (await migrator.grantRole(GOV_ROLE, timelockAddr)).wait();
-  console.log(`  ✓ GOVERNANCE_ROLE → Timelock (${timelockAddr})`);
+  await batch.send(migrator, "grantRole", [GOV_ROLE, timelockAddr], `ZkSyncMigrator.grantRole(GOVERNANCE_ROLE, Timelock ${timelockAddr})`);
 
   // ── 3. Grant ORACLE_ROLE ────────────────────────────────────────────────
 
   console.log("\n[3/5] Granting ORACLE_ROLE to oracle wallet...");
   const ORACLE_ROLE = await migrator.ORACLE_ROLE();
-  await (await migrator.grantRole(ORACLE_ROLE, oracleAddr)).wait();
-  console.log(`  ✓ ORACLE_ROLE → Oracle (${oracleAddr})`);
+  await batch.send(migrator, "grantRole", [ORACLE_ROLE, oracleAddr], `ZkSyncMigrator.grantRole(ORACLE_ROLE, Oracle ${oracleAddr})`);
 
   // ── 4. Grant BURN_ROLE on SRXToken to the migrator ───────────────────────
   //
@@ -115,19 +121,7 @@ async function main() {
   if (await srxToken.hasRole(BURN_ROLE, migratorAddr)) {
     console.log(`  ✓ already held`);
   } else {
-    const tokenAdmin = await srxToken.DEFAULT_ADMIN_ROLE();
-    if (await srxToken.hasRole(tokenAdmin, deployer.address)) {
-      await (await srxToken.grantRole(BURN_ROLE, migratorAddr)).wait();
-      console.log(`  ✓ BURN_ROLE → ZkSyncMigrator (${migratorAddr})`);
-    } else {
-      // ⛔ Loud and fatal rather than a warning nobody reads. A migrator without
-      //    BURN_ROLE is not degraded, it is inoperable, and discovering that from
-      //    a user's reverted transaction is the worst possible time.
-      console.error("\n  ✗ DEPLOYER CANNOT GRANT BURN_ROLE — it does not hold SRXToken's DEFAULT_ADMIN_ROLE.");
-      console.error(`    migrate() WILL REVERT until BURN_ROLE is granted to ${migratorAddr}.`);
-      console.error(`    Grant it from the SRXToken admin, then re-run the verification below.`);
-      process.exitCode = 1;
-    }
+    await batch.send(srxToken, "grantRole", [BURN_ROLE, migratorAddr], `SRXToken.grantRole(BURN_ROLE, ZkSyncMigrator ${migratorAddr})`);
   }
 
   // ── 4b. Exempt the migrator from launch protection ───────────────────────
@@ -147,16 +141,7 @@ async function main() {
   if (await srxToken.isExemptFromLimits(migratorAddr)) {
     console.log(`  ✓ already exempt`);
   } else {
-    const GOV_ON_TOKEN = await srxToken.GOVERNANCE_ROLE();
-    if (await srxToken.hasRole(GOV_ON_TOKEN, deployer.address)) {
-      await (await srxToken.setExemptFromLimits(migratorAddr, true)).wait();
-      console.log(`  ✓ exempt → ZkSyncMigrator (${migratorAddr})`);
-    } else {
-      console.error("\n  ✗ DEPLOYER CANNOT SET THE EXEMPTION — it does not hold SRXToken's GOVERNANCE_ROLE.");
-      console.error(`    If launch protection is enabled while ${migratorAddr} is not exempt,`);
-      console.error(`    a stranded balance will eventually brick migrate() for every user.`);
-      process.exitCode = 1;
-    }
+    await batch.send(srxToken, "setExemptFromLimits", [migratorAddr, true], `SRXToken.setExemptFromLimits(ZkSyncMigrator ${migratorAddr}, true)`);
   }
 
   // ── 5. Hand governance to the Timelock alone ─────────────────────────────
@@ -168,16 +153,25 @@ async function main() {
   //    the revoke never ran and the admin EOA kept GOVERNANCE_ROLE beside the
   //    Timelock. The checklist below then claimed it was "held by Timelock only".
   //    Done LAST so the earlier steps still have the authority they need.
+  //
+  // ⭐ The deployer never appears in this set as a GRANT target above (only the
+  //    Timelock and, via BURN_ROLE/exemption, the migrator itself do), so on a
+  //    real deployment `deployer.address` here is never actually held — this
+  //    loop is defensive, not a step that undoes something this script just did.
 
   console.log("\n[5/5] Revoking GOVERNANCE_ROLE from the deployment key...");
   for (const holder of new Set([deployer.address, WALLETS.admin])) {
     if (holder.toLowerCase() === timelockAddr.toLowerCase()) continue;
     if (await migrator.hasRole(GOV_ROLE, holder)) {
-      await (await migrator.revokeRole(GOV_ROLE, holder)).wait();
-      console.log(`  ✓ GOVERNANCE_ROLE revoked from ${holder}`);
+      await batch.send(migrator, "revokeRole", [GOV_ROLE, holder], `ZkSyncMigrator.revokeRole(GOVERNANCE_ROLE, ${holder})`);
     }
   }
-  if (!(await migrator.hasRole(GOV_ROLE, timelockAddr))) {
+
+  const wrote = await batch.flush();
+  if (wrote) {
+    console.log(`\n⏳ Role changes above are queued for the admin Safe (${wrote}).`);
+    console.log(`   The final GOVERNANCE_ROLE check below cannot pass until the Safe executes it.`);
+  } else if (!(await migrator.hasRole(GOV_ROLE, timelockAddr))) {
     console.error("  ✗ Timelock does NOT hold GOVERNANCE_ROLE — do not proceed.");
     process.exitCode = 1;
   }

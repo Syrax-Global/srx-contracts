@@ -107,6 +107,7 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     event StakingContractUpdated(address oldAddr, address newAddr);
     event FeeDestinationUpdated(uint256 indexed index, address recipient, uint256 shareBps, bool active, bytes32 label);
     event FeeDistributionCommitted(uint256 totalBps, uint256 timestamp);
+    event FeeLimitsUpdated(uint256 oldMinBps, uint256 oldMaxBps, uint256 newMinBps, uint256 newMaxBps);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -282,6 +283,7 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
         // clamp every tier upward and turn discounts into increases. To raise both, raise
         // the base rate first.
         if (newMin > _lowestBaseFeeBps()) revert InvalidBps();
+        emit FeeLimitsUpdated(minFeeBps, maxFeeBps, newMin, newMax);
         minFeeBps = newMin;
         maxFeeBps = newMax;
     }

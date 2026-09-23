@@ -14,8 +14,12 @@ enforcement).
 ⚠️ **These were internal reviews, not an external audit.** No external firm has
 reviewed this code, and none is engaged.
 
-> **All findings listed below have been remediated.** Reports are published for
-> transparency; no unresolved Critical or High issues remain in the code.
+> ⛔ **The five review rounds below did not catch everything.** Two later passes
+> (10 and 23 September 2026) proved further defects with executable tests —
+> including, on 23 September, a Critical presale pricing error and three Highs.
+> Every fix from those passes has a test that failed on the old code, and the
+> items still open are listed in `REMEDIATION.md` at the repository root. Treat
+> this page as history, not as a statement that the code is clean.
 
 ---
 
@@ -28,13 +32,18 @@ reviewed this code, and none is engaged.
 | R3 | 2026-05-23 | Invariants, UUPS, bridge, ops, trust | 11 | 6 code fixes + Trust Matrix |
 | R4 | 2026-05-29 | All 7 | 10 | All actionable items remediated |
 | R5 | 2026-06-12 | All 7, fresh-eyes — remediation code as primary surface | 7 | 0 Critical/High/Medium; 4 Low code fixes + 3 info |
+| Proof pass 1 | 2026-09-10 | Executable proofs only — a finding counts once a test demonstrates it | 31 | All dispositioned; one (F6) later found not fixed |
+| Proof pass 2 | 2026-09-23 | Full pre-external-audit sweep, contracts and deploy path | 1 Critical, 4 High, 11 Medium, plus Low/Info | Fixed with proofs, or listed as open |
 
-**Cumulative:** 42 findings across five rounds; all actionable items fixed.
-**0 Critical / High / Medium outstanding.** The two Round-4 High findings were governance/
-deployment topology (not code defects) and were both remediated. Round 5 — a different model
-re-auditing the suite with the Round-4 remediations themselves treated as the primary attack
-surface — surfaced only Low/Informational items (a contract-pair parity gap and presale
-allocation-math refinements), all remediated with regression tests.
+**Rounds 1–5:** 42 findings; all actionable items fixed. The two Round-4 High findings were
+governance/deployment topology and were remediated. Round 5 — a fresh-eyes re-review with
+the Round-4 remediations treated as the primary attack surface — surfaced only Low and
+Informational items.
+
+⭐ **What the proof passes showed:** reviews that produce a written report missed defects
+that a test later demonstrated in minutes. From 10 September onward a finding counts only
+once a test proves it, and each fix is kept honest by that test asserting the correct
+behaviour.
 
 ---
 
@@ -72,9 +81,10 @@ outcome: **the dominant risk was deployment-time role topology, not contract log
 
 ## Verification Coverage
 
-- **649 Hardhat unit/integration tests** + 1 pending.
-- **7 Foundry suites** — 4 invariants (supply, balance sum, voting power, burn cap) +
-  3 property-fuzz tests; **51,200+ randomized calls, 0 reverts**.
+- **817 Hardhat unit/integration tests** + 1 pending (23 Sep 2026).
+- **Foundry** — 7 token invariants (supply equation, balance sum, voting power, burn cap,
+  burn monotonic, genesis once, no holder above supply) at 256 runs × depth 50, and 3
+  PreSaleRound property-fuzz tests at 1,000 runs each.
 - **Slither** static analysis enforced in CI (`fail-on: high`).
 - **Foundry** invariant campaign (nightly, in CI). Echidna is a local harness
   only — the CI job was removed rather than left green over a suite whose

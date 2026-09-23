@@ -4,6 +4,17 @@ const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 const REMOTE_EID = 40102;
 function b32(addr) { return ethers.zeroPadValue(addr, 32); }
+
+// A real outbound bridge send (burns here, records the outflow to REMOTE_EID).
+// ⭐ Since N-01 (23 Sep 2026) Ethereum re-credits a chain only up to what it sent
+//    there, so a scenario that brings SRX back must send it out first.
+async function bridgeOut(token, from, amountLD, peer) {
+  await token.setPeer(REMOTE_EID, peer);
+  const sp = { dstEid: REMOTE_EID, to: peer, amountLD, minAmountLD: amountLD,
+               extraOptions: "0x", composeMsg: "0x", oftCmd: "0x" };
+  await token.connect(from).send(sp, { nativeFee: 0n, lzTokenFee: 0n }, from.address);
+}
+
 // OFTMsgCodec: abi.encodePacked(bytes32 sendTo, uint64 amountSD)
 function oftMsg(to, amountSD) {
   return ethers.concat([b32(to), ethers.toBeHex(amountSD, 8)]);
@@ -119,9 +130,7 @@ describe("ZZ token-standard lens", function () {
     // Bridge 6B out. OFT._debit does `_burn(_from, amountSentLD)` (OFT.sol:68),
     // which is the same internal path as buyAndBurn's _burn — burn is what
     // Votes._transferVotingUnits subtracts from _totalCheckpoints.
-    const BURN_ROLE = await token.BURN_ROLE();
-    await token.connect(admin).grantRole(BURN_ROLE, admin.address);
-    await token.connect(admin).buyAndBurn(ethers.parseUnits("6000000000", 18));
+    await bridgeOut(token, admin, ethers.parseUnits("6000000000", 18), b32(admin.address));
 
     await time.increase(10);
     tp = (await time.latest()) - 1;

@@ -35,6 +35,7 @@
  */
 const { ethers, upgrades, network } = require("hardhat");
 const { WALLETS, SSF }              = require("./00_config");
+const { createAdminBatch }          = require("./lib/adminTx");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -79,8 +80,13 @@ async function main() {
 
   console.log("\n[2/2] Granting GOVERNANCE_ROLE to Timelock...");
   const GOV_ROLE = await ssf.GOVERNANCE_ROLE();
-  await (await ssf.grantRole(GOV_ROLE, timelock)).wait();
-  console.log(`  ✓ GOVERNANCE_ROLE → ${timelock}`);
+
+  // grantRole on StabilisationFund is DEFAULT_ADMIN_ROLE-gated, held by
+  // WALLETS.admin (the admin Safe on mainnet) — not the deployer. SC-TRUST-002:
+  // route through it.
+  const batch = createAdminBatch("05b_stabilisation");
+  const { executed } = await batch.send(ssf, "grantRole", [GOV_ROLE, timelock], "StabilisationFund.grantRole(GOVERNANCE_ROLE, Timelock)");
+  const wrote = await batch.flush();
 
   // Verify deployment state
   console.log("\n─── Verification ───");
@@ -88,7 +94,7 @@ async function main() {
   console.log(`  maxDeployerBps:        ${await ssf.maxDeployerBps()}`);
   console.log(`  maxGuardianBps:        ${await ssf.maxGuardianBps()}`);
   console.log(`  withdrawLockDuration:  ${await ssf.withdrawLockDuration()}s`);
-  console.log(`  GOVERNANCE_ROLE→TL:    ${await ssf.hasRole(GOV_ROLE, timelock)}`);
+  console.log(`  GOVERNANCE_ROLE→TL:    ${await ssf.hasRole(GOV_ROLE, timelock)}${executed ? "" : "  (pending — queued for the admin Safe, see " + wrote + ")"}`);
   console.log(`  PAUSER_ROLE→admin:     ${await ssf.hasRole(await ssf.PAUSER_ROLE(), admin)}`);
 
   // ── Summary ──────────────────────────────────────────────────────────────

@@ -68,7 +68,8 @@ describe("Bridge (OFT Cross-Chain)", function () {
     const SRXOFTNative = await ethers.getContractFactory("SRXOFTNative");
     const bscToken = await SRXOFTNative.deploy(
       await bscEndpoint.getAddress(),
-      admin.address
+      admin.address,
+      ETH_EID // hub (N-01)
     );
     await bscToken.waitForDeployment();
 
