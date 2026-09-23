@@ -40,3 +40,6 @@ CHANGELOG.md
 LISTING_QUESTIONNAIRE.md
 references/contract-checks.md
 frame.sh
+# Planned: the external audit report, filed here when an external audit exists.
+# None has been commissioned. Deliberately a neutral name - no firm is engaged.
+audits/external-audit-report.pdf

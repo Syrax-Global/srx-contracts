@@ -4,7 +4,7 @@ Smart contracts for the SRX token — an omnichain ERC-20 built on LayerZero OFT
 with staking, vesting, treasury, buyback, a stabilisation fund, governance and a
 cross-chain migration path.
 
-**Solidity 0.8.24 · Hardhat + Foundry · MIT**
+**Solidity 0.8.24 · Hardhat + Foundry · Proprietary**
 
 > **Maintained by Syrax Global FZCO** (Dubai, United Arab Emirates) and published from the
 > company's official GitHub organisation, [`Syrax-Global`](https://github.com/Syrax-Global).
@@ -102,4 +102,4 @@ docs/audits/      audit history and the consolidated report
 
 ## Licence
 
-MIT — see `LICENSE`. All 21 contracts carry a matching `SPDX-License-Identifier`.
+Proprietary — see [`NOTICE`](NOTICE). No licence is granted.
