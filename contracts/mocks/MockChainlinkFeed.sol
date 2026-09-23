@@ -9,6 +9,7 @@ pragma solidity ^0.8.24;
 contract MockChainlinkFeed {
     int256  public latestPrice;
     uint256 public latestUpdatedAt;
+    uint8   public decimals = 8;
 
     constructor(int256 _initialPrice) {
         latestPrice     = _initialPrice;
@@ -20,6 +21,9 @@ contract MockChainlinkFeed {
         latestPrice     = _price;
         latestUpdatedAt = block.timestamp;
     }
+
+    /// @notice Simulate a feed that is not 8-decimal USD.
+    function setDecimals(uint8 _d) external { decimals = _d; }
 
     /// @notice Manually set updatedAt — used to simulate a stale feed.
     function setUpdatedAt(uint256 _updatedAt) external {

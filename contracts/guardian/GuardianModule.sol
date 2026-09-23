@@ -304,6 +304,11 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
         ModuleConfig storage m = modules[moduleId];
 
         if (!m.paused) revert ModuleNotPaused(moduleId);
+        // ⛔ G-L1: a breaker that tripped is governance's to reset. The guardian
+        //    could reopen the module while cb.tripped stayed true, which also made
+        //    every further recordBridgeActivity revert for the rest of the window:
+        //    the module was live again and its monitoring was blind.
+        if (circuitBreakers[moduleId].tripped) revert CircuitBreakerAlreadyTripped(moduleId);
 
         m.paused          = false;
         m.lastUnpauseTime = block.timestamp;

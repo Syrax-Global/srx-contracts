@@ -58,6 +58,9 @@ contract SRXAirdrop is AccessControl {
     /// @notice The SRX token distributed by this contract.
     IERC20 public immutable srxToken;
 
+    /// @notice Shortest claim window any round may have.
+    uint256 public constant MIN_CLAIM_WINDOW = 7 days;
+
     // ── State ──────────────────────────────────────────────────────────────────
 
     /// @notice Current active Merkle root. Zero bytes = no active airdrop.
@@ -90,6 +93,8 @@ contract SRXAirdrop is AccessControl {
     error ZeroAmount();
     error NothingToRescue();
     error DeadlineMustBeFuture();
+    error ClaimWindowTooShort(uint256 deadline, uint256 minimum);
+    error DeadlineCannotMoveEarlier(uint256 current, uint256 attempted);
 
     // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -123,6 +128,14 @@ contract SRXAirdrop is AccessControl {
     {
         if (root     == bytes32(0))    revert NoActiveAirdrop();
         if (deadline <= block.timestamp) revert DeadlineMustBeFuture();
+        // ⛔ N-06: setMerkleRoot(sameRoot, now + 1) used to end a live round in the
+        //    next block, after which rescueUnclaimed swept every unclaimed
+        //    allocation. While a round is open its deadline may only move later,
+        //    and any round lasts at least MIN_CLAIM_WINDOW.
+        bool roundOpen = merkleRoot != bytes32(0) && block.timestamp <= claimDeadline;
+        if (roundOpen && deadline < claimDeadline) revert DeadlineCannotMoveEarlier(claimDeadline, deadline);
+        if (deadline < block.timestamp + MIN_CLAIM_WINDOW)
+            revert ClaimWindowTooShort(deadline, block.timestamp + MIN_CLAIM_WINDOW);
 
         merkleRoot    = root;
         claimDeadline = deadline;

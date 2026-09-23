@@ -72,7 +72,6 @@ PUBLISH=(
 
   # Product documentation
   "README.md"
-  "LICENSE"
   "SRX_TOKEN_COMPLETE_OVERVIEW.md"
   "SRX_STAKING_OVERVIEW.md"
   "deploy/addresses.example.json"
@@ -131,6 +130,14 @@ for path in "${PUBLISH[@]}"; do
   fi
 done
 
+# ── The ownership notice ─────────────────────────────────────────────────────
+# ⛔ Syrax does not open-source its products (Jared, 23 Sep 2026). The source
+#    repository carries the private NOTICE, which calls the contents confidential —
+#    untrue of a published repository. The mirror carries NOTICE-public instead:
+#    readable, compilable to verify a deployment, all rights reserved.
+cp "$SRC/NOTICE-public" "$OUT/NOTICE"
+echo "  + NOTICE (from NOTICE-public)"
+
 # ── Verify, rather than assume ───────────────────────────────────────────────
 echo
 echo "── Verification ─────────────────────────────────────────────"
@@ -186,6 +193,20 @@ if find "$OUT" \( -name ".env" -o -name "*.pem" -o -iname "*keystore*" -o -iname
   fail=1
 else
   echo "  ✓ no env/keystore/mnemonic files"
+fi
+
+# 4. no open-source licence
+#
+# ⚠️ A LICENSE file is a grant. This mirror published one under MIT until 23 Sep 2026;
+#    versions already taken keep that licence, which is exactly why it must not recur.
+if find "$OUT" -maxdepth 1 \( -iname "LICEN[CS]E*" -o -iname "COPYING*" \) | grep -q .; then
+  echo "  ✗ an open-source licence file is present"
+  fail=1
+elif grep -qE '"license" *: *"(MIT|ISC|Apache|BSD)' "$OUT/package.json" 2>/dev/null; then
+  echo "  ✗ package.json declares an open-source licence"
+  fail=1
+else
+  echo "  ✓ no open-source licence file or manifest declaration"
 fi
 
 [ "$fail" -eq 0 ] || { echo; echo "⛔ VERIFICATION FAILED — do not publish this tree."; exit 1; }

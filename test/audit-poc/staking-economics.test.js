@@ -294,12 +294,41 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
     console.log("  lockEnd:", p.lockEnd.toString(), " now:", now.toString(), " => lock expired:", p.lockEnd < now);
     console.log("  lockDuration still:", p.lockDuration.toString(), "(180d =", LOCK_180D, ")");
 
-    expect(p.weightedAmount).to.equal(p.amount * 2n);  // 2.00x on the whole, freshly-added position
-    expect(p.lockEnd).to.be.lessThan(now);             // ...with no live lock at all
+    // ⛔ This line used to assert `p.amount * 2n` — the DEFECT — under a [FIXED]
+    //    title, so the suite stayed green while the bug was live (found 23 Sep 2026).
+    expect(p.lockEnd).to.be.lessThan(now);        // no live lock...
+    expect(p.weightedAmount).to.equal(p.amount);  // ...so 1.00x, never 2.00x
+    expect(await staking.totalWeightedStake()).to.equal(p.amount);
+  });
 
-    // And unlock() is callable in the same breath — zero commitment.
-    await staking.connect(u1).unlock();
-    console.log("  unlock() succeeded immediately after topping up at 2.00x weight");
+  it("F6c: [FIXED] poke-then-top-up by 1 wei cannot restore the 2.00x weight", async function () {
+    const [admin, u1] = await ethers.getSigners();
+    const MockLZEndpoint = await ethers.getContractFactory("MockLZEndpoint");
+    const ep = await MockLZEndpoint.deploy(40161);
+    const SRXToken = await ethers.getContractFactory("SRXToken");
+    const token = await SRXToken.deploy(await ep.getAddress(), admin.address);
+    await token.connect(admin).genesis(admin.address);
+    const SRXStaking = await ethers.getContractFactory("SRXStaking");
+    const staking = await upgrades.deployProxy(SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" });
+    const sa = await staking.getAddress();
+    await token.connect(admin).transfer(sa, E(1_000_000));
+    await staking.connect(admin).notifyRewardAmount(E(1_000_000));
+    await token.connect(admin).transfer(u1.address, E(2_000_000));
+    await token.connect(u1).approve(sa, ethers.MaxUint256);
+
+    await staking.connect(u1).lock(E(1_000_000), LOCK_180D);
+    await time.increase(LOCK_180D + 1);
+    await staking.pokeExpiredPosition(u1.address);
+    await expect(staking.connect(u1).addToPosition(1n, 0))
+      .to.emit(staking, "PositionIncreased");
+    const p = await staking.positions(u1.address);
+    expect(p.weightedAmount).to.equal(p.amount);
+
+    // A genuine re-lock is still allowed, at any duration, and earns its multiplier.
+    await staking.connect(u1).addToPosition(1n, 7 * 86400);
+    const q = await staking.positions(u1.address);
+    expect(q.lockEnd).to.be.greaterThan(BigInt(await time.latest()));
+    expect(q.weightedAmount).to.equal(q.amount); // 7-day multiplier is 1.00x
   });
 });
 

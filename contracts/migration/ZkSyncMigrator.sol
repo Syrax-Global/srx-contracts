@@ -93,6 +93,10 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
     /// @dev `srcChainId` is emitted explicitly as well as encoded in the high bits
     ///      of `migrationId`. A consumer should never have to decode an id to know
     ///      which chain a request came from.
+    /// @dev ⛔ N-05: an id is unique per migrator CONTRACT, not globally — a second
+    ///      migrator on the same chain restarts at 1. The oracle MUST key a request
+    ///      on (srcChainId, the log's emitting address, migrationId), and only
+    ///      accept logs from the migrator addresses it has been configured with.
     event MigrationRequest(
         uint256 indexed migrationId,
         address indexed user,
@@ -102,6 +106,8 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
     );
 
     event MigrationConfirmed(uint256 indexed migrationId, address indexed user);
+    /// @notice migrateTo(): `payer` burned SRX to be credited to `recipient`.
+    event MigrationFunded(uint256 indexed migrationId, address indexed payer, address indexed recipient);
     event MigrationEnabled(uint256 timestamp);
     event MigrationClosed(uint256 timestamp, uint256 totalMigrated);
     event TokensRescued(address indexed token, address indexed recipient, uint256 amount);
@@ -149,6 +155,22 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
      * @return migrationId Unique ID for tracking this request on the Syrax Chain.
      */
     function migrate(uint256 amount) external nonReentrant returns (uint256 migrationId) {
+        return _migrate(amount, msg.sender);
+    }
+
+    /**
+     * @notice migrate(), crediting `recipient` on the Syrax Chain instead of the caller.
+     * @dev ⛔ N-03: native SRX is issued to the same address, and ZK-stack chains
+     *      derive CREATE2 addresses differently from the EVM, so a Safe, an AA
+     *      wallet or a protocol contract migrating with migrate() burned its SRX
+     *      on L1 for an address nobody could ever control on the Syrax Chain.
+     */
+    function migrateTo(uint256 amount, address recipient) external nonReentrant returns (uint256 migrationId) {
+        if (recipient == address(0)) revert ZeroAddress();
+        return _migrate(amount, recipient);
+    }
+
+    function _migrate(uint256 amount, address recipient) internal returns (uint256 migrationId) {
         if (!migrationEnabled)  revert MigrationNotEnabled();
         if (migrationClosed)    revert MigrationWindowClosed();
         if (amount == 0)        revert ZeroAmount();
@@ -169,8 +191,8 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
         migrationId = (block.chainid << 128) | migrationCount;
 
         totalMigrated             += amount;
-        userMigrated[msg.sender]  += amount;
-        migrationUser[migrationId] = msg.sender; // A4-L-01: snapshot for oracle validation
+        userMigrated[recipient]   += amount;
+        migrationUser[migrationId] = recipient; // A4-L-01: snapshot for oracle validation
 
         // Step 1: Pull tokens from user into this contract (requires prior approval).
         srxToken.safeTransferFrom(msg.sender, address(this), amount);
@@ -181,7 +203,8 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
         // consumed — no arbitrary address burns possible (A2-H-01 fix).
         ISRXBurnable(address(srxToken)).buyAndBurn(amount);
 
-        emit MigrationRequest(migrationId, msg.sender, amount, block.timestamp, block.chainid);
+        emit MigrationRequest(migrationId, recipient, amount, block.timestamp, block.chainid);
+        if (recipient != msg.sender) emit MigrationFunded(migrationId, msg.sender, recipient);
     }
 
     // ── Oracle confirmation ────────────────────────────────────────────────────
