@@ -105,7 +105,7 @@ describe("Launch Protection × Cross-Contract Integration", function () {
       const chainId = (await ethers.provider.getNetwork()).chainId;
       const tree = buildMerkleTree(entries, chainId);
 
-      const deadline = (await time.latest()) + 7 * 24 * 60 * 60;
+      const deadline = (await time.latest()) + 14 * 24 * 60 * 60; // above SRXAirdrop.MIN_CLAIM_WINDOW (7 days)
       await airdrop.connect(admin).setMerkleRoot(tree.root, deadline);
 
       // Enable launch protection AFTER funding
@@ -373,7 +373,7 @@ describe("Launch Protection × Cross-Contract Integration", function () {
       const AMOUNT_LARGE = ethers.parseUnits("250000", 18); // > MAX_TX
       const chainId = (await ethers.provider.getNetwork()).chainId;
       const tree = buildMerkleTree([{ address: user1.address, amount: AMOUNT_LARGE }], chainId);
-      const deadline = (await time.latest()) + 7 * 24 * 60 * 60;
+      const deadline = (await time.latest()) + 14 * 24 * 60 * 60; // above SRXAirdrop.MIN_CLAIM_WINDOW (7 days)
       await airdrop.connect(admin).setMerkleRoot(tree.root, deadline);
 
       // Off-chain presale investor

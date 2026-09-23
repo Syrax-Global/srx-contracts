@@ -5,6 +5,7 @@ import { OFT } from "@layerzerolabs/oft-evm/contracts/OFT.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
@@ -28,7 +29,7 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
  * ⚠ Multi-sig prerequisite:
  *  DEFAULT_ADMIN_ROLE MUST be a Gnosis Safe before mainnet deployment.
  */
-contract SRXOFTNative is OFT, AccessControl, Pausable {
+contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
 
     // ── Roles ──────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,29 @@ contract SRXOFTNative is OFT, AccessControl, Pausable {
     ///      could mint without limit on a remote chain and then bridge the
     ///      excess back, and nothing in the system would notice.
     uint256 public constant MAX_SUPPLY = 10_000_000_000 * 10 ** 18; // 10 billion SRX
+
+    error OwnershipCannotBeRenounced();
+
+    // ── Bridge ownership (N-02) ─────────────────────────────────────────────────
+    //
+    // The Ownable owner controls the LayerZero peers, enforced options and message
+    // inspector — the bridge's real authority, outside the role model.
+    // ⛔ Transfer was one step, so a typo sent it to an address nobody controls,
+    //    and renounceOwnership() would have frozen peer configuration for good,
+    //    including incident-response step 5 (set a compromised peer to zero).
+    //    Transfer is now two-step and renouncing is disabled.
+
+    function transferOwnership(address newOwner) public override(Ownable, Ownable2Step) onlyOwner {
+        Ownable2Step.transferOwnership(newOwner);
+    }
+
+    function _transferOwnership(address newOwner) internal override(Ownable, Ownable2Step) {
+        Ownable2Step._transferOwnership(newOwner);
+    }
+
+    function renounceOwnership() public view override onlyOwner {
+        revert OwnershipCannotBeRenounced();
+    }
 
     // ── Constructor ────────────────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { VestingVault } from "../vesting/VestingVault.sol";
@@ -124,9 +125,19 @@ contract PreSaleRound is ReentrancyGuard {
     // ── Immutables ─────────────────────────────────────────────────────────────
 
     IERC20  public immutable srxToken;
-    IERC20  public immutable usdc;       // 6-decimal; address(0) = disabled
-    IERC20  public immutable usdt;       // 6-decimal; address(0) = disabled
-    IERC20  public immutable wbtc;       // 8-decimal; address(0) = disabled
+    IERC20  public immutable usdc;       // address(0) = disabled
+    IERC20  public immutable usdt;       // address(0) = disabled
+    IERC20  public immutable wbtc;       // address(0) = disabled
+
+    /// @notice Decimals of each payment token, read from the token at deployment.
+    /// @dev ⛔ THESE WERE ASSUMED (6, 6, 8) AND NEVER READ. On BNB Chain the
+    ///      deploy script's USDT and USDC are 18-decimal tokens, so every deposit
+    ///      was valued 10^12 too high: 0.0000025 USDT bought the whole 300M SRX
+    ///      Genesis cap (pre-external-audit sweep, PSR-01, 23 Sep 2026). Reading
+    ///      the value makes the conversion correct for whatever the token is.
+    uint8   public immutable usdcDecimals;
+    uint8   public immutable usdtDecimals;
+    uint8   public immutable wbtcDecimals;
     address public immutable admin;
 
     bool    public immutable flatBonusEnabled; // true = one rate for everyone (see header)
@@ -210,6 +221,10 @@ contract PreSaleRound is ReentrancyGuard {
     }
 
     mapping(address => Investor) public investors;
+
+    /// @notice Smallest single on-chain contribution, 8-decimal USD. 0 = none.
+    ///         10_deploy_presale.js sets $2,500 for Genesis, the page's stated minimum.
+    uint256 public minContributionUsd8Dec;
     address[] public investorList;
 
     uint256 public totalAllocated;
@@ -236,6 +251,7 @@ contract PreSaleRound is ReentrancyGuard {
     event USDCWithdrawn(address indexed to, uint256 amount);
     event USDTWithdrawn(address indexed to, uint256 amount);
     event WBTCWithdrawn(address indexed to, uint256 amount);
+    event MinContributionSet(uint256 oldUsd8Dec, uint256 newUsd8Dec);
     event SRXRecovered(address indexed to, uint256 amount);
     event OraclePriceBoundsUpdated(
         uint256 minEthPriceUsd8Dec, uint256 maxEthPriceUsd8Dec,
@@ -265,6 +281,10 @@ contract PreSaleRound is ReentrancyGuard {
     error InvalidPriceBounds();
     error PriceLockedAfterFirstInvestor(); // R5-02: price immutable once any investor exists
     error InvalidFlatBonus();              // flat rate above the ceiling, or a rate given in ladder mode
+    error UnsupportedDecimals(address token, uint8 decimals);    // token above 18 decimals
+    error AllocationNotRepresentable(uint256 srxAmount);          // PSR-02: inside a tier jump
+    error BelowMinimumContribution(uint256 usd8Dec, uint256 minimum); // PSR-05
+    error UnsupportedFeedDecimals(address feed, uint8 decimals); // every price here is 8-decimal USD
 
     // ── Modifiers ──────────────────────────────────────────────────────────────
 
@@ -318,6 +338,11 @@ contract PreSaleRound is ReentrancyGuard {
         usdc            = IERC20(_usdc);
         usdt            = IERC20(_usdt);
         wbtc            = IERC20(_wbtc);
+        usdcDecimals    = _tokenDecimals(_usdc);
+        usdtDecimals    = _tokenDecimals(_usdt);
+        wbtcDecimals    = _tokenDecimals(_wbtc);
+        _requireUsdFeed(_ethUsdFeed);
+        _requireUsdFeed(_btcUsdFeed);
         ethUsdFeed      = IAggregatorV3(_ethUsdFeed);
         btcUsdFeed      = IAggregatorV3(_btcUsdFeed);
         admin           = _admin;
@@ -451,7 +476,7 @@ contract PreSaleRound is ReentrancyGuard {
         usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
 
         // SC-OPS-002: use Chainlink USDC/USD feed if set, else default to $1
-        uint256 usdValue8Dec = _stableToUsd8Dec(usdcAmount, usdcUsdFeed);
+        uint256 usdValue8Dec = _stableToUsd8Dec(usdcAmount, usdcUsdFeed, usdcDecimals);
         _processInvestment(msg.sender, usdValue8Dec, false);
     }
 
@@ -472,7 +497,7 @@ contract PreSaleRound is ReentrancyGuard {
         usdt.safeTransferFrom(msg.sender, address(this), usdtAmount);
 
         // SC-OPS-002: use Chainlink USDT/USD feed if set, else default to $1
-        uint256 usdValue8Dec = _stableToUsd8Dec(usdtAmount, usdtUsdFeed);
+        uint256 usdValue8Dec = _stableToUsd8Dec(usdtAmount, usdtUsdFeed, usdtDecimals);
         _processInvestment(msg.sender, usdValue8Dec, false);
     }
 
@@ -574,7 +599,9 @@ contract PreSaleRound is ReentrancyGuard {
         uint256 count = 0;
         for (uint256 i = startIndex; i < endIndex; i++) {
             address vaultAddr = investors[investorList[i]].vault;
-            if (vaultAddr != address(0)) {
+            // PSR-07: skip a vault already triggered, so one late or overlapping
+            // batch cannot revert the whole launch-day run.
+            if (vaultAddr != address(0) && !VestingVault(vaultAddr).tgeTriggered()) {
                 VestingVault(vaultAddr).triggerTGE();
                 count++;
             }
@@ -667,7 +694,14 @@ contract PreSaleRound is ReentrancyGuard {
      *         disable a feed and fall back to $1.
      *         Recommended on mainnet to defend against stablecoin depeg events.
      */
+    function setMinContribution(uint256 usd8Dec) external onlyAdmin {
+        emit MinContributionSet(minContributionUsd8Dec, usd8Dec);
+        minContributionUsd8Dec = usd8Dec;
+    }
+
     function setStablecoinFeeds(address _usdcFeed, address _usdtFeed) external onlyAdmin {
+        _requireUsdFeed(_usdcFeed);
+        _requireUsdFeed(_usdtFeed);
         usdcUsdFeed = IAggregatorV3(_usdcFeed);
         usdtUsdFeed = IAggregatorV3(_usdtFeed);
         emit StablecoinFeedsUpdated(_usdcFeed, _usdtFeed);
@@ -790,7 +824,7 @@ contract PreSaleRound is ReentrancyGuard {
     ///      is identical to the legacy $1 assumption. USDT amounts quote via the USDC
     ///      feed here; for exact USDT pricing during a divergence, compare on-chain.
     function quoteStable(uint256 stableAmount, address investor) external view returns (uint256) {
-        uint256 usdValue8Dec    = _stableToUsd8Dec(stableAmount, usdcUsdFeed);
+        uint256 usdValue8Dec    = _stableToUsd8Dec(stableAmount, usdcUsdFeed, usdcDecimals);
         uint256 newCumulative   = investors[investor].cumulativeUsd8Dec + usdValue8Dec;
         return _computeTotalSRXWithBonus(newCumulative) - investors[investor].srxAllocation;
     }
@@ -882,6 +916,12 @@ contract PreSaleRound is ReentrancyGuard {
         uint256 usdValue8Dec,
         bool    offChain
     ) internal {
+        // PSR-05: 1 base unit of USDC used to create an investor, so sybil dust
+        // could bloat investorList and cost the admin a vault per entry.
+        // Off-chain (admin-recorded) entries are not bound by it.
+        if (!offChain && usdValue8Dec < minContributionUsd8Dec)
+            revert BelowMinimumContribution(usdValue8Dec, minContributionUsd8Dec);
+
         Investor storage inv      = investors[investor];
         uint256 oldSRX            = inv.srxAllocation;
         uint256 newCumulativeUsd  = inv.cumulativeUsd8Dec + usdValue8Dec;
@@ -998,8 +1038,12 @@ contract PreSaleRound is ReentrancyGuard {
             if (aboveMin && belowNext) return usd;
         }
 
-        // Conservative fallback: Entry-tier inversion (never inflates the tier).
-        return srxAmount * srxPriceUsd8Dec * 10_000 / (1e18 * (10_000 + ENTRY_BONUS_BPS));
+        // ⛔ PSR-02: this fell back to the Entry-tier inversion, commented "never
+        //    inflates the tier" — false. An amount inside a tier jump recorded MORE
+        //    USD than any payment could, so a $1 top-up recomputed the allocation
+        //    at the higher tier (+3.45M SRX for $1 at the $400k jump). No payment
+        //    produces such an amount, so it is refused.
+        revert AllocationNotRepresentable(srxAmount);
     }
 
     // ── Internal: USD conversion helpers ──────────────────────────────────────
@@ -1043,7 +1087,7 @@ contract PreSaleRound is ReentrancyGuard {
             revert OraclePriceOutOfBounds(priceU, minBtcPriceUsd8Dec, maxBtcPriceUsd8Dec);
         if (maxBtcPriceUsd8Dec != 0 && priceU > maxBtcPriceUsd8Dec)
             revert OraclePriceOutOfBounds(priceU, minBtcPriceUsd8Dec, maxBtcPriceUsd8Dec);
-        return wbtcAmount * priceU / 1e8;
+        return wbtcAmount * priceU / (10 ** uint256(wbtcDecimals));
     }
 
     // ── Stable → USD 8-dec helper (SC-OPS-002) ────────────────────────────────
@@ -1062,14 +1106,16 @@ contract PreSaleRound is ReentrancyGuard {
      *      For 1.0 USDC = $0.87: priceFromFeed = 87_000_000 (= 0.87 * 1e8).
      *        Then 1e6 * 87_000_000 / 1e6 = 87_000_000 (= $0.87 in 8-dec). ✓
      */
-    function _stableToUsd8Dec(uint256 stableAmount, IAggregatorV3 feed)
+    function _stableToUsd8Dec(uint256 stableAmount, IAggregatorV3 feed, uint8 tokenDecimals)
         internal
         view
         returns (uint256)
     {
         if (address(feed) == address(0)) {
-            // Legacy default: 1 stable unit = $1
-            return stableAmount * 100;
+            // Default: 1 whole token = $1, scaled from the token's own decimals to 8.
+            return tokenDecimals >= 8
+                ? stableAmount / (10 ** uint256(tokenDecimals - 8))
+                : stableAmount * (10 ** uint256(8 - tokenDecimals));
         }
         (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
         if (price <= 0)                                  revert InvalidOraclePrice();
@@ -1083,7 +1129,21 @@ contract PreSaleRound is ReentrancyGuard {
             revert OraclePriceOutOfBounds(priceU, minStablePriceUsd8Dec, maxStablePriceUsd8Dec);
         if (maxStablePriceUsd8Dec != 0 && priceU > maxStablePriceUsd8Dec)
             revert OraclePriceOutOfBounds(priceU, minStablePriceUsd8Dec, maxStablePriceUsd8Dec);
-        return stableAmount * priceU / 1e6;
+        return stableAmount * priceU / (10 ** uint256(tokenDecimals));
+    }
+
+    /// @dev Decimals of a payment token; 0 for a disabled (zero-address) token.
+    function _tokenDecimals(address token) private view returns (uint8 d) {
+        if (token == address(0)) return 0;
+        d = IERC20Metadata(token).decimals();
+        if (d > 18) revert UnsupportedDecimals(token, d);
+    }
+
+    /// @dev Every conversion here treats a feed answer as 8-decimal USD.
+    function _requireUsdFeed(address feed) private view {
+        if (feed == address(0)) return;
+        uint8 d = IAggregatorV3(feed).decimals();
+        if (d != 8) revert UnsupportedFeedDecimals(feed, d);
     }
 
 }
@@ -1091,6 +1151,7 @@ contract PreSaleRound is ReentrancyGuard {
 // ── Minimal Chainlink interface ────────────────────────────────────────────────
 
 interface IAggregatorV3 {
+    function decimals() external view returns (uint8);
     function latestRoundData() external view returns (
         uint80  roundId,
         int256  answer,

@@ -234,18 +234,27 @@ contract StabilisationFund is
     // guard there.
     mapping(address => bool) public approvedDeployTarget;
 
+    // ── Appended 23 Sep 2026 (pre-external-audit sweep, SSF-H2) ───────────────
+    /// @notice Sum of every contributor's accrued-but-unclaimed pendingRewards.
+    /// @dev ⛔ rewardPool alone is NOT the free balance: it still holds rewards
+    ///      that have accrued and are merely unclaimed. Scheduling against the
+    ///      whole pool re-promised them, the defect fixed in SRXStaking as F1/F1b
+    ///      and never carried over here. Appended above the gap, gap shrunk by 1.
+    uint256 public totalPendingRewards;
+
     /// @dev Storage gap for future upgrades (R7-1 + SC-UUPS-001 fix).
     ///
     ///      DISCIPLINE: Every upgrade that adds N new state variables MUST shrink this
     ///      gap by exactly N. Append new state ABOVE this gap. DO NOT insert variables
     ///      below the gap. Wrong shrinkage causes storage slot collision on subsequent
     ///      upgrades. (Reduced 50 → 49 for approvedDeployTarget (SC-TRUST-003),
-    ///      then 49 → 48 for periodFinish (SC-ECON-001).)
+    ///      then 49 → 48 for periodFinish (SC-ECON-001), then 48 → 47 for
+    ///      totalPendingRewards (pre-external-audit sweep, 23 Sep 2026).)
     ///
     ///      VERIFICATION: Every upgrade PR must run `hardhat-upgrades` validateUpgrade
     ///      and the upgrade runbook must include a "Storage Layout Diff" section.
     // solhint-disable-next-line var-name-mixedcase
-    uint256[48] private __gap;
+    uint256[47] private __gap;
 
     // ── Events ─────────────────────────────────────────────────────────────────
 
@@ -277,6 +286,7 @@ contract StabilisationFund is
     event Contributed(address indexed contributor, uint256 amount, uint256 newTotal);
     event ContributionWithdrawn(address indexed contributor, uint256 amount);
     event RewardsClaimed(address indexed contributor, uint256 amount);
+    event RewardShortfall(address indexed contributor, uint256 unpaid);
     event FeesReceived(address indexed token, uint256 amount);
     event StableContributed(address indexed contributor, address indexed token, uint256 amount);
     event RewardPoolFunded(uint256 amount, uint256 newTotal);
@@ -311,6 +321,7 @@ contract StabilisationFund is
     error NoStrandedPool();    // A5-M-02: rescue only valid when pool is stranded
     error StressInCooldown(uint256 cooldownEndsAt); // A6-E-03: cooldown between stress events
     error TargetNotApproved(address target); // SC-TRUST-003: fast-path target not on allowlist
+    error InsufficientFreeBalance(uint256 free, uint256 requested); // SSF-M1
 
     // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -499,7 +510,14 @@ contract StabilisationFund is
      *      Pass address(0) when only the global state needs updating (no user checkpoint).
      */
     function _updateReward(address user) internal {
-        rewardPerTokenStored = rewardPerToken();
+        uint256 newRPT = rewardPerToken();
+        // Accrual applies to the whole contribution base by construction, so it
+        // is tracked here, not per caller: a global update (the funding and rate
+        // paths) must still count every contributor's new liability.
+        if (newRPT > rewardPerTokenStored && totalContributions != 0) {
+            totalPendingRewards += (totalContributions * (newRPT - rewardPerTokenStored)) / PRECISION;
+        }
+        rewardPerTokenStored = newRPT;
         lastUpdateTime       = lastTimeRewardApplicable();
 
         if (user != address(0)) {
@@ -520,9 +538,13 @@ contract StabilisationFund is
         // retroactively billed under the new schedule (off-by-one over-accrual).
         // _updateReward must be called immediately before this.
         lastUpdateTime = block.timestamp;
+        // ⛔ This divided the whole rewardPool, which still contains everything
+        //    accrued-but-unclaimed, so every rate change or top-up re-granted that
+        //    liability as fresh runway and promised the same tokens twice.
+        uint256 unaccrued = rewardPool > totalPendingRewards ? rewardPool - totalPendingRewards : 0;
         periodFinish = rewardRate == 0
             ? block.timestamp
-            : block.timestamp + (rewardPool / rewardRate);
+            : block.timestamp + (unaccrued / rewardRate);
     }
 
     /**
@@ -530,17 +552,23 @@ contract StabilisationFund is
      *      Silently does nothing if pendingRewards[user] == 0.
      */
     function _settleRewards(address user) internal {
-        uint256 reward = pendingRewards[user];
-        if (reward == 0) return;
+        uint256 owed = pendingRewards[user];
+        if (owed == 0) return;
 
-        // Safety cap — protects against accounting drift in edge cases.
-        if (reward > rewardPool) reward = rewardPool;
+        // Safety cap. ⛔ It used to zero pendingRewards after capping, so a
+        // shortfall was destroyed with no event. The remainder now stays owed.
+        uint256 reward = owed > rewardPool ? rewardPool : owed;
 
-        pendingRewards[user] = 0;
-        rewardPool          -= reward;
+        pendingRewards[user] = owed - reward;
+        // Clamped: per-update rounding can leave the global total a few wei
+        // below the sum of individual claims (SRXStaking M-1), and an underflow
+        // here would wrap and freeze every future schedule.
+        totalPendingRewards = totalPendingRewards > reward ? totalPendingRewards - reward : 0;
+        rewardPool         -= reward;
 
         srxToken.safeTransfer(user, reward);
         emit RewardsClaimed(user, reward);
+        if (reward < owed) emit RewardShortfall(user, owed - reward);
     }
 
     // ── Stress event lifecycle ─────────────────────────────────────────────────
@@ -573,7 +601,10 @@ contract StabilisationFund is
         stressActive           = true;
         stressEventCount      += 1;
         stressTriggeredAt      = block.timestamp;
-        stressStartSRXBalance  = srxToken.balanceOf(address(this));
+        // The caps are a share of what the fund may actually spend: its SRX less
+        // contributor principal and the reward pool. ⛔ The whole balance was
+        // snapshotted, so a 70% cap could reach into contributors' own deposits.
+        stressStartSRXBalance  = _freeSRX();
         deployerSRXUsed        = 0;
         guardianSRXUsed        = 0;
 
@@ -668,6 +699,13 @@ contract StabilisationFund is
                 guardianSRXUsed += amount;
             }
         }
+
+        // ⛔ SSF-M1: contributor principal and the reward pool are never spendable
+        //    by a fast path, whatever the snapshot said. Before this, a guardian
+        //    deploying its full cap could leave the fund unable to repay the last
+        //    contributors, and a stale snapshot allowed more than 70% of what was
+        //    left. Governance (48h timelock) is not bound by this check.
+        if (!isGovernance && amount > _freeSRX()) revert InsufficientFreeBalance(_freeSRX(), amount);
 
         totalDeployed += amount;
         IERC20(token).safeTransfer(target, amount);
@@ -766,8 +804,11 @@ contract StabilisationFund is
         if (totalContributions > 0)    revert NoStrandedPool(); // contributions still exist; pool is live
         if (rewardPool == 0)           revert NoStrandedPool(); // nothing to rescue
 
-        uint256 amount = rewardPool;
-        rewardPool   = 0;
+        // Past contributors can still claim after withdrawing (M-09), so their
+        // accrued rewards are not stranded and must not be swept.
+        if (rewardPool <= totalPendingRewards) revert NoStrandedPool();
+        uint256 amount = rewardPool - totalPendingRewards;
+        rewardPool   = totalPendingRewards;
         rewardRate   = 0; // stop emission — no contributors to receive it
         periodFinish = block.timestamp; // SC-ECON-001: schedule ends now
 
@@ -916,6 +957,13 @@ contract StabilisationFund is
     }
 
     // ── UUPS ───────────────────────────────────────────────────────────────────
+
+    /// @dev SRX the fund holds beyond contributor principal and the reward pool.
+    function _freeSRX() internal view returns (uint256) {
+        uint256 bal = srxToken.balanceOf(address(this));
+        uint256 encumbered = totalContributions + rewardPool;
+        return bal > encumbered ? bal - encumbered : 0;
+    }
 
     function _authorizeUpgrade(address newImpl) internal override onlyRole(UPGRADER_ROLE) {}
 }

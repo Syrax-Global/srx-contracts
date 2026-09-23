@@ -101,7 +101,7 @@ describe("SRXAirdrop", function () {
     const tree = buildMerkleTree(entries, chainId);
 
     // Deadline 7 days from now
-    const deadline = (await time.latest()) + 7 * 24 * 60 * 60;
+    const deadline = (await time.latest()) + 14 * 24 * 60 * 60; // above SRXAirdrop.MIN_CLAIM_WINDOW (7 days)
 
     return {
       token, airdrop, admin,

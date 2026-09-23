@@ -222,6 +222,14 @@ contract SRXStaking is
     ///      interval is skipped rather than paid retroactively.
     uint256 public minTotalStakeForEmission;
 
+    // ── Appended 23 Sep 2026 (pre-external-audit sweep, STK-H2) ──────────────
+    /// @notice Bonus-stream twin of totalPendingRewards.
+    /// @dev ⛔ The F1/F1b fix covered only the SRX stream. The bonus (real-yield)
+    ///      stream still scheduled against its whole pool, accrued-but-unclaimed
+    ///      included, and zeroed a capped shortfall. Appended above the gap, gap
+    ///      shrunk by 1.
+    uint256 public totalBonusPendingRewards;
+
     /// @dev Storage gap for future upgrades (R7-1 + SC-UUPS-001 fix).
     ///
     ///      DISCIPLINE: Every upgrade that adds N new state variables MUST shrink this
@@ -232,14 +240,15 @@ contract SRXStaking is
     ///      corruption that is difficult to detect post-deployment.
     ///      (Reduced 50 → 48 for periodFinish + bonusPeriodFinish — SC-ECON-001;
     ///      then 48 → 45 for totalPendingRewards + minStakeAmount +
-    ///      minTotalStakeForEmission — audit remediation, 9 Sep 2026.)
+    ///      minTotalStakeForEmission — audit remediation, 9 Sep 2026; then 45 → 44
+    ///      for totalBonusPendingRewards — pre-external-audit sweep, 23 Sep 2026.)
     ///
     ///      VERIFICATION: Every upgrade PR must run the OpenZeppelin Upgrades Plugin
     ///      storage layout check (`hardhat-upgrades` validateUpgrade) and the upgrade
     ///      runbook must include a "Storage Layout Diff" section showing the previous
     ///      gap size, new gap size, and every new variable added.
     // solhint-disable-next-line var-name-mixedcase
-    uint256[45] private __gap;
+    uint256[44] private __gap;
 
     modifier nonReentrant() {
         require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
@@ -261,6 +270,8 @@ contract SRXStaking is
     event RewardShortfall(address indexed user, uint256 unpaid);
     /// @notice An expired lock's reward multiplier was dropped back to 1.00x.
     event WeightDecayed(address indexed user, uint256 newWeight, uint256 removed);
+    /// @notice addToPosition changed a position's principal, lock end and weight.
+    event PositionIncreased(address indexed user, uint256 added, uint256 newAmount, uint256 lockEnd, uint256 weightedAmount);
     event MinStakeAmountSet(uint256 oldMinimum, uint256 newMinimum);
     event MinTotalStakeForEmissionSet(uint256 oldMinimum, uint256 newMinimum);
     event TierParamsUpdated(Tier indexed tier, uint256 minSRX, uint256 discountBps);
@@ -268,6 +279,7 @@ contract SRXStaking is
     event BonusRewardPoolFunded(uint256 amount, uint256 newTotal);
     event BonusRewardRateSet(uint256 oldRate, uint256 newRate);
     event BonusRewardsClaimed(address indexed user, uint256 amount);
+    event BonusRewardShortfall(address indexed user, uint256 unpaid);
     event RewardPoolReset(address indexed recipient, uint256 amount);      // R5-01: stranded-pool rescue
     event BonusRewardPoolReset(address indexed recipient, uint256 amount); // R5-01: stranded bonus rescue
 
@@ -499,10 +511,12 @@ contract SRXStaking is
         //    entitlement vanished. The remainder is now RETAINED as still-pending
         //    and becomes claimable once the pool is refunded, and the gap is
         //    announced rather than swallowed.
-        unchecked {
-            pendingRewards[user] = owed - reward;
-            totalPendingRewards -= reward;
-        }
+        pendingRewards[user] = owed - reward;
+        // ⛔ STK-M1: this was an unchecked subtraction. Per-update flooring leaves
+        //    the global total a few wei BELOW the sum of individual claims, so the
+        //    last claim wrapped it to ~2^256, after which _recomputePeriodFinish
+        //    saw no unaccrued pool and froze every future schedule. Clamp at zero.
+        totalPendingRewards = totalPendingRewards > reward ? totalPendingRewards - reward : 0;
         rewardPool -= reward;
 
         srx.safeTransfer(user, reward);
@@ -558,7 +572,12 @@ contract SRXStaking is
         if (bonusLastUpdateTime == 0) {
             bonusLastUpdateTime = block.timestamp;
         }
-        bonusRewardPerTokenStored = bonusRewardPerToken();
+        uint256 newRPT = bonusRewardPerToken();
+        if (newRPT > bonusRewardPerTokenStored && totalWeightedStake != 0) {
+            totalBonusPendingRewards +=
+                (totalWeightedStake * (newRPT - bonusRewardPerTokenStored)) / PRECISION;
+        }
+        bonusRewardPerTokenStored = newRPT;
         bonusLastUpdateTime       = bonusLastTimeRewardApplicable();
 
         if (user != address(0)) {
@@ -586,9 +605,12 @@ contract SRXStaking is
         // retroactive billing of an inter-period gap. _updateBonusReward must be
         // called immediately before this.
         bonusLastUpdateTime = block.timestamp;
+        uint256 unaccrued = bonusRewardPool > totalBonusPendingRewards
+            ? bonusRewardPool - totalBonusPendingRewards
+            : 0;
         bonusPeriodFinish = bonusRewardRate == 0
             ? block.timestamp
-            : block.timestamp + (bonusRewardPool / bonusRewardRate);
+            : block.timestamp + (unaccrued / bonusRewardRate);
     }
 
     /**
@@ -597,16 +619,19 @@ contract SRXStaking is
      */
     function _settleBonusRewards(address user) internal {
         if (address(bonusRewardToken) == address(0)) return;
-        uint256 reward = bonusPendingRewards[user];
-        if (reward == 0) return;
+        uint256 owed = bonusPendingRewards[user];
+        if (owed == 0) return;
 
-        if (reward > bonusRewardPool) reward = bonusRewardPool;
+        uint256 reward = owed > bonusRewardPool ? bonusRewardPool : owed;
 
-        bonusPendingRewards[user] = 0;
+        // The remainder stays owed (it was zeroed and lost), and is announced.
+        bonusPendingRewards[user] = owed - reward;
+        totalBonusPendingRewards  = totalBonusPendingRewards > reward ? totalBonusPendingRewards - reward : 0;
         bonusRewardPool          -= reward;
 
         bonusRewardToken.safeTransfer(user, reward);
         emit BonusRewardsClaimed(user, reward);
+        if (reward < owed) emit BonusRewardShortfall(user, owed - reward);
     }
 
     // ── Staking ────────────────────────────────────────────────────────────────
@@ -666,12 +691,16 @@ contract SRXStaking is
         pos.amount  += additionalAmount;
         totalLocked += additionalAmount;
 
+        // An expired lock is no longer a commitment of any length, so the
+        // no-downgrade rule below protects nothing and only blocks a fresh lock.
+        bool expired = block.timestamp >= pos.lockEnd;
+
         if (newDuration > 0) {
             if (!_validDuration(newDuration)) revert InvalidLockDuration();
             // Prevent multiplier downgrade — stakers may only maintain or upgrade
             // their commitment tier. A 180-day staker near expiry cannot switch to
             // 7-day to drop their multiplier from 2.0× to 1.0× (A2-M-04 fix).
-            if (_multiplier(newDuration) < _multiplier(pos.lockDuration)) revert InvalidLockDuration();
+            if (!expired && _multiplier(newDuration) < _multiplier(pos.lockDuration)) revert InvalidLockDuration();
             uint256 newEnd = block.timestamp + newDuration;
             if (newEnd > pos.lockEnd) {
                 pos.lockEnd      = newEnd;
@@ -679,11 +708,20 @@ contract SRXStaking is
             }
         }
 
-        // Recompute weighted amount based on (possibly updated) lock duration
-        pos.weightedAmount  = (pos.amount * _multiplier(pos.lockDuration)) / MULTIPLIER_BASE;
+        // ⛔ F6 WAS RECORDED AS FIXED AND WAS NOT. This line recomputed the weight
+        //    from the stored lockDuration, which still says 180 days after the
+        //    lock has lapsed, so addToPosition(x, 0) on an expired lock put the
+        //    whole enlarged position straight back at 2.00x with no live lock.
+        //    _decayExpiredWeight had just removed the multiplier; this restored it.
+        //    The PoC asserted the 2.00x and was labelled [FIXED] (pre-external-audit
+        //    sweep, 23 Sep 2026). A position whose lock has ended weighs its
+        //    principal, exactly as _decayExpiredWeight and getTier already treat it.
+        uint256 mult = block.timestamp >= pos.lockEnd ? MULTIPLIER_BASE : _multiplier(pos.lockDuration);
+        pos.weightedAmount  = (pos.amount * mult) / MULTIPLIER_BASE;
         totalWeightedStake += pos.weightedAmount;
 
         srx.safeTransferFrom(msg.sender, address(this), additionalAmount);
+        emit PositionIncreased(msg.sender, additionalAmount, pos.amount, pos.lockEnd, pos.weightedAmount);
     }
 
     /**
@@ -1065,8 +1103,10 @@ contract SRXStaking is
         if (totalWeightedStake > 0)                  revert NoStrandedPool();
         if (bonusRewardPool == 0)                    revert NoStrandedPool();
 
-        uint256 amount = bonusRewardPool;
-        bonusRewardPool   = 0;
+        // Only what nobody is owed is stranded.
+        if (bonusRewardPool <= totalBonusPendingRewards) revert NoStrandedPool();
+        uint256 amount = bonusRewardPool - totalBonusPendingRewards;
+        bonusRewardPool   = totalBonusPendingRewards;
         bonusRewardRate   = 0;
         bonusPeriodFinish = block.timestamp;
 
