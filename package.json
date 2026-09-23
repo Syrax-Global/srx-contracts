@@ -2,8 +2,8 @@
   "name": "srx-token",
   "version": "1.0.0",
   "private": true,
-  "description": "SRX \u2014 Syrax Token omnichain ecosystem contracts",
-  "license": "MIT",
+  "description": "SRX — Syrax Token omnichain ecosystem contracts",
+  "license": "UNLICENSED",
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
