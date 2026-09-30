@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { approveBuyers } = require("./helpers/buyers");
 
 describe("PreSaleRound", function () {
 
@@ -137,6 +138,8 @@ describe("PreSaleRound", function () {
 
     // Fund the round with SRX
     await token.connect(admin).transfer(await round.getAddress(), HARD_CAP);
+    // Identity checked and agreement accepted — the only wallets that may buy.
+    await approveBuyers(round, admin, [investor1, investor2, investor3, stranger]);
 
     return {
       round, token, mockUsdc, mockUsdt, mockWbtc, ethFeed, btcFeed,

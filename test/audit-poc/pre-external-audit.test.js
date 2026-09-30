@@ -8,6 +8,7 @@
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { approveBuyers } = require("../helpers/buyers");
 
 const E = (n) => ethers.parseUnits(String(n), 18);
 
@@ -42,6 +43,7 @@ describe("PSR-01 — payment tokens are valued by their real decimals", function
       await ethFeed.getAddress(), await btcFeed.getAddress(), admin.address, CAP, PRICE, true, 5_000n,
     );
     await token.connect(admin).transfer(await r.getAddress(), CAP);
+    await approveBuyers(r, admin, [buyer]);
     return { r, usdc, usdt, wbtc, buyer, admin, F };
   }
 
@@ -225,6 +227,7 @@ async function presale({ flat = true, bonus = 5_000n } = {}) {
     await ethFeed.getAddress(), ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, flat, flat ? bonus : 0n,
   );
   await token.connect(admin).transfer(await r.getAddress(), E(300_000_000));
+  await approveBuyers(r, admin, [i1, i2]);
   await usdc.mint(i1.address, 1_000_000n * 10n ** 6n);
   await usdc.connect(i1).approve(await r.getAddress(), ethers.MaxUint256);
   return { admin, i1, i2, token, usdc, r };
@@ -582,6 +585,7 @@ describe("PSR-12 — oracle and payment-token details", function () {
     const r = await R.deploy(token.target, ethers.ZeroAddress, usdt.target, ethers.ZeroAddress,
       ethers.ZeroAddress, ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, true, 5_000n);
     await token.connect(admin).transfer(r.target, E(300_000_000));
+    await approveBuyers(r, admin, [i1]);
     await usdt.mint(i1.address, U6(10_000));
     await usdt.connect(i1).approve(r.target, ethers.MaxUint256);
     await r.connect(i1).investWithUSDT(U6(10_000));

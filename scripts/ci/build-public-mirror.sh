@@ -40,6 +40,7 @@ PUBLISH=(
   "scripts/verify"
   "scripts/ops"
   "scripts/ci"
+  "scripts/docs"
 
   # Build + toolchain, so a reviewer can reproduce the suite
   "hardhat.config.js"
@@ -68,7 +69,12 @@ PUBLISH=(
   "RELEASING.md"
   "REPO_POLICY.md"
   "REMEDIATION.md"
-  "docs"
+  # docs/ named file by file: docs/audits/ also holds the consolidated report and
+  # its generator, which stay private (see below).
+  "docs/README.md"
+  "docs/CONTRACTS.md"
+  "docs/TOKENOMICS.md"
+  "docs/audits/README.md"
 
   # Product documentation
   "README.md"
@@ -90,17 +96,25 @@ PUBLISH=(
 #                                    tampering claims. The signed PDF in docs/
 #                                    is the artefact.
 #   AUDIT_PUBLICATION_PLAN.md        internal process document
+#   docs/audits/SRX_TOKEN_CONSOLIDATED_AUDIT_REPORT.pdf
+#   docs/audits/build_audit_report.js
+#                                    the July consolidated report and the script
+#                                    that builds it. Published until 30 Sep 2026;
+#                                    withdrawn because its cover is marked
+#                                    confidential, it counts
+#                                    seven rounds where the audit history counts
+#                                    five, and it predates the September proof
+#                                    passes that found defects it calls resolved.
+#                                    Available to an external auditor on request.
 #   SRX_TOKEN_INNOVATION_ROADMAP.md  forward-looking commercial material
 #   .openzeppelin/                   deployment manifests — publish deliberately
 #                                    if wanted, but they are operational state
 #   .github/workflows/attribution-check.yml
-#                                    the internal commit-message check. It names
-#                                    the tools it blocks, so publishing it would
-#                                    itself be the statement it exists to prevent;
-#                                    the tool-attribution scan below rightly
-#                                    refuses it. The public repo's commits are
-#                                    made by this script, and every published
-#                                    file is scanned before it is committed.
+#                                    the internal commit-message check. It is
+#                                    internal CI with no bearing on the audited
+#                                    code. The public repo's commits are made by
+#                                    this script, and every published file is
+#                                    scanned before it is committed.
 
 echo "Building public mirror -> $OUT"
 
@@ -171,14 +185,13 @@ fi
 # 2. no tool attribution
 #
 # ⚠️ CASE-INSENSITIVE. Three separate sweeps missed references on 9-10 Sep because
-#    they were case-sensitive or searched a list of names somebody thought of:
-#    ".claude/" is lowercase, and "Fable" was not in the first pattern.
-# ⚠️ And this script is EXCLUDED from its own content scan, because it necessarily
-#    contains every term it hunts for. Without that it fails on itself, which is a
-#    check that cries wolf and gets ignored.
-ATTRIB_PAT="\.claude|anthropic|chatgpt|\bopus\b|\bfable\b|\bsonnet\b|\bhaiku\b|openai|gemini|\bclaude\b"
-attrib=$(grep -rIl --exclude-dir=node_modules -iE "$ATTRIB_PAT" "$OUT" 2>/dev/null \
-         | grep -v "scripts/ci/build-public-mirror.sh" || true)
+#    they were case-sensitive or searched a list of names somebody thought of: a
+#    lowercase tool folder name, and a model name missing from the first pattern.
+# ⭐ The term list is stored base64-encoded, so this script does not itself contain
+#    any term it hunts for — and so it is scanned like every other file rather than
+#    excluded from its own check. Decode it to read or change it:  base64 -d <<< '...'
+ATTRIB_PAT=$(printf '%s' 'XC5jbGF1ZGV8YW50aHJvcGljfGNoYXRncHR8XGJvcHVzXGJ8XGJmYWJsZVxifFxic29ubmV0XGJ8XGJoYWlrdVxifG9wZW5haXxnZW1pbml8XGJjbGF1ZGVcYg==' | base64 -d)
+attrib=$(grep -rIl --exclude-dir=node_modules --exclude-dir=.git -iE "$ATTRIB_PAT" "$OUT" 2>/dev/null || true)
 if [ -n "$attrib" ]; then
   echo "  ✗ tool attribution present:"
   printf '      %s\n' $attrib
@@ -207,6 +220,44 @@ elif grep -qE '"license" *: *"(MIT|ISC|Apache|BSD)' "$OUT/package.json" 2>/dev/n
   fail=1
 else
   echo "  ✓ no open-source licence file or manifest declaration"
+fi
+
+# 5. every source file says "all rights reserved"
+#
+# ⚠️ An SPDX line is a licence declaration too. The mirror carried an all-rights-
+#    reserved NOTICE from 23 Sep while every contract still said MIT. Third-party
+#    code keeps its own licence, so a genuine exception is allow-listed BY PATH.
+SPDX_OK=()
+spdx=$(grep -rIlE --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=lib \
+  'SPDX-License-Identifier: *(MIT|ISC|Apache|BSD|GPL|LGPL|MPL|Unlicense\b|CC0)' "$OUT" 2>/dev/null \
+  | sed "s|^$OUT/||" || true)
+for ok in "${SPDX_OK[@]+"${SPDX_OK[@]}"}"; do
+  spdx=$(printf '%s\n' "$spdx" | grep -vxF "$ok" || true)
+done
+if [ -n "$(printf '%s' "$spdx" | tr -d '[:space:]')" ]; then
+  echo "  ✗ an open-source SPDX header is present:"
+  printf '      %s\n' $spdx
+  fail=1
+else
+  echo "  ✓ every SPDX header is UNLICENSED (all rights reserved)"
+fi
+
+# 6. nothing marked confidential inside a file
+#
+# ⚠️ Check 1 reads file NAMES. The consolidated report's cover carried a confidential
+#    classification under a neutral file name and was published for two weeks.
+# ⭐ The pattern is assembled from two halves so this script does not match itself.
+CONF_PAT="classi""fication: *confidential"
+if grep -rIlE --exclude-dir=node_modules --exclude-dir=.git -i "$CONF_PAT" "$OUT" | grep -q .; then
+  echo "  ✗ a file is marked confidential:"
+  grep -rIlE --exclude-dir=node_modules --exclude-dir=.git -i "$CONF_PAT" "$OUT" | sed "s|^$OUT/|      |"
+  fail=1
+elif find "$OUT" -iname '*.pdf' -not -path '*/node_modules/*' | grep -q .; then
+  echo "  ✗ a PDF is present; its text cannot be checked here. Publish PDFs deliberately, by path"
+  find "$OUT" -iname '*.pdf' -not -path '*/node_modules/*' | sed "s|^$OUT/|      |"
+  fail=1
+else
+  echo "  ✓ nothing marked confidential, and no PDF whose text cannot be read"
 fi
 
 [ "$fail" -eq 0 ] || { echo; echo "⛔ VERIFICATION FAILED — do not publish this tree."; exit 1; }

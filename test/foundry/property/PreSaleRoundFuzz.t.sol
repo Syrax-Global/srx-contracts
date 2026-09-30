@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
@@ -19,6 +19,8 @@ import {MockERC20} from "../../../contracts/mocks/MockERC20.sol";
  *   - P2: tier bonus is monotonically non-decreasing with cumulative USD
  *   - P3: per-investor allocation calculation reproduces from cumulative USD
  *   - P4: removing an investor reduces totalAllocated by exactly that investor's allocation
+ *   - P5: an approved buyer is never credited beyond its agreed cap, and is
+ *         always credited up to it (approved buyers only, 25 Sep 2026)
  */
 contract PreSaleRoundFuzz is Test {
     SRXToken          public token;
@@ -61,6 +63,19 @@ contract PreSaleRoundFuzz is Test {
         // Fund presale
         vm.prank(ADMIN);
         token.transfer(address(presale), PRESALE_FUND);
+
+        // Approve INVESTOR without a practical limit. Without this every addInvestor
+        // below reverts NotApproved and the try/catch properties pass vacuously.
+        _approve(INVESTOR, type(uint128).max);
+    }
+
+    function _approve(address buyer, uint256 capUsd8Dec) internal {
+        address[] memory b = new address[](1);
+        uint256[] memory c = new uint256[](1);
+        bytes32[] memory r = new bytes32[](1);
+        b[0] = buyer; c[0] = capUsd8Dec; r[0] = keccak256(abi.encode(buyer));
+        vm.prank(ADMIN);
+        presale.setBuyerApprovals(b, c, r);
     }
 
     /// @dev P1: For any USD input that fits under the hard cap, totalAllocated
@@ -124,6 +139,38 @@ contract PreSaleRoundFuzz is Test {
                 "P4 violated: removeInvestor did not reduce totalAllocated by exactly the allocation"
             );
         } catch {}
+        vm.stopPrank();
+    }
+
+    /// @dev P5: with a random cap and two random USDC payments, the buyer is credited
+    ///      exactly what was paid while the total is within the cap, and a payment that
+    ///      would take it above the cap is refused. Nothing is swallowed by a try/catch.
+    function testFuzz_approvedBuyerNeverExceedsCap(uint256 capUsd, uint256 first, uint256 second) public {
+        address buyer = address(0xCAFE);
+        capUsd = bound(capUsd, 1, 200_000) * 1e8;           // $1 – $200K, whole dollars
+        first  = bound(first,  1, 200_000);                 // whole USDC
+        second = bound(second, 1, 200_000);
+        _approve(buyer, capUsd);
+        usdc.mint(buyer, (first + second) * 1e6);
+        vm.startPrank(buyer);
+        usdc.approve(address(presale), type(uint256).max);
+
+        if (first * 1e8 > capUsd) {
+            vm.expectRevert();
+            presale.investWithUSDC(first * 1e6);
+            (, uint256 none,,) = presale.investors(buyer);
+            assertEq(none, 0, "P5 violated: a refused first payment was credited");
+        } else {
+            presale.investWithUSDC(first * 1e6);
+            if ((first + second) * 1e8 > capUsd) {
+                vm.expectRevert();
+                presale.investWithUSDC(second * 1e6);
+            } else {
+                presale.investWithUSDC(second * 1e6);
+            }
+            (, uint256 cum,,) = presale.investors(buyer);
+            assertLe(cum, capUsd, "P5 violated: credited beyond the agreed cap");
+        }
         vm.stopPrank();
     }
 }

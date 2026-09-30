@@ -134,6 +134,10 @@ async function main() {
   // Step 3: Attempt addInvestor with $100 → ~8,800 SRX at Entry tier
   //         This is >> 1 SRX and must overflow the cap
   const overflowUsd = 10_000_000_000n; // $100 in 8-dec
+  // Approved buyers only: approve the probe address first, so the refusal tested
+  // below is the hard cap and not the missing approval.
+  const probe = "0x000000000000000000000000000000000000dEaD";
+  await (await presale.setBuyerApprovals([probe], [overflowUsd], [ethers.keccak256(ethers.toUtf8Bytes("edge-case probe"))])).wait();
   console.log(`[3/5] addInvestor($100 = ~8,800 SRX) — expect HardCapExceeded revert...`);
   results["1.12_hardcap"] = await expectRevert(
     presale.addInvestor("0x000000000000000000000000000000000000dEaD", overflowUsd),

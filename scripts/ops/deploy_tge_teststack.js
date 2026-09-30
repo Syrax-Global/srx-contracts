@@ -27,7 +27,7 @@
  */
 const { ethers, upgrades, network } = require("hardhat");
 require("dotenv").config();
-const { WALLETS, ALLOCATIONS, VESTING, SSF, LZ_ENDPOINTS, LZ_EIDS } = require("../deploy/00_config");
+const { WALLETS, ALLOCATIONS, VESTING, SSF, LZ_ENDPOINTS, LZ_EIDS, TGE_PLAN } = require("../deploy/00_config");
 
 const TESTNET_TIMELOCK_DELAY = 60; // 60 seconds for testnet
 
@@ -91,23 +91,17 @@ async function main() {
   console.log("\n[4/9] Deploying VestingVaults...");
   const VestingVault = await ethers.getContractFactory("VestingVault");
 
-  const vaultDefs = [
-    { key: "founders",     cfg: VESTING.founders,     beneficiary: WALLETS.founders     },
-    { key: "coreTeam",     cfg: VESTING.coreTeam,     beneficiary: WALLETS.coreTeam     },
-    { key: "seedInvestors",cfg: VESTING.seedInvestors, beneficiary: WALLETS.seedInvestors},
-    { key: "presale",      cfg: VESTING.presale,       beneficiary: WALLETS.presale      },
-    { key: "ecosystem",    cfg: VESTING.ecosystem,     beneficiary: WALLETS.ecosystem    },
-  ];
-
+  // One vault per "vault" row of TGE_PLAN (00_config.js), keyed by its label.
   addrs.vaults = {};
-  for (const { key, cfg, beneficiary } of vaultDefs) {
+  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
+    const cfg = VESTING[row.schedule];
     const v = await VestingVault.deploy(
-      addrs.token, beneficiary, admin,
+      addrs.token, WALLETS[row.beneficiary], admin,
       cfg.cliffDuration, cfg.vestingDuration, cfg.tgeUnlockBps
     );
     await v.waitForDeployment();
-    addrs.vaults[key] = await v.getAddress();
-    console.log(`  ${key.padEnd(14)}: ${addrs.vaults[key]}`);
+    addrs.vaults[row.label] = await v.getAddress();
+    console.log(`  ${row.label.padEnd(18)}: ${addrs.vaults[row.label]}`);
   }
 
   // ── 5. TGEDistributor ────────────────────────────────────────────────────────
@@ -183,17 +177,16 @@ async function main() {
 
   // Step 0: setAllocations (strategic → SSF)
   console.log("  [9a] setAllocations...");
-  const allocations = [
-    { destination: addrs.vaults.founders,      amount: ALLOCATIONS.founders,      isVestingVault: true,  label: "Founders"         },
-    { destination: addrs.vaults.coreTeam,      amount: ALLOCATIONS.coreTeam,      isVestingVault: true,  label: "CoreTeam"         },
-    { destination: addrs.vaults.seedInvestors, amount: ALLOCATIONS.seedInvestors, isVestingVault: true,  label: "SeedInvestors"    },
-    { destination: addrs.vaults.presale,       amount: ALLOCATIONS.presale,       isVestingVault: true,  label: "Presale"          },
-    { destination: addrs.vaults.ecosystem,     amount: ALLOCATIONS.ecosystem,     isVestingVault: true,  label: "EcosystemDAO"     },
-    { destination: WALLETS.liquidity,          amount: ALLOCATIONS.liquidity,     isVestingVault: false, label: "Liquidity"        },
-    { destination: addrs.staking,             amount: ALLOCATIONS.staking,       isVestingVault: false, label: "Staking"          },
-    { destination: addrs.treasury,            amount: ALLOCATIONS.treasury,      isVestingVault: false, label: "Treasury"         },
-    { destination: addrs.ssf,                 amount: ALLOCATIONS.strategic,     isVestingVault: false, label: "StabilisationFund"},
-  ];
+  const contractDestination = { Staking: addrs.staking, Treasury: addrs.treasury, StabilisationFund: addrs.ssf };
+  const allocations = TGE_PLAN.map((row) => ({
+    destination:
+      row.kind === "vault"  ? addrs.vaults[row.label] :
+      row.kind === "wallet" ? WALLETS[row.wallet] :
+      contractDestination[row.label],
+    amount: ALLOCATIONS[row.allocation],
+    isVestingVault: row.kind === "vault",
+    label: row.label,
+  }));
   await (await tge.setAllocations(allocations)).wait();
   console.log("  ✅ Allocations set");
 
@@ -260,8 +253,9 @@ async function main() {
   console.log(`FEE_CONTROLLER_${NET}_TGE=${addrs.feeController}`);
   console.log(`TREASURY_${NET}_TGE=${addrs.treasury}`);
   console.log(`STABILISATION_FUND_${NET}_TGE=${addrs.ssf}`);
-  for (const [key, addr] of Object.entries(addrs.vaults)) {
-    console.log(`VAULT_${key.toUpperCase()}_${NET}_TGE=${addr}`);
+  // The same variable names 03_deploy_vesting.js prints, so verify_tge.js reads either.
+  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
+    console.log(`${row.vaultEnv}_${NET}_TGE=${addrs.vaults[row.label]}`);
   }
 
   if (allOk) {

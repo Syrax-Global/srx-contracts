@@ -95,40 +95,37 @@ the contract.
 
 ## 4. Full Allocation Breakdown
 
-The 10 billion SRX is split into nine allocation categories. The amounts are the
-`ALLOCATIONS` constant in `scripts/deploy/00_config.js`, passed to
-`TGEDistributor.setAllocations()` by `06_execute_tge.js`; the contract itself
-holds no percentages — it **reverts unless the set sums to `MAX_SUPPLY`**
-(10,000,000,000 SRX), which `test/TGE.test.js` covers in both the valid and the
-mismatched case. So the sum is enforced on-chain and the breakdown is enforced by
-the deploy configuration.
+The 10 billion SRX is split into the rows of `TGE_PLAN` in `scripts/deploy/00_config.js`,
+passed to `TGEDistributor.setAllocations()` by `06_execute_tge.js`. The contract itself holds
+no percentages — it **reverts unless the set sums to `MAX_SUPPLY`** (10,000,000,000 SRX). So the
+sum is enforced on-chain and the breakdown by the deploy configuration.
 
-| Category | % | SRX Amount | Destination | Vesting |
-|----------|---|-----------|-------------|---------|
-| Founders | 10% | 1,000,000,000 | VestingVault | 0% TGE · 365-day cliff · 1095-day linear |
-| Core Team | 6% | 600,000,000 | VestingVault | 0% TGE · 182-day cliff · 730-day linear |
-| Seed Investors | 4% | 400,000,000 | VestingVault | 0% TGE · 273-day cliff · 730-day linear |
-| Presale | 14% | 1,400,000,000 | VestingVault | 25% at TGE · 0-day cliff · 180-day linear |
-| Ecosystem DAO | 13% | 1,300,000,000 | VestingVault | 0% TGE · 0-day cliff · 1460-day linear |
-| Liquidity | 12% | 1,200,000,000 | Direct wallet | Unlocked at TGE |
-| Staking Rewards | 17% | 1,700,000,000 | SRXStaking contract | Distributed to stakers over time |
-| Treasury | 9% | 900,000,000 | SRXTreasury contract | Governance-controlled spending |
-| Stabilisation Fund (SSF) | 15% | 1,500,000,000 | StabilisationFund contract | Governed deployment — no raw wallet |
-| **TOTAL** | **100%** | **10,000,000,000** | | |
+**The allocation table, the launch-day float and the release calendar are in
+[`docs/TOKENOMICS.md`](docs/TOKENOMICS.md), generated from that configuration by
+`scripts/docs/tokenomics.js`.** They are not repeated here, so they cannot drift: a test fails if
+the generated file is out of date, and `test/LaunchFloat.test.js` checks the design against the
+real contracts.
 
-**Key observations:**
+**The design, in words (28 Sep 2026):**
 
-- **53% of supply** (Founders + Team + Seed + Presale + Ecosystem) is vesting-locked
-  and cannot be transferred until vesting conditions are met.
-- **15% of supply** (Strategic) is held in the StabilisationFund governed smart
-  contract. No single party can deploy it — all spending requires either a DAO
-  vote through the Timelock or a declared on-chain stress event with hard BPS caps.
-- **12% of supply** (Liquidity) is held in a wallet controlled by the liquidity
-  management multi-sig for DEX market-making at TGE.
-- **17% of supply** is locked in the staking contract and will be distributed
-  to stakers over years — it is not in circulation and cannot be withdrawn by any admin.
-- **9% of supply** is in the treasury and can only be spent through a passed governance
-  vote executed by the Timelock.
+- **5% of supply is transferable at launch, and nothing else**: the presale's launch tranche, the
+  official pool's SRX and the market maker's inventory. Each goes to a multi-signature wallet; the
+  deployment refuses a single-key wallet on any real network.
+- **No vesting contract releases anything at launch**, founders, core team and seed investors
+  included, and nothing new is released for the first 30 days.
+- **The liquidity allocation (12%) is split**: the pool and market-maker amounts, and a reserve
+  held in a vesting contract for 12 months and then released over 24.
+- **The Stabilisation Fund** is held in a governed contract. No single party can deploy it: all
+  spending needs a DAO vote through the Timelock, or a declared on-chain stress event with hard
+  caps.
+- **The staking reward pool** sits in the staking contract and is paid to stakers over time. No
+  admin can withdraw it.
+- **The Treasury** is spent only through a passed governance vote executed by the Timelock.
+
+⛔ **This section used to say** "12% (Liquidity) is held in a wallet controlled by the liquidity
+management multi-sig" and that 53% of supply was vesting-locked. The configuration actually sent
+the whole 1.2B liquidity allocation, unlocked, to a single-key wallet, and 25% of the presale also
+unlocked at launch: 15.5% in all, and only 49.5% locked. Nothing compared the text with the code.
 
 ---
 
@@ -218,7 +215,8 @@ ETH and BTC amounts are converted to USD via live Chainlink feeds at time of inv
 **What it cannot do:**
 - Cannot change the vesting terms (cliff and duration are hardcoded constants)
 - Cannot accept SOL or XRP on-chain (EVM limitation — use `addInvestor()` for these)
-- Cannot mint SRX — it receives SRX from TGEDistributor and holds it
+- Cannot mint SRX. It holds only the SRX transferred into it: no allocation in `TGE_PLAN` is
+  sent to it, and how a round is funded on mainnet is an open decision (PSR-03)
 - Cannot accept investment after `finalize()` is called
 - Cannot deploy a second vault for the same investor
 
@@ -688,13 +686,10 @@ Phase 4 — Fully Vested:
 
 ### Vesting Parameters by Category
 
-| Category | TGE Unlock | Cliff | Linear Vest | Total Duration |
-|----------|-----------|-------|-------------|----------------|
-| Founders | 0% | 365 days | 1,095 days | ~4 years total |
-| Core Team | 0% | 182 days | 730 days | ~2.5 years total |
-| Seed Investors | 0% | 273 days | 730 days | ~2.75 years total |
-| Presale | 25% | 0 days | 180 days | 6 months for remainder |
-| Ecosystem DAO | 0% | 0 days | 1,460 days | 4 years total |
+Each vesting contract's hold period and release period are in
+[`docs/TOKENOMICS.md`](docs/TOKENOMICS.md) (the "Schedule" column), generated from `VESTING` in
+`scripts/deploy/00_config.js`. `lib/tge_targets.js` checks every deployed vault against that
+configuration before any SRX moves.
 
 ### Claiming
 

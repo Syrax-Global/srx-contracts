@@ -45,17 +45,8 @@ entry point for auditors, exchange listing teams, integrators, and the community
 
 ### Allocation (genesis, 10B SRX)
 
-| Category | % | SRX | Vehicle |
-|---|---|---|---|
-| Founders | 10% | 1,000,000,000 | VestingVault (12m cliff, 36m vest) |
-| Core Team | 6% | 600,000,000 | VestingVault (6m cliff, 24m vest) |
-| Seed Investors | 4% | 400,000,000 | VestingVault (9m cliff, 24m vest) |
-| Presale | 14% | 1,400,000,000 | VestingVault (25% TGE, 6m vest) |
-| Ecosystem DAO | 13% | 1,300,000,000 | VestingVault (48m vest) |
-| Liquidity | 12% | 1,200,000,000 | Direct |
-| Staking incentives | 17% | 1,700,000,000 | SRXStaking pool |
-| Treasury & Ops | 9% | 900,000,000 | SRXTreasury (timelock-controlled) |
-| Strategic Reserve | 15% | 1,500,000,000 | StabilisationFund |
+The allocation table, the 5% launch-day float and the release calendar are generated from
+`scripts/deploy/00_config.js` into [`TOKENOMICS.md`](TOKENOMICS.md); they are not repeated here.
 
 Supply invariant (continuously verified by the Foundry invariant suite):
 `totalSupply() == MAX_SUPPLY - totalBurned()`.

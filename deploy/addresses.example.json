@@ -12,7 +12,7 @@
     "deployerMultisig": "0x0000000000000000000000000000000000000000"
   },
   "tgeAllocations": {
-    "_note": "Destinations MUST match 06_execute_tge.js finalAllocations exactly. Vaults are deployed contracts; liquidity/staking/treasury/strategic are the contracts or Safe wallets that receive direct allocations. For each vesting vault, beneficiary is the address the vault pays out to; it is compared with the deployed vault's beneficiary() and is REQUIRED on a real network.",
+    "_note": "Destinations MUST match 06_execute_tge.js finalAllocations exactly. Vaults are deployed contracts; PresaleLaunch, LiquidityPool and MarketMaker are MULTI-SIGNATURE wallets (a single-key wallet is refused on a real network) and Staking, Treasury and StabilisationFund are contracts; together PresaleLaunch + LiquidityPool + MarketMaker are the 5% launch float. For each vesting vault, beneficiary is the address the vault pays out to; it is compared with the deployed vault's beneficiary() and is REQUIRED on a real network.",
     "Founders": {
       "destination": "0x0000000000000000000000000000000000000000",
       "beneficiary": "0x0000000000000000000000000000000000000000",
@@ -31,10 +31,15 @@
       "amountSRX": "400000000",
       "isVestingVault": true
     },
+    "PresaleLaunch": {
+      "destination": "0x0000000000000000000000000000000000000000",
+      "amountSRX": "250000000",
+      "isVestingVault": false
+    },
     "Presale": {
       "destination": "0x0000000000000000000000000000000000000000",
       "beneficiary": "0x0000000000000000000000000000000000000000",
-      "amountSRX": "1400000000",
+      "amountSRX": "1150000000",
       "isVestingVault": true
     },
     "EcosystemDAO": {
@@ -43,10 +48,21 @@
       "amountSRX": "1300000000",
       "isVestingVault": true
     },
-    "Liquidity": {
+    "LiquidityPool": {
       "destination": "0x0000000000000000000000000000000000000000",
-      "amountSRX": "1200000000",
+      "amountSRX": "50000000",
       "isVestingVault": false
+    },
+    "MarketMaker": {
+      "destination": "0x0000000000000000000000000000000000000000",
+      "amountSRX": "200000000",
+      "isVestingVault": false
+    },
+    "LiquidityReserve": {
+      "destination": "0x0000000000000000000000000000000000000000",
+      "beneficiary": "0x0000000000000000000000000000000000000000",
+      "amountSRX": "950000000",
+      "isVestingVault": true
     },
     "Staking": {
       "destination": "0x0000000000000000000000000000000000000000",
