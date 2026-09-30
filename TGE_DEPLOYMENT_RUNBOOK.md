@@ -49,9 +49,13 @@ Complete EVERY item and get sign-off from two team members before running.
 - [ ] All 5 vesting vaults deployed and verified — `tgeTriggered()` returns `false` on each
 
 ### Allocation Verification
-- [ ] `TGEDistributor.getAllocations()` matches tokenomics document exactly
-- [ ] All 9 allocation destinations are the correct contract/wallet addresses
+- [ ] `TGEDistributor.getAllocations()` matches `docs/TOKENOMICS.md` exactly (generated from `00_config.js`)
+- [ ] Every row of `TGE_PLAN` (12) has the correct contract/wallet address
 - [ ] Total allocation sum = 10,000,000,000 SRX (verify via `00_config.js` ALLOCATIONS)
+- [ ] Exactly 500,000,000 SRX (5%) is transferable at launch: the presale launch tranche, the
+      official pool and the market maker — and `scripts/ops/verify_tge.js` reports it after TGE
+- [ ] `WALLET_PRESALE`, `WALLET_LIQUIDITY` and `WALLET_MARKET_MAKER` are each a **multi-signature
+      wallet** (a Safe). The TGE gate refuses a single-key wallet on a real network
 - [ ] StabilisationFund address set as strategic reserve destination (NOT a raw wallet)
 - [ ] Vesting vault addresses in `.env` match deployed vault addresses on Etherscan
 
@@ -60,7 +64,8 @@ Complete EVERY item and get sign-off from two team members before running.
 - [ ] `SRX_TOKEN_MAINNET`, `TGE_DISTRIBUTOR_MAINNET`, `TREASURY_MAINNET`
 - [ ] `STABILISATION_FUND_MAINNET`, `STAKING_MAINNET`
 - [ ] `VESTING_FOUNDERS_MAINNET`, `VESTING_CORE_TEAM_MAINNET`, `VESTING_SEED_MAINNET`
-- [ ] `VESTING_PRESALE_MAINNET`, `VESTING_ECOSYSTEM_MAINNET`
+- [ ] `VESTING_PRESALE_MAINNET`, `VESTING_ECOSYSTEM_MAINNET`, `VESTING_LIQUIDITY_RESERVE_MAINNET`
+- [ ] `WALLET_PRESALE`, `WALLET_LIQUIDITY`, `WALLET_MARKET_MAKER` (multi-signature wallets)
 - [ ] Deployer wallet has sufficient ETH for gas (estimate: 0.05–0.15 ETH at 30 gwei)
 - [ ] Gas price checked — do NOT execute during network congestion (>50 gwei)
 

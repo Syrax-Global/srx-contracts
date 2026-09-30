@@ -116,8 +116,9 @@ Verification coverage:
 - Slither static analysis in CI (`fail-on: high`).
 - Foundry invariant campaign (nightly, in CI). Echidna is a local harness only.
 
-Full reports are mirrored under [`docs/audits/`](docs/audits/) when the repository
-is made public. An independent external audit is a **mandatory gate before mainnet**.
+The audit history is in [`docs/audits/`](docs/audits/); the full per-round reports are held internally and
+are available to an external auditor on request. Internal audits are complete; an independent external audit
+is next, and is a **mandatory gate before mainnet**.
 
 ---
 

@@ -73,7 +73,7 @@ within 15 minutes of the first alert.
    Funds are being assessed. Update in 1 hour."*
 
 10. **Engage external incident support** — If an external security firm is under
-    contract at that time, contact them. **No firm is engaged at present**, so if one
+    contract at that time, contact them. **No firm is on retainer for incident support at present**, so if one
     is needed the CTO appoints it as part of the response.
 
 ### Recovery (2 hours onwards)
@@ -196,7 +196,7 @@ Prevention:
 | Contact | Purpose |
 |---|---|
 | security@layerzero.network | LayerZero bridge issues |
-| External security firm (none engaged at present) | Emergency incident support |
+| External security firm (none on retainer at present) | Emergency incident support |
 | OpenZeppelin Defender support | Monitoring platform issues |
 | Chainlink support | Oracle feed issues |
 

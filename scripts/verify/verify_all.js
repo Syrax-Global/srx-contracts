@@ -20,7 +20,7 @@
  */
 
 const { ethers, network, run } = require("hardhat");
-const { LZ_ENDPOINTS, WALLETS, VESTING, GOVERNANCE } = require("../deploy/00_config");
+const { LZ_ENDPOINTS, WALLETS, VESTING, GOVERNANCE, TGE_PLAN } = require("../deploy/00_config");
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -120,76 +120,16 @@ async function main() {
   // ── Step 3: Vesting Vaults + TGEDistributor ──────────────────────────────
   //   VestingVault constructor(token, beneficiary, admin, cliffDuration, vestingDuration, tgeUnlockBps)
 
-  const foundersVaultAddr  = envOpt(`VESTING_FOUNDERS_${NET}`);
-  const coreTeamVaultAddr  = envOpt(`VESTING_CORE_TEAM_${NET}`);
-  const seedVaultAddr      = envOpt(`VESTING_SEED_${NET}`);
-  const presaleVaultAddr   = envOpt(`VESTING_PRESALE_${NET}`);
-  const ecosystemVaultAddr = envOpt(`VESTING_ECOSYSTEM_${NET}`);
-
-  results.push(await verify(
-    "VestingVault (Founders)",
-    foundersVaultAddr,
-    [
-      srxTokenAddr,
-      WALLETS.founders,
-      admin,
-      VESTING.founders.cliffDuration,
-      VESTING.founders.vestingDuration,
-      VESTING.founders.tgeUnlockBps,
-    ]
-  ));
-
-  results.push(await verify(
-    "VestingVault (Core Team)",
-    coreTeamVaultAddr,
-    [
-      srxTokenAddr,
-      WALLETS.coreTeam,
-      admin,
-      VESTING.coreTeam.cliffDuration,
-      VESTING.coreTeam.vestingDuration,
-      VESTING.coreTeam.tgeUnlockBps,
-    ]
-  ));
-
-  results.push(await verify(
-    "VestingVault (Seed Investors)",
-    seedVaultAddr,
-    [
-      srxTokenAddr,
-      WALLETS.seedInvestors,
-      admin,
-      VESTING.seedInvestors.cliffDuration,
-      VESTING.seedInvestors.vestingDuration,
-      VESTING.seedInvestors.tgeUnlockBps,
-    ]
-  ));
-
-  results.push(await verify(
-    "VestingVault (Presale)",
-    presaleVaultAddr,
-    [
-      srxTokenAddr,
-      WALLETS.presale,
-      admin,
-      VESTING.presale.cliffDuration,
-      VESTING.presale.vestingDuration,
-      VESTING.presale.tgeUnlockBps,
-    ]
-  ));
-
-  results.push(await verify(
-    "VestingVault (Ecosystem DAO)",
-    ecosystemVaultAddr,
-    [
-      srxTokenAddr,
-      WALLETS.ecosystem,
-      admin,
-      VESTING.ecosystem.cliffDuration,
-      VESTING.ecosystem.vestingDuration,
-      VESTING.ecosystem.tgeUnlockBps,
-    ]
-  ));
+  // One vault per "vault" row of TGE_PLAN (00_config.js), so a new bucket is
+  // verified without anyone remembering to add it here.
+  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
+    const v = VESTING[row.schedule];
+    results.push(await verify(
+      `VestingVault (${row.label})`,
+      envOpt(`${row.vaultEnv}_${NET}`),
+      [srxTokenAddr, WALLETS[row.beneficiary], admin, v.cliffDuration, v.vestingDuration, v.tgeUnlockBps]
+    ));
+  }
 
   const tgeDistributorAddr = envOpt(`TGE_DISTRIBUTOR_${NET}`);
   results.push(await verify(

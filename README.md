@@ -97,7 +97,7 @@ test/             Hardhat suite; test/foundry/ invariants; test/audit-poc/ proof
 scripts/deploy/   ordered deployment scripts
 scripts/verify/   pre-mainnet gates (role topology, TGE destinations)
 scripts/ops/      operational and verification tooling
-docs/audits/      audit history and the consolidated report
+docs/audits/      internal audit history
 ```
 
 ## Licence

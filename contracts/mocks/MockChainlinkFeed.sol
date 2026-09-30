@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
 
 /**
@@ -11,9 +11,22 @@ contract MockChainlinkFeed {
     uint256 public latestUpdatedAt;
     uint8   public decimals = 8;
 
+    /// @notice Empty by default — matches a real feed's description() only once set.
+    ///         Added for scripts/deploy/10_deploy_presale.js's requireFeed() check
+    ///         (finding DEP-01 rehearsal), which reads description() the same way a
+    ///         real Chainlink feed exposes it. A setter rather than a constructor arg
+    ///         so every existing `MockChainlinkFeed.deploy(price)` call site keeps
+    ///         working unchanged.
+    string  public description;
+
     constructor(int256 _initialPrice) {
         latestPrice     = _initialPrice;
         latestUpdatedAt = block.timestamp;
+    }
+
+    /// @notice Set the feed's description (used only by requireFeed() callers).
+    function setDescription(string calldata _description) external {
+        description = _description;
     }
 
     /// @notice Set a new price (used in tests to simulate price movement).

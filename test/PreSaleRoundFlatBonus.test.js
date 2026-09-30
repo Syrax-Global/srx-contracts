@@ -10,6 +10,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { approveBuyers } = require("./helpers/buyers");
 
 describe("PreSaleRound — flat bonus mode (Genesis)", function () {
   const SRX_PRICE_8DEC = 1_250_000n;                         // $0.0125
@@ -45,7 +46,7 @@ describe("PreSaleRound — flat bonus mode (Genesis)", function () {
 
   async function deployRound(env, flat, bonusBps, cap = GENESIS_CAP) {
     const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
-    return PreSaleRound.deploy(
+    const round = await PreSaleRound.deploy(
       await env.token.getAddress(),
       await env.usdc.getAddress(),
       await env.usdt.getAddress(),
@@ -58,6 +59,9 @@ describe("PreSaleRound — flat bonus mode (Genesis)", function () {
       flat,
       bonusBps
     );
+    // Identity checked and agreement accepted — the only wallets that may buy.
+    await approveBuyers(round, env.admin, [env.investor1, env.investor2]);
+    return round;
   }
 
   // Exactly what scripts/deploy/10_deploy_presale.js deploys for Genesis.

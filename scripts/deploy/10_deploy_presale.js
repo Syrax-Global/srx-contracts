@@ -68,6 +68,13 @@ const STABLECOINS = {
     usdt: process.env.USDT_ADDRESS_BSC || "0x55d398326f99059fF775485246999027B3197955",
     wbtc: process.env.WBTC_ADDRESS_BSC || ethers.ZeroAddress, // WBTC not standard on BSC
   },
+  // Local rehearsal only (finding DEP-01) — no real stablecoins on localhost;
+  // every currency stays disabled (zero address) unless the rehearsal sets one.
+  localhost: {
+    usdc: process.env.USDC_ADDRESS_LOCALHOST || ethers.ZeroAddress,
+    usdt: process.env.USDT_ADDRESS_LOCALHOST || ethers.ZeroAddress,
+    wbtc: process.env.WBTC_ADDRESS_LOCALHOST || ethers.ZeroAddress,
+  },
 };
 
 // ── Chainlink oracle addresses ─────────────────────────────────────────────────
@@ -89,6 +96,13 @@ const CHAINLINK_FEEDS = {
   bsc: {
     nativeTokenFeed: "0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE", // BNB/USD
     btcUsd:          "0x264990fbd0A4796A3E3d8E37C4d5F87a3aCa5Ebf", // BTC/USD
+  },
+  // Local rehearsal only (finding DEP-01) — scripts/ops/rehearse_deploy_suite.js
+  // deploys MockChainlinkFeed contracts on the throwaway chain and passes their
+  // addresses here. No real Chainlink feeds exist on localhost.
+  localhost: {
+    nativeTokenFeed: process.env.NATIVE_FEED_LOCALHOST,
+    btcUsd:          process.env.BTC_FEED_LOCALHOST,
   },
 };
 
@@ -266,7 +280,11 @@ async function main() {
      carry the round are not settled. The cap is per contract, so a round on two
      chains is two caps.
 
-  3. Add investors or open for on-chain investment:
+  3. Approve each buyer once they have passed identity checks and accepted
+     their purchase agreement — no one else can buy, on chain or off:
+       presaleRound.setBuyerApprovals([wallets], [capsUsd8Dec], [agreementRefs])
+       (a batch, so the Safe signs once for many people; a cap of 0 revokes)
+     Then add investors or let them invest on-chain, each within their cap:
        Off-chain: presaleRound.addInvestor(address, usdAmount8Dec)
                   e.g. $100,000 wire = addInvestor(addr, 10_000_000_000_000)
                   Contract calculates SRX + the flat +50% bonus automatically.

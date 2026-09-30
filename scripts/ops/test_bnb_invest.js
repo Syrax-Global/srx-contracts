@@ -62,6 +62,13 @@ async function main() {
   // ── Pre-checks ───────────────────────────────────────────────────────────────
 
   const inv = await presale.investors(investor.address);
+
+  // Approved buyers only: a wallet the admin has not approved cannot buy at all.
+  const approval = await presale.buyerApprovals(investor.address);
+  if (approval.capUsd8Dec === 0n) {
+    console.log(`❌ ${investor.address} is not approved to buy. Approve it first (presale_ops.js, ACTION = "approve_buyer").`);
+    return;
+  }
   if (inv.vault !== ethers.ZeroAddress) {
     console.log(`❌ Investor vault already deployed — cannot invest more.`);
     console.log(`   VaultAlreadyDeployed would revert. Use a different wallet.`);

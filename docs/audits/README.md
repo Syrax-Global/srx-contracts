@@ -1,9 +1,9 @@
 # SRX Token — Audit History
 
-⚠️ **The per-round `findings-*.md` reports are held internally and are NOT in
-this repository.** Links to them below will not resolve here; they are available
-to an engaged auditor on request. The consolidated report
-(`SRX_TOKEN_CONSOLIDATED_AUDIT_REPORT.pdf`) is the public artefact.
+⚠️ **The per-round `findings-*.md` reports and the consolidated report are held
+internally and are NOT in this repository.** Links to them below will not resolve
+here; they are available to an external auditor on request. This page and
+`REMEDIATION.md` at the repository root are the public record.
 
 
 This directory publishes the **internal** review history of the SRX token suite.
@@ -12,7 +12,7 @@ modeling, invariant verification, threat-chain construction, deployment-gate
 enforcement).
 
 ⚠️ **These were internal reviews, not an external audit.** No external firm has
-reviewed this code, and none is engaged.
+reviewed this code.
 
 > ⛔ **The five review rounds below did not catch everything.** Two later passes
 > (10 and 23 September 2026) proved further defects with executable tests —
@@ -95,7 +95,8 @@ outcome: **the dominant risk was deployment-time role topology, not contract log
 ## External Audit
 
 An independent external audit is a **mandatory blocking gate before any mainnet
-deployment**. It is planned; it has not been commissioned and no auditor is engaged.
+deployment**. Internal audits are complete; the independent external audit is next.
+No external report exists yet.
 Any external report will be published in this directory alongside the internal history
 when one exists.
 
