@@ -17,6 +17,10 @@ describe("TGEDistributor", function () {
 
   const MAX_SUPPLY = ethers.parseUnits("10000000000", 18); // 10B SRX
 
+  // ⚠️ SAMPLE FIGURES for testing the distributor's mechanics (a vault with a TGE
+  //    unlock, direct allocations, the 10B sum). They are the PRE-28 Sep layout and
+  //    are NOT the launch design — that lives in scripts/deploy/00_config.js
+  //    (TGE_PLAN) and is pinned by test/LaunchFloat.test.js.
   const AMOUNTS = {
     founders:      ethers.parseUnits("1000000000", 18),
     coreTeam:      ethers.parseUnits("600000000",  18),

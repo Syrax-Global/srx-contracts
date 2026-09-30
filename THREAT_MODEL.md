@@ -44,7 +44,7 @@ and the domains above carry **High** residual risk — that is the honest positi
 and it should not be discovered rather than disclosed.
 
 Full findings and severities are in the Round 6 master report, held internally
-and available to an engaged auditor on request.
+and available to an external auditor on request.
 
 ---
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -62,7 +62,11 @@ import { VestingVault } from "../vesting/VestingVault.sol";
  * Flow:
  *   1. Admin deploys with hard cap, SRX price, and oracle feed addresses.
  *   2. Admin transfers SRX allocation into this contract.
- *   3. Investors participate on-chain, or admin records off-chain investors.
+ *   2a. Admin approves each buyer with setBuyerApprovals() once they have passed
+ *       identity checks and accepted their purchase agreement: a cap in USD and the
+ *       agreement's on-chain reference. No one else can buy, on chain or off, and
+ *       no buyer is credited beyond their cap (Genesis journey, 25 Sep 2026).
+ *   3. Approved investors participate on-chain, or admin records off-chain investors.
  *   4. Admin calls deployVault(investor) / batchDeployVaults() to lock SRX into
  *      individual VestingVaults — one per investor.
  *   5. At token launch, admin calls batchTriggerTGE() to start all vesting clocks.
@@ -262,6 +266,19 @@ contract PreSaleRound is ReentrancyGuard {
     /// @notice Sum of refundOwed per asset — ring-fenced from every withdrawal.
     mapping(address => uint256) public totalRefundOwed;
 
+    /// @notice Who may buy, and how much (Genesis journey, 25 Sep 2026). A wallet
+    ///         is approved by the admin only after its owner has passed identity
+    ///         checks and accepted a purchase agreement. Nothing is credited, on
+    ///         chain or off, beyond `capUsd8Dec` of cumulative USD, and a wallet
+    ///         never approved has a cap of 0, so it cannot buy at all.
+    /// @dev    `agreementRef` is the agreement's on-chain commitment, a salted hash
+    ///         held off-chain; it carries no personal data. A cap of 0 revokes.
+    struct BuyerApproval {
+        uint256 capUsd8Dec;
+        bytes32 agreementRef;
+    }
+    mapping(address => BuyerApproval) public buyerApprovals;
+
     // ── Events ─────────────────────────────────────────────────────────────────
 
     event InvestorAdded(address indexed investor, uint256 srxAmount, bool offChain);
@@ -298,6 +315,7 @@ contract PreSaleRound is ReentrancyGuard {
     event RefundClaimed(address indexed investor, address indexed asset, uint256 amount);
     event PausedSet(bool paused);
     event VaultSurplusRescued(address indexed investor, address indexed vault, address indexed recipient);
+    event BuyerApprovalSet(address indexed buyer, uint256 capUsd8Dec, bytes32 agreementRef);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -327,6 +345,8 @@ contract PreSaleRound is ReentrancyGuard {
     error RefundUnderfunded(address asset, uint256 owed, uint256 held); // PSR-06: return funds first
     error PurchasesPaused();                                    // PSR-10
     error StalenessTooLong(uint256 seconds_, uint256 limit);    // PSR-12
+    error NotApproved(address buyer, uint256 cumulativeUsd8Dec, uint256 capUsd8Dec); // unapproved, or above the agreed amount
+    error LengthMismatch();
 
     // ── Modifiers ──────────────────────────────────────────────────────────────
 
@@ -431,6 +451,34 @@ contract PreSaleRound is ReentrancyGuard {
     }
 
     /**
+     * @notice Approve buyers, change their agreed amounts, or revoke them, in one
+     *         batch so the Safe signs once for many people.
+     * @dev    A cap is cumulative USD (8-decimal) across every payment and every
+     *         admin-recorded amount. It may be raised or lowered but never below
+     *         what the buyer has already been credited; set it to exactly that to
+     *         stop further purchases, or to 0 to revoke a buyer with no allocation.
+     *         An approval needs a non-zero agreement reference.
+     */
+    function setBuyerApprovals(
+        address[] calldata buyers,
+        uint256[] calldata capsUsd8Dec,
+        bytes32[] calldata agreementRefs
+    ) external onlyAdmin {
+        uint256 n = buyers.length;
+        if (capsUsd8Dec.length != n || agreementRefs.length != n) revert LengthMismatch();
+        for (uint256 i = 0; i < n; i++) {
+            address buyer = buyers[i];
+            uint256 cap   = capsUsd8Dec[i];
+            bytes32 ref   = agreementRefs[i];
+            if (buyer == address(0)) revert ZeroAddress();
+            if (cap != 0 && ref == bytes32(0)) revert ZeroAmount();
+            if (cap < investors[buyer].cumulativeUsd8Dec) revert CapBelowAllocated();
+            buyerApprovals[buyer] = BuyerApproval(cap, ref);
+            emit BuyerApprovalSet(buyer, cap, ref);
+        }
+    }
+
+    /**
      * @notice Directly set an investor's SRX allocation and synthetic USD equivalent.
      *         Use this to correct an allocation after an error. The cumulativeUsd8Dec
      *         is back-calculated from the SRX amount so tier views remain consistent.
@@ -454,7 +502,9 @@ contract PreSaleRound is ReentrancyGuard {
         //   srx = usd × (10000 + bonusBps(usd)) × 1e18 / price / 10000
         // The old naive inversion (srx × price / 1e18) omitted the bonus factor,
         // overstating USD by 10–20% and inflating the investor's tier.
-        inv.cumulativeUsd8Dec = _usdFromSrx(newSrxAmount);
+        uint256 usd = _usdFromSrx(newSrxAmount);
+        _requireApproved(investor, usd);
+        inv.cumulativeUsd8Dec = usd;
         totalAllocated        = newTotal;
         inv.srxAllocation     = newSrxAmount;
 
@@ -516,6 +566,10 @@ contract PreSaleRound is ReentrancyGuard {
 
         totalAllocated -= inv.srxAllocation;
         delete investors[investor];
+        // A removed or refunded buyer is no longer approved; buying again needs a
+        // fresh approval, so a refund cannot be followed by a quiet re-purchase.
+        delete buyerApprovals[investor];
+        emit BuyerApprovalSet(investor, 0, bytes32(0));
 
         uint256 len = investorList.length;
         for (uint256 i = 0; i < len; i++) {
@@ -539,6 +593,11 @@ contract PreSaleRound is ReentrancyGuard {
         uint256 held = _held(asset);
         if (held < owed) revert RefundUnderfunded(asset, owed, held);
         emit RefundOwed(investor, asset, paid);
+    }
+
+    function _requireApproved(address buyer, uint256 cumulativeUsd8Dec) private view {
+        uint256 cap = buyerApprovals[buyer].capUsd8Dec;
+        if (cumulativeUsd8Dec > cap) revert NotApproved(buyer, cumulativeUsd8Dec, cap);
     }
 
     function _hasOnChainPayment(address investor) private view returns (bool) {
@@ -1089,6 +1148,9 @@ contract PreSaleRound is ReentrancyGuard {
         Investor storage inv      = investors[investor];
         uint256 oldSRX            = inv.srxAllocation;
         uint256 newCumulativeUsd  = inv.cumulativeUsd8Dec + usdValue8Dec;
+        // Every allocation, paid on chain or recorded by the admin, is within an
+        // approval: identity checked and agreement accepted, never above the amount agreed.
+        _requireApproved(investor, newCumulativeUsd);
         uint256 newTotalSRX       = _computeTotalSRXWithBonus(newCumulativeUsd);
 
         // Delta is positive because cumulative USD only ever increases AND the price is

@@ -3,8 +3,8 @@
 Prepared so that an external audit can begin quickly once an engagement is agreed.
 This document gives an auditor everything needed to (a) quote accurately and (b) start fast.
 
-⚠️ **No external audit has been commissioned and none has begun.** No auditor is
-engaged and no firm named anywhere in this repository has reviewed this code.
+⚠️ **Internal audits are complete. An independent external audit is next, ahead of any mainnet
+deployment. No external audit report exists yet**, and no outside firm has reviewed this code.
 
 **Package refreshed 23 September 2026** after a full pre-external-audit sweep. The
 findings and fixes from that sweep are in `REMEDIATION.md` (top section); read
@@ -34,11 +34,11 @@ Merkle airdrop and a burn-to-migrate path for a future app-chain.
 ## 3. Scope
 
 **In scope — 15 production contracts under `contracts/` (excluding `mocks/`, `test/`,
-`echidna/`): 7,133 lines, 3,303 nSLOC** (non-blank, non-comment; measured 23 Sep 2026).
+`echidna/`): 7,194 lines, 3,338 nSLOC** (non-blank, non-comment; measured 25 Sep 2026).
 
 | Contract | Lines | nSLOC | Notes |
 |---|---|---|---|
-| `presale/PreSaleRound.sol` | 1,319 | 679 | ETH/BNB, USDC, USDT, WBTC purchases; Chainlink pricing; flat or tiered bonus; refunds; creates a VestingVault per investor |
+| `presale/PreSaleRound.sol` | 1,380 | 714 | ETH/BNB, USDC, USDT, WBTC purchases; approved buyers only, each capped at an agreed USD amount; Chainlink pricing; flat or tiered bonus; refunds; creates a VestingVault per investor |
 | `staking/SRXStaking.sol` | 1,174 | 498 | UUPS. Fee-tier locks, SRX and bonus Synthetix reward streams |
 | `stabilisation/StabilisationFund.sol` | 970 | 414 | UUPS. Three-tier deployment, contributor rewards |
 | `guardian/GuardianModule.sol` | 667 | 412 | Non-upgradeable. Per-module pause, circuit breaker, immutable sunset |
@@ -56,6 +56,11 @@ Merkle airdrop and a burn-to-migrate path for a future app-chain.
 
 **Out of scope by default:** `contracts/mocks/`, `contracts/test/`, `contracts/echidna/`,
 `test/`, OpenZeppelin and LayerZero library code.
+
+**Out of scope, available on request:** `contracts/genesis/GenesisAgreementRegistry.sol` (48 lines).
+It records, on the Syrax Chain, that a wallet accepted a Genesis purchase agreement: one
+function, no admin, no funds, no upgrade path. Its commitment is the `agreementRef` that
+`PreSaleRound.setBuyerApprovals` stores, so it is quoted separately rather than left out silently.
 
 **Deployment and operations scripts — please quote as an option.** `scripts/deploy/`,
 `scripts/ops/migrate_roles.js` and `scripts/verify/verify_roles.js` decide who holds power
@@ -83,20 +88,20 @@ Governor + Timelock with a two-phase role hand-over.
 
 - Build: `npm ci` (the repo's `.npmrc` sets `legacy-peer-deps=true` for a LayerZero transitive
   peer conflict), then `npx hardhat compile`. Foundry: `forge build` with `forge-std` in `lib/`.
-- `PreSaleRound` deploys `VestingVault` inline; its runtime is 23,016 bytes against the 24,576
+- `PreSaleRound` deploys `VestingVault` inline; its runtime is 23,902 bytes against the 24,576
   limit. Any change to either contract should re-check it.
 
 ## 5. Tests and static analysis
 
-- **Hardhat:** 817 passing, 1 pending, 0 failing (`npx hardhat test`, 23 Sep 2026).
+- **Hardhat:** 863 passing, 1 pending, 0 failing (`npx hardhat test`, 29 Sep 2026).
 - **Line coverage** (`npx hardhat coverage`, the 15 in-scope contracts only): 95.5% of
-  statements, 74.6% of branches, 93.3% of functions. Lowest statement coverage: SRXGovernor
-  80.0%, PreSaleRound 92.9%, FeeController 93.3%. Lowest branch coverage: PreSaleRound 69.5%,
+  statements, 74.9% of branches, 93.3% of functions. Lowest statement coverage: SRXGovernor
+  80.0%, PreSaleRound 93.3%, FeeController 93.3%. Lowest branch coverage: PreSaleRound 70.7%,
   GuardianModule 71.2%, BuybackBurner 71.6%.
   `test/audit-poc/` holds the proof tests for every internal finding — each one was red on the
   code as found. Start there.
 - **Foundry:** 7 token invariants (supply equation, balance sum, voting power ≤ supply, burned
-  ≤ max, burned monotonic, genesis once, no holder above supply) at 256 runs × depth 50, and 3
+  ≤ max, burned monotonic, genesis once, no holder above supply) at 256 runs × depth 50, and 4
   PreSaleRound property fuzz tests at 1,000 runs. The nightly CI profile raises these to
   1,024 × 100 and 10,000.
 - **Role hand-over rehearsal:** `scripts/ops/rehearse_role_migration.js` runs the real migration
@@ -117,9 +122,8 @@ Two remediation passes, both proven by tests — see `REMEDIATION.md`:
 | 10 Sep 2026 | 31 proven findings, every one dispositioned (one of them, F6, was later found not fixed — corrected 23 Sep) |
 | 23 Sep 2026 | 1 Critical, 4 High (one deployment), 11 Medium, plus Low and Info — fixed with proofs, or listed as open |
 
-Earlier review rounds (R1–R6) are summarised in `docs/audits/README.md`, with the consolidated
-report at `docs/audits/SRX_TOKEN_CONSOLIDATED_AUDIT_REPORT.pdf`. Per-round reports are available
-to an engaged auditor on request.
+Earlier review rounds (R1–R6) are summarised in `docs/audits/README.md`. The consolidated report
+and the per-round reports are available to an external auditor on request.
 
 ## 7. Trust model, known issues, and where we want scrutiny
 
@@ -141,8 +145,9 @@ launch-protection scope notes B/T2/D.
    (≥ 2 DVNs; set manually, see `scripts/deploy/07_deploy_bridge.js`).
 2. **Role topology and the hand-over** — the gate, the two-phase migration, and anything that
    would leave undelayed power after it.
-3. **PreSaleRound money paths** — oracle math, decimals handling, the refund ring-fence, and the
-   tier inversion.
+3. **PreSaleRound money paths** — oracle math, decimals handling, the refund ring-fence, the
+   tier inversion, and the approved-buyer cap (`setBuyerApprovals`, `_requireApproved`): no
+   wallet may be credited, on chain or by the admin, beyond its agreed amount.
 4. **Reward accounting** — liability tracking and emission scheduling in Staking and the
    StabilisationFund.
 5. **Deployment** — see §3.

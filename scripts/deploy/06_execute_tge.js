@@ -290,8 +290,14 @@ async function main() {
       console.warn(`  ⚠️  Balance (${ethers.formatUnits(stakingBal, 18)}) < expected allocation (${ethers.formatUnits(ALLOCATIONS.staking, 18)}). Proceeding with actual balance.`);
     }
 
+    // Steps 0-3 skip themselves when already done; step 4 must too. On a re-run
+    // after registration the contract has no headroom left, so a second
+    // notifyRewardAmount would revert inside the Safe batch.
+    const alreadyRegistered = await staking.rewardPool();
     const registerAmount = stakingBal > 0n ? stakingBal : 0n;
-    if (registerAmount > 0n) {
+    if (alreadyRegistered > 0n) {
+      console.log(`  ✓ (already done) incentive pool holds ${ethers.formatUnits(alreadyRegistered, 18)} SRX`);
+    } else if (registerAmount > 0n) {
       await batch.send(staking, "notifyRewardAmount", [registerAmount], `SRXStaking.notifyRewardAmount(${ethers.formatUnits(registerAmount, 18)} SRX)`);
       if (adminExecuting) {
         console.log(`  Pool balance: ${ethers.formatUnits(await staking.rewardPool(), 18)} SRX`);

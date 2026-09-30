@@ -19,33 +19,35 @@
  *      labels, the manifest's network and chain id;
  *   3. Σ amounts == MAX_SUPPLY;
  *   4. role holders match the manifest (on a real network an unpinned role FAILS);
- *   5. on chain: every destination except Liquidity has contract code, and every
- *      vesting vault pays out SRX, to the manifest's beneficiary, on the schedule
- *      in 00_config.js.
+ *   5. on chain: every destination has contract code — a "wallet" row must be a
+ *      multi-signature wallet, never a single-key one, except on a testnet — and
+ *      every vesting vault pays out SRX, to the manifest's beneficiary, on the
+ *      schedule in 00_config.js.
  *
  * Read-only. It never sends a transaction.
  */
 const fs = require("fs");
 const path = require("path");
 const { getAddress, ZeroAddress, parseUnits, formatUnits } = require("ethers");
-const { ALLOCATIONS, VESTING, TESTNET_CHAINS, walletFor } = require("../00_config");
+const { ALLOCATIONS, VESTING, TESTNET_CHAINS, TGE_PLAN, walletFor } = require("../00_config");
 
 const MAX_SUPPLY = parseUnits("10000000000", 18);
 
 /** Networks where running without a manifest is allowed (in-process, disposable). */
 const LOCAL_CHAINS = new Set(["hardhat", "localhost"]);
 
-/** Vesting vault labels → their VESTING schedule key in 00_config.js. */
-const VAULT_SCHEDULE = Object.freeze({
-  Founders: "founders",
-  CoreTeam: "coreTeam",
-  SeedInvestors: "seedInvestors",
-  Presale: "presale",
-  EcosystemDAO: "ecosystem",
-});
+/** Vesting vault labels → their VESTING schedule key in 00_config.js (from TGE_PLAN). */
+const VAULT_SCHEDULE = Object.freeze(Object.fromEntries(
+  TGE_PLAN.filter((r) => r.kind === "vault").map((r) => [r.label, r.schedule]),
+));
 
-/** Destinations that may be a plain wallet (no contract code required). */
-const MAY_BE_WALLET = new Set(["Liquidity"]);
+/**
+ * Rows that go straight to a wallet. On a real network each must have contract code
+ * (a multi-signature wallet). ⛔ This was a set holding "Liquidity" that skipped the
+ * check on EVERY network, so 1.2B SRX could — and by default would — land unlocked
+ * in a single-key wallet. Now only a testnet may use a plain wallet.
+ */
+const WALLET_ROWS = new Set(TGE_PLAN.filter((r) => r.kind === "wallet").map((r) => r.label));
 
 const ROLE_ENV = Object.freeze({ timelock: "TIMELOCK", governor: "GOVERNOR", guardianModule: "GUARDIAN_MODULE" });
 
@@ -68,19 +70,18 @@ function buildTgeAllocations({ networkName, env = process.env }) {
   const NET = networkName.toUpperCase();
   const req = (key) => checksum(env[`${key}_${NET}`], `${key}_${NET}`);
 
-  return [
-    { label: "Founders",          destination: req("VESTING_FOUNDERS"),   amount: ALLOCATIONS.founders,      isVestingVault: true  },
-    { label: "CoreTeam",          destination: req("VESTING_CORE_TEAM"),  amount: ALLOCATIONS.coreTeam,      isVestingVault: true  },
-    { label: "SeedInvestors",     destination: req("VESTING_SEED"),       amount: ALLOCATIONS.seedInvestors, isVestingVault: true  },
-    { label: "Presale",           destination: req("VESTING_PRESALE"),    amount: ALLOCATIONS.presale,       isVestingVault: true  },
-    { label: "EcosystemDAO",      destination: req("VESTING_ECOSYSTEM"),  amount: ALLOCATIONS.ecosystem,     isVestingVault: true  },
-    { label: "Liquidity",         destination: walletFor("liquidity", networkName, env), amount: ALLOCATIONS.liquidity, isVestingVault: false },
-    // ⛔ Was `stakingAddr || WALLETS.staking`: with STAKING unset, 1.7B SRX went to a
-    //    plain wallet and the incentive pool was silently never registered.
-    { label: "Staking",           destination: req("STAKING"),            amount: ALLOCATIONS.staking,       isVestingVault: false },
-    { label: "Treasury",          destination: req("TREASURY"),           amount: ALLOCATIONS.treasury,      isVestingVault: false },
-    { label: "StabilisationFund", destination: req("STABILISATION_FUND"), amount: ALLOCATIONS.strategic,     isVestingVault: false },
-  ];
+  // Built from TGE_PLAN in 00_config.js — the same list every other script reads.
+  // ⛔ Contract rows used to be `stakingAddr || WALLETS.staking`: with STAKING unset,
+  //    1.7B SRX went to a plain wallet and the incentive pool was never registered.
+  return TGE_PLAN.map((row) => ({
+    label: row.label,
+    destination:
+      row.kind === "vault"  ? req(row.vaultEnv) :
+      row.kind === "wallet" ? walletFor(row.wallet, networkName, env) :
+      req(row.env),
+    amount: ALLOCATIONS[row.allocation],
+    isVestingVault: row.kind === "vault",
+  }));
 }
 
 /** Live role holders, resolved the way the deploy scripts resolve them. */
@@ -193,15 +194,18 @@ function checkAgainstManifest({ allocations, manifest, roles, networkName, chain
  * On-chain checks. `provider` needs getCode(); `vaultAt(address)` returns an object
  * with token(), beneficiary(), cliffDuration(), vestingDuration(), tgeUnlockBps().
  */
-async function checkOnChain({ allocations, manifest, provider, vaultAt, tokenAddress }) {
+async function checkOnChain({ allocations, manifest, provider, vaultAt, tokenAddress, networkName = manifest?.network }) {
   const failures = [];
   const token = checksum(tokenAddress, "SRX token address");
+  const isTestnet = TESTNET_CHAINS.has(networkName);
 
   for (const a of allocations) {
-    if (MAY_BE_WALLET.has(a.label)) continue;
     const code = await provider.getCode(a.destination);
     if (!code || code === "0x") {
-      failures.push(`${a.label}: no contract at ${a.destination}`);
+      if (WALLET_ROWS.has(a.label) && isTestnet) continue; // a testnet may use a plain wallet
+      failures.push(WALLET_ROWS.has(a.label)
+        ? `${a.label}: ${a.destination} is a single-key wallet — launch tokens go only to a multi-signature wallet`
+        : `${a.label}: no contract at ${a.destination}`);
       continue;
     }
     if (!a.isVestingVault) continue;
@@ -268,7 +272,7 @@ async function runTgeTargetChecks({
     allocations, manifest, roles: liveRoles({ networkName, env }), networkName, chainId,
   });
   if (provider) {
-    failures.push(...await checkOnChain({ allocations, manifest, provider, vaultAt, tokenAddress }));
+    failures.push(...await checkOnChain({ allocations, manifest, provider, vaultAt, tokenAddress, networkName }));
   } else if (!LOCAL_CHAINS.has(networkName)) {
     failures.push("no provider given — the on-chain checks did not run");
   }
@@ -276,7 +280,7 @@ async function runTgeTargetChecks({
 }
 
 module.exports = {
-  MAX_SUPPLY, LOCAL_CHAINS, VAULT_SCHEDULE,
+  MAX_SUPPLY, LOCAL_CHAINS, VAULT_SCHEDULE, WALLET_ROWS,
   buildTgeAllocations, liveRoles, manifestPathFor,
   checkAgainstManifest, checkOnChain, runTgeTargetChecks,
 };

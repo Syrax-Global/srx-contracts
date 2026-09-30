@@ -64,6 +64,13 @@ async function main() {
 
   // Pre-check: show existing allocation (top-ups are allowed)
   const existing = await presale.investors(investor.address);
+
+  // Approved buyers only: a wallet the admin has not approved cannot buy at all.
+  const approval = await presale.buyerApprovals(investor.address);
+  if (approval.capUsd8Dec === 0n) {
+    console.log(`❌ ${investor.address} is not approved to buy. Approve it first (presale_ops.js, ACTION = "approve_buyer").`);
+    return;
+  }
   if (existing.srxAllocation > 0n) {
     const tierName = await presale.getTierName(investor.address);
     console.log(`ℹ️  Wallet already has ${ethers.formatUnits(existing.srxAllocation, 18)} SRX (${tierName} tier) — this will be a top-up.`);

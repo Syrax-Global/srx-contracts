@@ -14,6 +14,12 @@ const LZ_ENDPOINTS = {
   ethereum:       "0x1a44076050125825900e736c501f859c50fE728c",
   bsc:            "0x1a44076050125825900e736c501f859c50fE728c",
   zkSync:         "0x1a44076050125825900e736c501f859c50fE728c",
+  // Local rehearsal only (finding DEP-01) — scripts/ops/rehearse_deploy_suite.js
+  // deploys a MockLZEndpoint on the throwaway `hardhat node` chain and passes its
+  // address here. No real LayerZero endpoint exists on localhost, so this is
+  // read from env rather than hardcoded, and is undefined unless the rehearsal
+  // sets it.
+  localhost:      process.env.LZ_ENDPOINT_LOCALHOST,
 };
 
 // ── LayerZero Endpoint IDs (EIDs) ─────────────────────────────────────────────
@@ -67,6 +73,8 @@ const TESTNET_WALLET_DEFAULTS = Object.freeze({
   seedInvestors:  "0xe517794BDE2a13b622D4952cDf0a837ef38B96e9",
   presale:        "0x15D4410F91705DBe3110Bb95aA6eaC565a3De409",
   liquidity:      "0x214f5719Ca2c406bbd4b221cEB4E58F3E7f17b1B",
+  // keccak256("SYRAX TESTNET PLACEHOLDER: MARKET MAKER — no key exists")[12:] — nobody holds a key
+  marketMaker:    "0x308E8e31140F65BeC1706A36127107D99bb0209b",
   staking:        "0x0e5423b116B6212381bFb677529FA8535B2A0f99",
   ecosystem:      "0xE884394E16590edFd6fE532aF9A91C97b7098D86",
   treasury:       "0xed46B4e16e726a48C8fb81aBa45013DDbCC55A07",
@@ -80,6 +88,7 @@ const WALLET_ENV = Object.freeze({
   seedInvestors:  "WALLET_SEED_INVESTORS",
   presale:        "WALLET_PRESALE",
   liquidity:      "WALLET_LIQUIDITY",
+  marketMaker:    "WALLET_MARKET_MAKER",
   staking:        "WALLET_STAKING",
   ecosystem:      "WALLET_ECOSYSTEM",
   treasury:       "WALLET_TREASURY",
@@ -132,16 +141,33 @@ for (const key of Object.keys(WALLET_ENV)) {
 // ── Token allocations (in SRX with 18 decimals) ───────────────────────────────
 const { parseUnits } = require("ethers");
 
+//
+// ⭐ THE LAUNCH DESIGN (Jared, 28 Sep 2026): 5% of supply — 500,000,000 SRX — is
+//    liquid at launch, and nothing else is: the 50M pool paired with $1M at $0.02,
+//    200M market-maker inventory, and the 250M presale launch tranche. Seed,
+//    founders and team are 0% at launch. Nothing new unlocks for the first 30 days.
+//
+// ⛔ THIS USED TO RELEASE 1.55B (15.5%) AT LAUNCH: the whole 1.2B "liquidity"
+//    bucket went unlocked to a single-key wallet, plus 25% of the 1.4B presale —
+//    while every document said "12% unlocked … multi-sig" and promised a 12-month
+//    pool lock nothing enforced. The presale (14%) and liquidity (12%) totals are
+//    unchanged; they are split so the launch-day float is exactly 5%.
+//
+// Every published figure is GENERATED from this file (scripts/docs/tokenomics.js
+// → docs/TOKENOMICS.md), and a test fails if the two drift. Change numbers here only.
 const ALLOCATIONS = {
-  founders:      parseUnits("1000000000", 18), // 10%
-  coreTeam:      parseUnits("600000000",  18), // 6%
-  seedInvestors: parseUnits("400000000",  18), // 4%
-  presale:       parseUnits("1400000000", 18), // 14%
-  liquidity:     parseUnits("1200000000", 18), // 12%
-  staking:       parseUnits("1700000000", 18), // 17%
-  ecosystem:     parseUnits("1300000000", 18), // 13%
-  treasury:      parseUnits("900000000",  18), // 9%
-  strategic:     parseUnits("1500000000", 18), // 15%
+  founders:         parseUnits("1000000000", 18), // 10%
+  coreTeam:         parseUnits("600000000",  18), // 6%
+  seedInvestors:    parseUnits("400000000",  18), // 4%
+  presaleLaunch:    parseUnits("250000000",  18), // 2.5%  presale: claimable at launch
+  presale:          parseUnits("1150000000", 18), // 11.5% presale: vesting (presale 14% in total)
+  liquidityPool:    parseUnits("50000000",   18), // 0.5%  paired with $1M in the official pool
+  marketMaker:      parseUnits("200000000",  18), // 2%    contracted market-maker inventory
+  liquidityReserve: parseUnits("950000000",  18), // 9.5%  locked (liquidity 12% in total)
+  staking:          parseUnits("1700000000", 18), // 17%
+  ecosystem:        parseUnits("1300000000", 18), // 13%
+  treasury:         parseUnits("900000000",  18), // 9%
+  strategic:        parseUnits("1500000000", 18), // 15%
 };
 
 // ── Vesting parameters ────────────────────────────────────────────────────────
@@ -163,17 +189,79 @@ const VESTING = {
     vestingDuration: 730n * DAY,  // 24 months
     tgeUnlockBps:    0n,
   },
+  // The presale's launch tranche is the separate presaleLaunch allocation; this
+  // vault holds the rest. 30 days held, so nothing new is liquid in month one.
   presale: {
-    cliffDuration:   0n,
-    vestingDuration: 180n * DAY,  // 6 months (linear, claimable monthly)
-    tgeUnlockBps:    2500n,       // 25% at TGE
+    cliffDuration:   30n * DAY,   // nothing new unlocks in the first 30 days
+    vestingDuration: 180n * DAY,  // then 6 months linear
+    tgeUnlockBps:    0n,
   },
   ecosystem: {
-    cliffDuration:   0n,
-    vestingDuration: 1460n * DAY, // 48 months
+    cliffDuration:   30n * DAY,   // nothing new unlocks in the first 30 days
+    vestingDuration: 1460n * DAY, // then 48 months linear (the end moves 30 days later)
+    tgeUnlockBps:    0n,
+  },
+  // The part of the liquidity allocation not in the pool or with the market maker.
+  liquidityReserve: {
+    cliffDuration:   365n * DAY,  // locked 12 months, matching the 12-month pool lock
+    vestingDuration: 730n * DAY,  // then 24 months linear
     tgeUnlockBps:    0n,
   },
 };
+
+// ── The TGE plan: every bucket, where it goes, and how ────────────────────────
+//
+// ⭐ THE ONE LIST. The deploy scripts, the TGE gate, the verifiers, the tests and
+//    the generated tokenomics document all read this, so none of them can drift.
+//    kind:
+//      "vault"    a VestingVault paying `beneficiary` on VESTING[schedule]; its
+//                 address is read from `${vaultEnv}_<NETWORK>` once deployed
+//      "wallet"   straight to WALLETS[wallet] — on any real network this must be a
+//                 multi-signature wallet (a contract); a single-key wallet is refused
+//      "contract" straight to the contract at `${env}_<NETWORK>`
+//    liquid: true only for what is freely transferable the moment TGE runs.
+const TGE_PLAN = Object.freeze([
+  { label: "Founders",          allocation: "founders",         kind: "vault",    schedule: "founders",         beneficiary: "founders",      vaultEnv: "VESTING_FOUNDERS" },
+  { label: "CoreTeam",          allocation: "coreTeam",         kind: "vault",    schedule: "coreTeam",         beneficiary: "coreTeam",      vaultEnv: "VESTING_CORE_TEAM" },
+  { label: "SeedInvestors",     allocation: "seedInvestors",    kind: "vault",    schedule: "seedInvestors",    beneficiary: "seedInvestors", vaultEnv: "VESTING_SEED" },
+  { label: "PresaleLaunch",     allocation: "presaleLaunch",    kind: "wallet",   wallet: "presale",            liquid: true },
+  { label: "Presale",           allocation: "presale",          kind: "vault",    schedule: "presale",          beneficiary: "presale",       vaultEnv: "VESTING_PRESALE" },
+  { label: "EcosystemDAO",      allocation: "ecosystem",        kind: "vault",    schedule: "ecosystem",        beneficiary: "ecosystem",     vaultEnv: "VESTING_ECOSYSTEM" },
+  { label: "LiquidityPool",     allocation: "liquidityPool",    kind: "wallet",   wallet: "liquidity",          liquid: true },
+  { label: "MarketMaker",       allocation: "marketMaker",      kind: "wallet",   wallet: "marketMaker",        liquid: true },
+  { label: "LiquidityReserve",  allocation: "liquidityReserve", kind: "vault",    schedule: "liquidityReserve", beneficiary: "liquidity",     vaultEnv: "VESTING_LIQUIDITY_RESERVE" },
+  { label: "Staking",           allocation: "staking",          kind: "contract", env: "STAKING" },
+  { label: "Treasury",          allocation: "treasury",         kind: "contract", env: "TREASURY" },
+  { label: "StabilisationFund", allocation: "strategic",        kind: "contract", env: "STABILISATION_FUND" },
+].map(Object.freeze));
+
+/** SRX freely transferable the moment TGE runs: liquid rows plus any vault's TGE unlock. */
+function launchFloat(plan = TGE_PLAN, allocations = ALLOCATIONS, vesting = VESTING) {
+  let float = 0n;
+  for (const row of plan) {
+    const amount = allocations[row.allocation];
+    if (row.liquid) float += amount;
+    else if (row.kind === "vault") float += (amount * vesting[row.schedule].tgeUnlockBps) / 10_000n;
+  }
+  return float;
+}
+
+/** SRX released by vaults (beyond the launch float) the given number of days after TGE — the unlock calendar. */
+function vestedByDay(days, plan = TGE_PLAN, allocations = ALLOCATIONS, vesting = VESTING) {
+  const t = BigInt(days) * DAY;
+  let out = 0n;
+  for (const row of plan) {
+    if (row.kind !== "vault") continue;
+    const total = allocations[row.allocation];
+    const v = vesting[row.schedule];
+    const atTge = (total * v.tgeUnlockBps) / 10_000n;
+    const rest = total - atTge;
+    if (t < v.cliffDuration) continue;
+    const elapsed = t - v.cliffDuration;
+    out += v.vestingDuration === 0n || elapsed >= v.vestingDuration ? rest : (rest * elapsed) / v.vestingDuration;
+  }
+  return out;
+}
 
 // ── Governance parameters ─────────────────────────────────────────────────────
 //
@@ -248,4 +336,5 @@ const SSF = {
 module.exports = {
   LZ_ENDPOINTS, LZ_EIDS, WALLETS, ALLOCATIONS, VESTING, GOVERNANCE, SSF,
   TESTNET_CHAINS, TESTNET_WALLET_DEFAULTS, WALLET_ENV, walletFor, currentNetwork,
+  TGE_PLAN, launchFloat, vestedByDay,
 };

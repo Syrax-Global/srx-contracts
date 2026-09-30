@@ -6,7 +6,7 @@ const path = require("path");
 const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 const {
-  ALLOCATIONS, VESTING, TESTNET_WALLET_DEFAULTS, WALLETS, walletFor,
+  ALLOCATIONS, VESTING, TESTNET_WALLET_DEFAULTS, WALLETS, walletFor, TGE_PLAN,
 } = require("../scripts/deploy/00_config");
 const {
   MAX_SUPPLY, buildTgeAllocations, liveRoles, checkAgainstManifest, checkOnChain, runTgeTargetChecks,
@@ -25,16 +25,17 @@ describe("TGE destination controls", function () {
 
   function fullEnv(net, over = {}) {
     const N = net.toUpperCase();
+    const vaultEnv = Object.fromEntries(
+      TGE_PLAN.filter((r) => r.kind === "vault").map((r) => [`${r.vaultEnv}_${N}`, addr()]),
+    );
     return {
-      [`VESTING_FOUNDERS_${N}`]: addr(),
-      [`VESTING_CORE_TEAM_${N}`]: addr(),
-      [`VESTING_SEED_${N}`]: addr(),
-      [`VESTING_PRESALE_${N}`]: addr(),
-      [`VESTING_ECOSYSTEM_${N}`]: addr(),
+      ...vaultEnv,
       [`STAKING_${N}`]: addr(),
       [`TREASURY_${N}`]: addr(),
       [`STABILISATION_FUND_${N}`]: addr(),
       WALLET_LIQUIDITY: addr(),
+      WALLET_PRESALE: addr(),
+      WALLET_MARKET_MAKER: addr(),
       ADMIN_ADDRESS: addr(),
       [`TIMELOCK_${N}`]: addr(),
       [`GOVERNOR_${N}`]: addr(),
@@ -112,11 +113,11 @@ describe("TGE destination controls", function () {
 
   // ── The allocation list ──────────────────────────────────────────────────────
   describe("buildTgeAllocations", function () {
-    it("builds all nine allocations, summing to MAX_SUPPLY", function () {
+    it("builds every row of TGE_PLAN, summing to MAX_SUPPLY", function () {
       const { allocations } = mainnetCase();
       expect(allocations.map((a) => a.label)).to.deep.equal([
-        "Founders", "CoreTeam", "SeedInvestors", "Presale", "EcosystemDAO",
-        "Liquidity", "Staking", "Treasury", "StabilisationFund",
+        "Founders", "CoreTeam", "SeedInvestors", "PresaleLaunch", "Presale", "EcosystemDAO",
+        "LiquidityPool", "MarketMaker", "LiquidityReserve", "Staking", "Treasury", "StabilisationFund",
       ]);
       expect(allocations.reduce((s, a) => s + a.amount, 0n)).to.equal(MAX_SUPPLY);
       expect(allocations.find((a) => a.label === "Staking").amount).to.equal(ALLOCATIONS.staking);
@@ -135,10 +136,12 @@ describe("TGE destination controls", function () {
       expect(() => buildTgeAllocations({ networkName: "ethereum", env })).to.throw(/TREASURY_ETHEREUM is not set/);
     });
 
-    it("has no liquidity fallback on a real network", function () {
-      const env = fullEnv("ethereum");
-      delete env.WALLET_LIQUIDITY;
-      expect(() => buildTgeAllocations({ networkName: "ethereum", env })).to.throw(/WALLET_LIQUIDITY/);
+    it("has no liquidity, presale or market-maker wallet fallback on a real network", function () {
+      for (const v of ["WALLET_LIQUIDITY", "WALLET_PRESALE", "WALLET_MARKET_MAKER"]) {
+        const env = fullEnv("ethereum");
+        delete env[v];
+        expect(() => buildTgeAllocations({ networkName: "ethereum", env })).to.throw(new RegExp(v));
+      }
     });
   });
 
@@ -155,8 +158,8 @@ describe("TGE destination controls", function () {
 
     it("fails on a destination mismatch", function () {
       const c = mainnetCase();
-      c.manifest.tgeAllocations.Liquidity.destination = addr();
-      expect(run(c).join("\n")).to.match(/Liquidity DESTINATION mismatch/);
+      c.manifest.tgeAllocations.LiquidityPool.destination = addr();
+      expect(run(c).join("\n")).to.match(/LiquidityPool DESTINATION mismatch/);
     });
 
     it("fails on an amount mismatch", function () {
@@ -177,16 +180,16 @@ describe("TGE destination controls", function () {
     it("fails when two allocations share a destination", function () {
       const c = mainnetCase();
       const t = c.allocations.find((a) => a.label === "Treasury");
-      t.destination = c.allocations.find((a) => a.label === "Liquidity").destination;
+      t.destination = c.allocations.find((a) => a.label === "LiquidityPool").destination;
       c.manifest.tgeAllocations.Treasury.destination = t.destination;
       expect(run(c).join("\n")).to.match(/share the destination/);
     });
 
     it("fails when the amounts do not sum to MAX_SUPPLY", function () {
       const c = mainnetCase();
-      const l = c.allocations.find((a) => a.label === "Liquidity");
+      const l = c.allocations.find((a) => a.label === "LiquidityPool");
       l.amount -= 1n;
-      c.manifest.tgeAllocations.Liquidity.amountSRX = ethers.formatUnits(l.amount, 18);
+      c.manifest.tgeAllocations.LiquidityPool.amountSRX = ethers.formatUnits(l.amount, 18);
       expect(run(c).join("\n")).to.match(/≠ MAX_SUPPLY/);
     });
 
@@ -243,10 +246,9 @@ describe("TGE destination controls", function () {
       const Mock = await ethers.getContractFactory("MockERC20");
       const Vault = await ethers.getContractFactory("VestingVault");
 
-      const schedules = {
-        Founders: VESTING.founders, CoreTeam: VESTING.coreTeam, SeedInvestors: VESTING.seedInvestors,
-        Presale: VESTING.presale, EcosystemDAO: VESTING.ecosystem,
-      };
+      const schedules = Object.fromEntries(
+        TGE_PLAN.filter((r) => r.kind === "vault").map((r) => [r.label, VESTING[r.schedule]]),
+      );
       const beneficiaries = {};
       const destinations = {};
       for (const [label, s] of Object.entries(schedules)) {
@@ -255,24 +257,21 @@ describe("TGE destination controls", function () {
           s.cliffDuration, s.vestingDuration, s.tgeUnlockBps);
         destinations[label] = await v.getAddress();
       }
-      for (const label of ["Staking", "Treasury", "StabilisationFund"]) {
+      // Contract rows, and the wallet rows as stand-ins for multi-signature wallets
+      // (anything with code): on a real network a launch-float wallet must have code.
+      for (const row of TGE_PLAN.filter((r) => r.kind !== "vault")) {
         const m = await Mock.deploy("x", "x", 18);
-        destinations[label] = await m.getAddress();
+        destinations[row.label] = await m.getAddress();
       }
-      destinations.Liquidity = addr(); // a plain wallet is allowed here
 
       return { token, other, Vault, admin, beneficiaries, destinations };
     }
 
     function build(f, overrides = {}) {
       const d = { ...f.destinations, ...overrides };
-      const allocations = [
-        ["Founders", ALLOCATIONS.founders, true], ["CoreTeam", ALLOCATIONS.coreTeam, true],
-        ["SeedInvestors", ALLOCATIONS.seedInvestors, true], ["Presale", ALLOCATIONS.presale, true],
-        ["EcosystemDAO", ALLOCATIONS.ecosystem, true], ["Liquidity", ALLOCATIONS.liquidity, false],
-        ["Staking", ALLOCATIONS.staking, false], ["Treasury", ALLOCATIONS.treasury, false],
-        ["StabilisationFund", ALLOCATIONS.strategic, false],
-      ].map(([label, amount, isVestingVault]) => ({ label, destination: d[label], amount, isVestingVault }));
+      const allocations = TGE_PLAN.map((r) => ({
+        label: r.label, destination: d[r.label], amount: ALLOCATIONS[r.allocation], isVestingVault: r.kind === "vault",
+      }));
       const tgeAllocations = {};
       for (const a of allocations) {
         tgeAllocations[a.label] = { destination: a.destination, ...(a.isVestingVault ? { beneficiary: f.beneficiaries[a.label] } : {}) };
@@ -280,11 +279,12 @@ describe("TGE destination controls", function () {
       return { allocations, manifest: { tgeAllocations } };
     }
 
-    async function run(f, allocations, manifest, tokenAddress) {
+    async function run(f, allocations, manifest, tokenAddress, networkName = "ethereum") {
       return checkOnChain({
         allocations, manifest, provider: ethers.provider,
         vaultAt: (a) => f.Vault.attach(a),
         tokenAddress: tokenAddress ?? await f.token.getAddress(),
+        networkName,
       });
     }
 
@@ -292,6 +292,27 @@ describe("TGE destination controls", function () {
       const f = await loadFixture(chainFixture);
       const { allocations, manifest } = build(f);
       expect(await run(f, allocations, manifest)).to.deep.equal([]);
+    });
+
+    it("refuses a single-key wallet for launch tokens on a real network — Liquidity was exempt", async function () {
+      const f = await loadFixture(chainFixture);
+      for (const label of ["LiquidityPool", "MarketMaker", "PresaleLaunch"]) {
+        const { allocations, manifest } = build(f, { [label]: addr() });
+        expect((await run(f, allocations, manifest)).join("\n"))
+          .to.match(new RegExp(`${label}: 0x[0-9a-fA-F]{40} is a single-key wallet`));
+      }
+    });
+
+    it("still allows a plain wallet for those rows on a testnet", async function () {
+      const f = await loadFixture(chainFixture);
+      const { allocations, manifest } = build(f, { LiquidityPool: addr(), MarketMaker: addr(), PresaleLaunch: addr() });
+      expect(await run(f, allocations, manifest, undefined, "sepolia")).to.deep.equal([]);
+    });
+
+    it("never lets a contract row be a plain wallet, even on a testnet", async function () {
+      const f = await loadFixture(chainFixture);
+      const { allocations, manifest } = build(f, { Treasury: addr() });
+      expect((await run(f, allocations, manifest, undefined, "sepolia")).join("\n")).to.match(/Treasury: no contract at/);
     });
 
     it("fails when a contract destination has no code", async function () {

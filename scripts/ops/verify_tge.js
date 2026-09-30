@@ -7,6 +7,7 @@
  */
 const { ethers, network } = require("hardhat");
 require("dotenv").config();
+const { ALLOCATIONS, VESTING, TGE_PLAN, walletFor, launchFloat } = require("../deploy/00_config");
 
 function env(key) {
   const val = process.env[key];
@@ -25,14 +26,14 @@ async function main() {
   const staking = await ethers.getContractAt("SRXStaking",        env(`STAKING_${NET}${suffix}`));
   const tge     = await ethers.getContractAt("TGEDistributor",    env(`TGE_DISTRIBUTOR_${NET}${suffix}`));
 
-  const vaultSuffix = suffix; // vaults use same suffix scheme
-  const vaults = {
-    Founders:  env(`VAULT_FOUNDERS_${NET}${vaultSuffix}`),
-    CoreTeam:  env(`VAULT_CORETEAM_${NET}${vaultSuffix}`),
-    Seed:      env(`VAULT_SEEDINVESTORS_${NET}${vaultSuffix}`),
-    Presale:   env(`VAULT_PRESALE_${NET}${vaultSuffix}`),
-    Ecosystem: env(`VAULT_ECOSYSTEM_${NET}${vaultSuffix}`),
-  };
+  // ⛔ The vault addresses were read as VAULT_* names, which only the test stack
+  //    printed; 03_deploy_vesting.js prints VESTING_* names, so on a real deployment
+  //    this script stopped at "Missing env var" before checking anything. Both now
+  //    print, and this reads, the names in TGE_PLAN.
+  const vaults = {};
+  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
+    vaults[row.label] = env(`${row.vaultEnv}_${NET}${suffix}`);
+  }
 
   if (suffix) console.log(`ℹ️  Using TGE test stack addresses (${NET}_TGE)\n`);
   else        console.log(`ℹ️  Using standard ${NET} addresses\n`);
@@ -72,12 +73,18 @@ async function main() {
   // ── Direct allocations ──────────────────────────────────────────────────────
   console.log("\n── Direct allocations ─────────────────────────────────────");
 
-  const checks = [
-    { label: "StabilisationFund", addr: await ssf.getAddress(),                          expected: "1500000000" },
-    { label: "SRXStaking",        addr: env(`STAKING_${NET}${suffix}`),                  expected: "1700000000" },
-    { label: "SRXTreasury",       addr: env(`TREASURY_${NET}${suffix}`),                 expected: "900000000"  },
-    { label: "TGEDistributor",    addr: env(`TGE_DISTRIBUTOR_${NET}${suffix}`),           expected: "0"          },
-  ];
+  // Every row that is not a vault, with its amount from 00_config.js — nothing typed here.
+  const contractAddr = {
+    Staking: env(`STAKING_${NET}${suffix}`),
+    Treasury: env(`TREASURY_${NET}${suffix}`),
+    StabilisationFund: await ssf.getAddress(),
+  };
+  const checks = TGE_PLAN.filter((r) => r.kind !== "vault").map((row) => ({
+    label: row.label,
+    addr: row.kind === "wallet" ? walletFor(row.wallet, network.name) : contractAddr[row.label],
+    expected: ethers.formatUnits(ALLOCATIONS[row.allocation], 18).replace(/\.0$/, ""),
+  }));
+  checks.push({ label: "TGEDistributor", addr: env(`TGE_DISTRIBUTOR_${NET}${suffix}`), expected: "0" });
 
   for (const { label, addr, expected } of checks) {
     const bal = await token.balanceOf(addr);
@@ -91,19 +98,14 @@ async function main() {
   // ── Vesting vaults ──────────────────────────────────────────────────────────
   console.log("\n── Vesting vaults ─────────────────────────────────────────");
 
-  const expectedVaultAmounts = {
-    Founders:  "1000000000",
-    CoreTeam:  "600000000",
-    Seed:      "400000000",
-    Presale:   "1400000000",
-    Ecosystem: "1300000000",
-  };
-
-  for (const [label, addr] of Object.entries(vaults)) {
+  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
+    const label     = row.label;
+    const addr      = vaults[label];
+    const sched     = VESTING[row.schedule];
     const vault     = await ethers.getContractAt("VestingVault", addr);
     const bal       = await token.balanceOf(addr);
     const triggered = await vault.tgeTriggered();
-    const expected  = ethers.parseUnits(expectedVaultAmounts[label], 18);
+    const expected  = ALLOCATIONS[row.allocation];
     const balOk     = bal === expected;
     const tsStr     = triggered
       ? new Date(Number(await vault.tgeTimestamp()) * 1000).toISOString().slice(0, 19) + "Z"
@@ -111,24 +113,29 @@ async function main() {
 
     check(balOk,     `${label} vault balance mismatch`);
     check(triggered, `${label} vault not triggered`);
-    console.log(`  ${label.padEnd(12)}: ${ethers.formatUnits(bal, 18).padStart(16)} SRX  ${balOk ? "✅" : "❌"}  triggered=${triggered ? "✅" : "❌"}  ${tsStr}`);
+    console.log(`  ${label.padEnd(18)}: ${ethers.formatUnits(bal, 18).padStart(16)} SRX  ${balOk ? "✅" : "❌"}  triggered=${triggered ? "✅" : "❌"}  ${tsStr}`);
 
-    // Presale vault: check 25% immediately releasable (tgeUnlockBps = 2500)
-    if (label === "Presale" && triggered) {
+    // What may be released now: the TGE unlock, and nothing more until the cliff ends.
+    if (triggered) {
       const releasableNow = await vault.releasable();
-      const expect25      = ethers.parseUnits(expectedVaultAmounts[label], 18) * 25n / 100n;
-      const pctOk         = check(releasableNow >= expect25, "Presale vault 25% TGE unlock not releasable");
-      console.log(`             releasable()=${ethers.formatUnits(releasableNow, 18)} SRX  (25% unlock: ${pctOk ? "✅" : "❌"})`);
+      const tgeTs   = await vault.tgeTimestamp();
+      const now     = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+      const atTge   = (expected * sched.tgeUnlockBps) / 10_000n;
+      if (now < tgeTs + sched.cliffDuration) {
+        const ok = check(releasableNow === atTge, `${label} vault releasable ${ethers.formatUnits(releasableNow, 18)} before its cliff (expect ${ethers.formatUnits(atTge, 18)})`);
+        const cliffEnd = new Date(Number(tgeTs + sched.cliffDuration) * 1000).toISOString().slice(0, 19) + "Z";
+        console.log(`             releasable()=${ethers.formatUnits(releasableNow, 18)} SRX  (before cliff: ${ok ? "✅" : "❌"})  cliff ends ${cliffEnd}`);
+      }
     }
-    // Cliff vaults: should be 0 releasable before cliff passes
-    if ((label === "Seed" || label === "Founders" || label === "CoreTeam") && triggered) {
-      const releasableNow = await vault.releasable();
-      const cliffOk       = check(releasableNow === 0n, `${label} vault releasable before cliff`);
-      const cliff         = await vault.cliffDuration();
-      const tgeTs         = await vault.tgeTimestamp();
-      const cliffEnd      = new Date((Number(tgeTs) + Number(cliff)) * 1000).toISOString().slice(0,19) + "Z";
-      console.log(`             releasable()=${ethers.formatUnits(releasableNow, 18)} SRX  (pre-cliff zero: ${cliffOk ? "✅" : "❌"})  cliff ends ${cliffEnd}`);
-    }
+  }
+
+  // ── The launch-day float ─────────────────────────────────────────────────────
+  // Right after TGE, the liquid rows hold exactly the published float (5%).
+  {
+    let liquid = 0n;
+    for (const row of TGE_PLAN.filter((r) => r.liquid)) liquid += await token.balanceOf(walletFor(row.wallet, network.name));
+    const ok = check(liquid === launchFloat(), `launch float ${ethers.formatUnits(liquid, 18)} SRX != ${ethers.formatUnits(launchFloat(), 18)}`);
+    console.log(`\n  Launch float (liquid rows): ${ethers.formatUnits(liquid, 18)} SRX  ${ok ? "✅" : "❌"} (expect ${ethers.formatUnits(launchFloat(), 18)})`);
   }
 
   // ── Launch protection vs the vesting schedules ───────────────────────────────
@@ -173,14 +180,14 @@ async function main() {
   // ── Staking pool ─────────────────────────────────────────────────────────────
   console.log("\n── Staking pool ───────────────────────────────────────────");
   const rewardPool = await staking.rewardPool();
-  const poolOk     = check(rewardPool === ethers.parseUnits("1700000000", 18), "staking rewardPool != 1,700,000,000 SRX");
-  console.log(`  rewardPool: ${ethers.formatUnits(rewardPool, 18)} SRX  ${poolOk ? "✅" : "❌"} (expect 1,700,000,000)`);
+  const poolOk     = check(rewardPool === ALLOCATIONS.staking, `staking rewardPool != ${ethers.formatUnits(ALLOCATIONS.staking, 18)} SRX`);
+  console.log(`  rewardPool: ${ethers.formatUnits(rewardPool, 18)} SRX  ${poolOk ? "✅" : "❌"} (expect ${ethers.formatUnits(ALLOCATIONS.staking, 18)})`);
 
   // ── SSF quick check ───────────────────────────────────────────────────────────
   console.log("\n── StabilisationFund ──────────────────────────────────────");
   const ssfBal   = await ssf.srxBalance();
-  const ssfOk    = check(ssfBal === ethers.parseUnits("1500000000", 18), "StabilisationFund srxBalance != 1,500,000,000 SRX");
-  console.log(`  srxBalance(): ${ethers.formatUnits(ssfBal, 18)} SRX  ${ssfOk ? "✅" : "❌"} (expect 1,500,000,000)`);
+  const ssfOk    = check(ssfBal === ALLOCATIONS.strategic, `StabilisationFund srxBalance != ${ethers.formatUnits(ALLOCATIONS.strategic, 18)} SRX`);
+  console.log(`  srxBalance(): ${ethers.formatUnits(ssfBal, 18)} SRX  ${ssfOk ? "✅" : "❌"} (expect ${ethers.formatUnits(ALLOCATIONS.strategic, 18)})`);
   console.log(`  stressActive: ${await ssf.stressActive()} (expect false)`);
 
   console.log(`\n${"=".repeat(60)}`);

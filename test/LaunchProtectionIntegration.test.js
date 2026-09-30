@@ -1,6 +1,7 @@
 const { expect }     = require("chai");
 const { ethers }     = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { approveBuyers } = require("./helpers/buyers");
 
 /**
  * Launch Protection × cross-contract integration tests.
@@ -251,6 +252,7 @@ describe("Launch Protection × Cross-Contract Integration", function () {
 
       // Off-chain investor: $50K → Entry +10% → 4.4M SRX allocation
       const USD_AMOUNT = 50_000_00000000n;
+      await approveBuyers(presale, admin, [user1]);
       await presale.connect(admin).addInvestor(user1.address, USD_AMOUNT);
 
       // Enable launch protection
@@ -377,6 +379,7 @@ describe("Launch Protection × Cross-Contract Integration", function () {
       await airdrop.connect(admin).setMerkleRoot(tree.root, deadline);
 
       // Off-chain presale investor
+      await approveBuyers(presale, admin, [user2]);
       await presale.connect(admin).addInvestor(user2.address, 50_000_00000000n);
 
       // ── Enable launch protection ──────────────────────────────────────────

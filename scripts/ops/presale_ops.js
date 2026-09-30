@@ -11,6 +11,7 @@
  *
  *   "status"            — Print full contract state (balances, investors, live prices)
  *   "fund"              — Mint SRX into the PreSaleRound via genesis() [TESTNET ONLY]
+ *   "approve_buyer"     — Approve a wallet to buy, up to an agreed USD cap (after KYC + signed agreement)
  *   "add_investor"      — Record an off-chain investor (SAFT / wire / SOL / XRP / BNB)
  *   "update_allocation" — Admin correction: override an investor's SRX amount (pre-vault only)
  *   "deploy_vaults"     — Deploy VestingVaults for all investors without one
@@ -46,6 +47,15 @@ const ACTION = "status";
 const INVESTOR_ADDRESS  = "0x049fea6abBbc88487Ca14A7910d37E1feCdb9236"; // deployer as test investor
 const INVESTOR_USD_8DEC = 5_000_000_000_000n; // $50,000 → Entry tier → +10% → ~4,400,000 SRX
 
+// ── For "approve_buyer" ───────────────────────────────────────────────────────
+// Every buyer must be approved before they can buy or be recorded (setBuyerApprovals).
+// The cap is cumulative USD in 8-decimal format; the reference is the agreement's
+// on-chain commitment (a salted hash, no personal data). A cap of 0 revokes.
+// On mainnet the admin is the Safe: queue this as a Safe transaction instead.
+const APPROVE_ADDRESS   = INVESTOR_ADDRESS;
+const APPROVE_CAP_8DEC  = INVESTOR_USD_8DEC;
+const APPROVE_AGREEMENT = ethers.keccak256(ethers.toUtf8Bytes("TEST AGREEMENT — replace with the commitment"));
+
 // ── For "update_allocation" ──────────────────────────────────────────────────
 // Admin correction path — use when an investor's SRX allocation needs to be fixed
 // (e.g. off-chain payment amount was entered incorrectly, or price was wrong).
@@ -64,7 +74,7 @@ const UPDATE_NEW_SRX_AMOUNT   = ethers.parseUnits("3000", 18); // 3,000 SRX (cor
 // Format: USD price × 10^8. Examples:
 //   $0.0125 = 1_250_000
 //   $0.0200 = 2_000_000
-//   $0.0100 =   100_000  (wait: 0.01 × 1e8 = 1_000_000)
+//   $0.0100 = 1_000_000
 const NEW_SRX_PRICE_8DEC = 1_250_000n; // $0.0125 — change this if the price changes
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,10 +227,23 @@ async function main() {
     console.log(`✅ Done. Balance: ${ethers.formatUnits(bal, 18)} SRX`);
   }
 
+  // ── APPROVE BUYER ────────────────────────────────────────────────────────────
+  else if (ACTION === "approve_buyer") {
+    const tx = await presale.setBuyerApprovals([APPROVE_ADDRESS], [APPROVE_CAP_8DEC], [APPROVE_AGREEMENT]);
+    await tx.wait();
+    const a = await presale.buyerApprovals(APPROVE_ADDRESS);
+    console.log(`✅ ${APPROVE_ADDRESS} approved up to $${(Number(a.capUsd8Dec) / 1e8).toLocaleString("en-US")}`);
+  }
+
   // ── ADD INVESTOR ─────────────────────────────────────────────────────────────
   else if (ACTION === "add_investor") {
     if (!INVESTOR_ADDRESS || INVESTOR_ADDRESS === "0x_investor_wallet_address") {
       throw new Error("Set INVESTOR_ADDRESS at the top of this script before running.");
+    }
+    const approval = await presale.buyerApprovals(INVESTOR_ADDRESS);
+    const already  = (await presale.investors(INVESTOR_ADDRESS)).cumulativeUsd8Dec;
+    if (already + INVESTOR_USD_8DEC > approval.capUsd8Dec) {
+      throw new Error(`Not approved for this amount (cap $${Number(approval.capUsd8Dec) / 1e8}). Run ACTION = "approve_buyer" first.`);
     }
 
     const usdHuman = (Number(INVESTOR_USD_8DEC) / 1e8).toLocaleString("en-US", { style: "currency", currency: "USD" });
