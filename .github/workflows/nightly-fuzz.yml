@@ -12,6 +12,10 @@ on:
 env:
   FOUNDRY_PROFILE: ci
 
+# Least privilege (board 79e7b84b, 11 Oct 2026): this workflow only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   invariant-campaign:
     name: Foundry invariant — heavy profile

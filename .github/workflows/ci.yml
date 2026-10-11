@@ -17,6 +17,10 @@ concurrency:
 env:
   FOUNDRY_PROFILE: default
 
+# Least privilege (board 79e7b84b, 11 Oct 2026): this workflow only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   # ── Hardhat unit tests ──────────────────────────────────────────────────────
   hardhat:
