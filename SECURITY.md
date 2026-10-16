@@ -10,7 +10,6 @@ please report it responsibly. **Do not open a public GitHub issue.**
 - **Email:** security@syrax.global
 - **PGP key:** [FILL — publish PGP key + fingerprint at TGE]
 - **Encrypted alternative:** [Signal or Keybase handle — FILL]
-- **Response time:** Within 24 hours, 7 days a week.
 
 ### What to Include
 
@@ -25,9 +24,9 @@ please report it responsibly. **Do not open a public GitHub issue.**
 
 | | |
 |---|---|
-| Acknowledgement | Within 24 hours |
-| Initial triage | Within 72 hours |
-| Status updates | Every 7 days until resolution |
+| Acknowledgement | Within 24 hours of receipt, with a reference number |
+| Initial triage (scope, plausibility, initial severity) | Within 72 hours of receipt |
+| Status updates | At least every 7 days until the report is resolved |
 | Public disclosure | Coordinated with reporter after fix is deployed |
 | Hall of fame | Public acknowledgement (with reporter's consent) |
 | Bug bounty | See below |
