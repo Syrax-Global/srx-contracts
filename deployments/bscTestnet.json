@@ -1,0 +1,16 @@
+{
+  "network": "bscTestnet",
+  "chainId": 97,
+  "deployedAt": "2026-10-07",
+  "deployer": "0x049fea6abBbc88487Ca14A7910d37E1feCdb9236",
+  "commit": "0deaa30",
+  "hub": {
+    "network": "sepolia",
+    "eid": 40161,
+    "address": "0x479FE29ee015b9D3b9b83A7e5c1447E94917B1D6"
+  },
+  "contracts": {
+    "SRXOFTNative": "0x60489FA7557C856Ca9Ba8c119B38d97c1eDd10b2",
+    "SRXTimelock": "0xCb5096938e65d0D8364429e8658069AE98c4E5f1"
+  }
+}

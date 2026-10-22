@@ -1,5 +1,6 @@
 const { expect }  = require("chai");
 const { ethers, upgrades } = require("hardhat");
+const { allocationSource } = require("./helpers/allocationSource");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 /**
@@ -13,11 +14,11 @@ const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-
  *  - Three-tier deployment authority and cap enforcement
  *  - Fast-path restrictions (SRX only, stress required)
  *  - GOVERNANCE_ROLE unrestricted deployment (any token, any time)
- *  - recoverLiquidity
+ *  - (recoverLiquidity removed: R7-16, REG-50; see REG50.FixedRewardPools.test.js)
  *  - Governance parameter changes
  *  - Pause / unpause
  *  - Reentrancy guard
- *  - UUPS upgrade authorization
+ *  - (upgrade authorisation removed: the fund is not upgradeable, REG-53)
  */
 describe("StabilisationFund", function () {
 
@@ -53,17 +54,15 @@ describe("StabilisationFund", function () {
 
     // ── Deploy StabilisationFund (UUPS) ─────────────────────────────────────
     const SSF = await ethers.getContractFactory("StabilisationFund");
-    const ssf = await upgrades.deployProxy(
-      SSF,
-      [
+    const ssf = await SSF.deploy(...[
         srxAddr,
         admin.address,
         3_000,           // maxDeployerBps  = 30%
         7_000,           // maxGuardianBps  = 70%
         30 * 24 * 3600,  // withdrawLock    = 30 days
-      ],
-      { kind: "uups", initializer: "initialize" }
-    );
+        ethers.parseUnits("10000000", 18), // rewardAllocation: 10M of the 1.5B seed backs depositor rewards (REG-50)
+        await allocationSource(srxAddr, ethers.parseUnits("1500000000", 18)), // the launch distribution delivered the whole seed
+      ]);
     await ssf.waitForDeployment();
     const ssfAddr = await ssf.getAddress();
 
@@ -86,7 +85,10 @@ describe("StabilisationFund", function () {
 
     // ── Seed SSF with SRX (simulates TGE distribution) ──────────────────────
     const SEED = ethers.parseUnits("1500000000", 18); // 1.5B SRX
-    await srx.connect(admin).transfer(ssfAddr, SEED);
+    const REWARD_BACKING = ethers.parseUnits("10000000", 18); // rewardAllocation in this fixture
+    // REG-50: 10M of the delivered launch SRX backs depositor rewards and is reserved, so
+    // the fund receives SEED + 10M and the free (deployable) SRX is exactly SEED.
+    await srx.connect(admin).transfer(ssfAddr, SEED + REWARD_BACKING);
 
     // Give contributors some SRX for contribution tests
     const CONTRIB_AMOUNT = ethers.parseUnits("1000000", 18); // 1M each
@@ -101,9 +103,17 @@ describe("StabilisationFund", function () {
       ssf, srx, ssfAddr, srxAddr,
       admin, timelock, guardian, deployer, oracle, pauser,
       contributor1, contributor2, stranger, recipient,
-      SEED, CONTRIB_AMOUNT,
+      SEED, REWARD_BACKING, CONTRIB_AMOUNT,
       GOV_ROLE, GUARDIAN_ROLE, DEPLOYER_ROLE, ORACLE_ROLE, PAUSER_ROLE,
     };
+  }
+
+  // A successor fund: deployed with THIS fund as its allocation source (docs/MIGRATION.md).
+  async function successorOf(ssf, srxAddr, admin) {
+    const SSF = await ethers.getContractFactory("StabilisationFund");
+    return SSF.deploy(
+      srxAddr, admin.address, 3_000, 7_000, 30 * 24 * 3600,
+      ethers.parseUnits("10000000", 18), await ssf.getAddress());
   }
 
   // ── Deployment ────────────────────────────────────────────────────────────
@@ -115,8 +125,8 @@ describe("StabilisationFund", function () {
     });
 
     it("holds the 1.5B SRX TGE seed", async function () {
-      const { ssf, SEED } = await loadFixture(deployFixture);
-      expect(await ssf.srxBalance()).to.equal(SEED);
+      const { ssf, SEED, REWARD_BACKING } = await loadFixture(deployFixture);
+      expect(await ssf.srxBalance()).to.equal(SEED + REWARD_BACKING);
     });
 
     it("initialises maxDeployerBps = 3000", async function () {
@@ -172,7 +182,7 @@ describe("StabilisationFund", function () {
       await srx2.waitForDeployment();
 
       await expect(
-        upgrades.deployProxy(SSF2, [await srx2.getAddress(), admin.address, 8_000, 7_000, 86400], { kind: "uups" })
+        SSF2.deploy(...[await srx2.getAddress(), admin.address, 8_000, 7_000, 86400, 0, await allocationSource(srx2)])
       ).to.be.revertedWithCustomError(SSF2, "InvalidBps");
     });
   });
@@ -409,13 +419,14 @@ describe("StabilisationFund", function () {
         .to.be.revertedWithCustomError(ssf, "NothingToClaim");
     });
 
-    it("notifyRewardAmount() reverts if amount exceeds available balance", async function () {
-      const { ssf, timelock, SEED, CONTRIB_AMOUNT, contributor1 } = await loadFixture(deployFixture);
-      // Contribute some SRX first (now part of encumbered balance)
+    it("the reward backing stays registrable however much free SRX is deployed (REG-50)", async function () {
+      // The PoolAmountExceedsAvailable check is kept as defence in depth, but it can no
+      // longer be reached this way: the launch SRX backing unregistered rewards is
+      // reserved and cannot be deployed, so it is always there to register.
+      const { ssf, srx, timelock, recipient, SEED, REWARD_BACKING, CONTRIB_AMOUNT, contributor1 } = await loadFixture(deployFixture);
       await ssf.connect(contributor1).contribute(CONTRIB_AMOUNT);
-      // Try to register more than the unencumbered seed
-      await expect(ssf.connect(timelock).notifyRewardAmount(SEED + 1n))
-        .to.be.revertedWithCustomError(ssf, "PoolAmountExceedsAvailable");
+      await ssf.connect(timelock).deployLiquidity(recipient.address, await srx.getAddress(), SEED, "all free SRX");
+      await expect(ssf.connect(timelock).notifyRewardAmount(REWARD_BACKING)).to.emit(ssf, "RewardPoolFunded");
     });
 
     it("notifyRewardAmount() reverts if caller lacks GOVERNANCE_ROLE", async function () {
@@ -423,10 +434,11 @@ describe("StabilisationFund", function () {
       await expect(ssf.connect(stranger).notifyRewardAmount(1000n)).to.be.reverted;
     });
 
-    it("rescueStrandedPool() transfers stranded rewardPool to recipient when no contributors (A5-M-02)", async function () {
+    it("a reward pool left with no contributors is not stranded: it leaves only by release to a successor after wind-down (internal audit L1)", async function () {
       // Scenario: contributor joins, reward pool registered, contributor fully exits.
-      // Remaining rewardPool tokens are stranded — accumulator frozen at zero.
-      const { ssf, srx, timelock, contributor1, CONTRIB_AMOUNT } = await loadFixture(deployFixture);
+      // The old rescueStrandedPool(recipient) sent this pool to any wallet (A5-M-02); it is
+      // removed. The pool stays until contributors return or the fund winds down.
+      const { ssf, srx, srxAddr, admin, timelock, contributor1, CONTRIB_AMOUNT } = await loadFixture(deployFixture);
       const rewardAmount = ethers.parseUnits("100000", 18);
 
       // Fund reward pool while contributor is active
@@ -438,35 +450,41 @@ describe("StabilisationFund", function () {
       await time.increase(Number(lockDuration) + 1);
       await ssf.connect(contributor1).withdrawContribution(CONTRIB_AMOUNT);
 
-      // Now totalContributions == 0 and rewardPool > 0 — pool is stranded
+      // Now totalContributions == 0 and rewardPool > 0
       expect(await ssf.totalContributions()).to.equal(0n);
-      expect(await ssf.rewardPool()).to.be.gt(0n);
+      const pool = await ssf.rewardPool();
+      expect(pool).to.be.gt(0n);
+
+      // No rescue exists; nothing is releasable before wind-down
+      expect(ssf.interface.fragments.filter(f => f.name === "rescueStrandedPool")).to.have.length(0);
+      expect(await ssf.releasableRewardAllocation()).to.equal(0n);
+
+      await ssf.connect(timelock).startWindDown();
+      const v2 = await successorOf(ssf, srxAddr, admin);
+      const releasable = await ssf.releasableRewardAllocation();
+      expect(releasable).to.be.gte(pool); // the unaccrued pool is releasable (nobody is owed it)
 
       const balBefore = await srx.balanceOf(timelock.address);
-      await ssf.connect(timelock).rescueStrandedPool(timelock.address);
-      const balAfter = await srx.balanceOf(timelock.address);
-
-      expect(balAfter).to.be.gt(balBefore);
-      expect(await ssf.rewardPool()).to.equal(0n);
-      expect(await ssf.rewardRate()).to.equal(0n);
+      await ssf.connect(timelock).releaseRewardAllocation(await v2.getAddress(), pool);
+      expect(await srx.balanceOf(await v2.getAddress())).to.equal(pool);
+      expect(await srx.balanceOf(timelock.address)).to.equal(balBefore); // none to a wallet
+      expect(await ssf.allocatedTo(await v2.getAddress())).to.equal(pool); // recorded for the successor to register
     });
 
-    it("rescueStrandedPool() reverts if contributors still exist", async function () {
-      const { ssf, timelock, contributor1, CONTRIB_AMOUNT } = await loadFixture(deployFixture);
-      const rewardAmount = ethers.parseUnits("100000", 18);
+    it("no function can send the reward pool to a wallet: rescueStrandedPool is absent and release to a wallet reverts NotASuccessor", async function () {
+      const { ssf, timelock, stranger, contributor1, CONTRIB_AMOUNT } = await loadFixture(deployFixture);
       await ssf.connect(contributor1).contribute(CONTRIB_AMOUNT);
-      await ssf.connect(timelock).notifyRewardAmount(rewardAmount);
+      await ssf.connect(timelock).notifyRewardAmount(ethers.parseUnits("100000", 18));
 
-      // Contributors still exist — rescue must revert
-      await expect(ssf.connect(timelock).rescueStrandedPool(timelock.address))
-        .to.be.revertedWithCustomError(ssf, "NoStrandedPool");
-    });
+      expect(ssf.interface.fragments.filter(f => f.name === "rescueStrandedPool")).to.have.length(0);
+      expect(ssf.interface.fragments.filter(f => ["RewardPoolReset", "NoStrandedPool"].includes(f.name))).to.have.length(0);
+      expect(ssf.rescueStrandedPool).to.equal(undefined);
 
-    it("rescueStrandedPool() reverts if pool is already zero", async function () {
-      const { ssf, timelock } = await loadFixture(deployFixture);
-      // No reward pool registered, totalContributions is 0 too
-      await expect(ssf.connect(timelock).rescueStrandedPool(timelock.address))
-        .to.be.revertedWithCustomError(ssf, "NoStrandedPool");
+      await ssf.connect(timelock).startWindDown();
+      for (const wallet of [timelock.address, stranger.address, contributor1.address]) {
+        await expect(ssf.connect(timelock).releaseRewardAllocation(wallet, 1n))
+          .to.be.revertedWithCustomError(ssf, "NotASuccessor").withArgs(wallet);
+      }
     });
   });
 
@@ -872,54 +890,11 @@ describe("StabilisationFund", function () {
     });
   });
 
-  // ── recoverLiquidity() ────────────────────────────────────────────────────
-
-  describe("recoverLiquidity()", function () {
-    it("governance can recover SRX from an external source", async function () {
-      const { ssf, srx, timelock, recipient, ssfAddr, SEED } = await loadFixture(deployFixture);
-
-      // Deploy some SRX out first, then recover it
-      const deployed = SEED / 4n;
-      await ssf.connect(timelock).deployLiquidity(
-        recipient.address, await srx.getAddress(), deployed, "deploy"
-      );
-
-      // recipient approves SSF to pull back
-      await srx.connect(recipient).approve(ssfAddr, deployed);
-
-      const before = await ssf.srxBalance();
-      await ssf.connect(timelock).recoverLiquidity(
-        recipient.address, await srx.getAddress(), deployed
-      );
-
-      expect(await ssf.srxBalance()).to.equal(before + deployed);
-      expect(await ssf.totalRecovered()).to.equal(deployed);
-    });
-
-    it("emits LiquidityRecovered", async function () {
-      const { ssf, srx, timelock, recipient, ssfAddr, SEED } = await loadFixture(deployFixture);
-      const amount = SEED / 10n;
-      await ssf.connect(timelock).deployLiquidity(
-        recipient.address, await srx.getAddress(), amount, "out"
-      );
-      await srx.connect(recipient).approve(ssfAddr, amount);
-
-      await expect(
-        ssf.connect(timelock).recoverLiquidity(
-          recipient.address, await srx.getAddress(), amount
-        )
-      ).to.emit(ssf, "LiquidityRecovered");
-    });
-
-    it("stranger cannot recover liquidity", async function () {
-      const { ssf, srx, stranger, recipient } = await loadFixture(deployFixture);
-      await expect(
-        ssf.connect(stranger).recoverLiquidity(
-          recipient.address, await srx.getAddress(), 1n
-        )
-      ).to.be.reverted;
-    });
-  });
+  // ── Returning deployed liquidity (R7-16, REG-50) ──────────────────────────
+  //
+  // recoverLiquidity() was removed: it let governance pull any token from ANY address
+  // that had approved the fund, a contributor's wallet included. Its absence, and
+  // the push-only return that replaced it, are proved in test/REG50.FixedRewardPools.test.js.
 
   // ── Governance parameters ─────────────────────────────────────────────────
 
@@ -985,14 +960,14 @@ describe("StabilisationFund", function () {
 
   describe("View helpers", function () {
     it("srxBalance() reflects current SRX balance", async function () {
-      const { ssf, SEED } = await loadFixture(deployFixture);
-      expect(await ssf.srxBalance()).to.equal(SEED);
+      const { ssf, SEED, REWARD_BACKING } = await loadFixture(deployFixture);
+      expect(await ssf.srxBalance()).to.equal(SEED + REWARD_BACKING);
     });
 
-    it("ethBalance() reflects received ETH", async function () {
+    it("refuses plain ETH, so none can be locked in a non-upgradeable fund (REG-53)", async function () {
       const { ssf, ssfAddr, admin } = await loadFixture(deployFixture);
-      await admin.sendTransaction({ to: ssfAddr, value: ethers.parseEther("1") });
-      expect(await ssf.ethBalance()).to.equal(ethers.parseEther("1"));
+      await expect(admin.sendTransaction({ to: ssfAddr, value: ethers.parseEther("1") })).to.be.reverted;
+      expect(await ssf.ethBalance()).to.equal(0n);
     });
 
     it("getDeployerCapRemaining() returns 0 when stress not active", async function () {
@@ -1006,16 +981,7 @@ describe("StabilisationFund", function () {
     });
   });
 
-  // ── ETH acceptance ────────────────────────────────────────────────────────
-
-  describe("ETH receive", function () {
-    it("accepts ETH and emits ETHReceived", async function () {
-      const { ssf, ssfAddr, admin } = await loadFixture(deployFixture);
-      await expect(
-        admin.sendTransaction({ to: ssfAddr, value: ethers.parseEther("2") })
-      ).to.emit(ssf, "ETHReceived").withArgs(admin.address, ethers.parseEther("2"));
-    });
-  });
+  // ETH acceptance was removed (REG-53): see "refuses plain ETH" under View helpers.
 
   // ── Pause / unpause ───────────────────────────────────────────────────────
 
@@ -1052,45 +1018,9 @@ describe("StabilisationFund", function () {
     });
   });
 
-  // ── UUPS upgrade authorization ────────────────────────────────────────────
-
-  describe("UUPS upgrade", function () {
-    it("UPGRADER_ROLE can authorise upgrade (admin holds it at init)", async function () {
-      const { ssf, admin } = await loadFixture(deployFixture);
-      const SSF2 = await ethers.getContractFactory("StabilisationFund", admin);
-
-      // admin receives UPGRADER_ROLE at init for deployment bootstrap
-      await expect(upgrades.upgradeProxy(await ssf.getAddress(), SSF2))
-        .to.not.be.reverted;
-    });
-
-    it("GOVERNANCE_ROLE alone cannot authorise upgrade (SC-TRUST-001 separation)", async function () {
-      const { ssf, timelock } = await loadFixture(deployFixture);
-      // timelock holds GOVERNANCE_ROLE but NOT UPGRADER_ROLE — upgrade must revert.
-      // This proves upgrade authority is no longer conflated with routine governance.
-      const SSF2 = await ethers.getContractFactory("StabilisationFund", timelock);
-      await expect(upgrades.upgradeProxy(await ssf.getAddress(), SSF2))
-        .to.be.reverted;
-    });
-
-    it("UPGRADER_ROLE migrated to Timelock can authorise upgrade", async function () {
-      const { ssf, admin, timelock } = await loadFixture(deployFixture);
-      // Simulate the pre-mainnet migration: grant UPGRADER_ROLE to the Timelock.
-      const UPGRADER_ROLE = await ssf.UPGRADER_ROLE();
-      await ssf.connect(admin).grantRole(UPGRADER_ROLE, timelock.address);
-
-      const SSF2 = await ethers.getContractFactory("StabilisationFund", timelock);
-      await expect(upgrades.upgradeProxy(await ssf.getAddress(), SSF2))
-        .to.not.be.reverted;
-    });
-
-    it("stranger cannot authorise upgrade", async function () {
-      const { ssf, stranger } = await loadFixture(deployFixture);
-      const SSF2 = await ethers.getContractFactory("StabilisationFund", stranger);
-      await expect(upgrades.upgradeProxy(await ssf.getAddress(), SSF2))
-        .to.be.reverted;
-    });
-  });
+  // REG-53 (12 Oct 2026): this contract is no longer upgradeable, so the upgrade-authority
+  // tests that stood here were removed. That no upgrade is possible, by any role, is proved
+  // in test/REG53.NotUpgradeable.test.js.
 
   // ── Round 6 findings ──────────────────────────────────────────────────────
 
@@ -1157,38 +1087,34 @@ describe("StabilisationFund", function () {
 
   // ── Round 7 findings ──────────────────────────────────────────────────────
 
-  describe("rescueStrandedPool() emits RewardPoolReset (R7-2)", function () {
-    it("emits RewardPoolReset with correct recipient and amount instead of misleading RewardPoolFunded(0,0)", async function () {
-      const { ssf, srx, timelock, contributor1, CONTRIB_AMOUNT } = await loadFixture(deployFixture);
-      const rewardAmount = ethers.parseUnits("100000", 18);
-
+  describe("releaseRewardAllocation() event semantics (R7-2; rescueStrandedPool and RewardPoolReset removed, internal audit L1)", function () {
+    async function emptiedPool() {
+      const ctx = await loadFixture(deployFixture);
+      const { ssf, srxAddr, admin, timelock, contributor1, CONTRIB_AMOUNT } = ctx;
       await ssf.connect(contributor1).contribute(CONTRIB_AMOUNT);
-      await ssf.connect(timelock).notifyRewardAmount(rewardAmount);
-
-      const lockDuration = await ssf.withdrawLockDuration();
-      await time.increase(Number(lockDuration) + 1);
+      await ssf.connect(timelock).notifyRewardAmount(ethers.parseUnits("100000", 18));
+      await time.increase(Number(await ssf.withdrawLockDuration()) + 1);
       await ssf.connect(contributor1).withdrawContribution(CONTRIB_AMOUNT);
+      await ssf.connect(timelock).startWindDown();
+      const v2 = await successorOf(ssf, srxAddr, admin);
+      return { ...ctx, v2 };
+    }
 
+    it("emits RewardAllocationReleased with the successor and amount, and the old RewardPoolReset event no longer exists", async function () {
+      const { ssf, timelock, v2 } = await emptiedPool();
       const poolBefore = await ssf.rewardPool();
+      expect(ssf.interface.fragments.filter(f => f.name === "RewardPoolReset")).to.have.length(0);
 
-      await expect(ssf.connect(timelock).rescueStrandedPool(timelock.address))
-        .to.emit(ssf, "RewardPoolReset")
-        .withArgs(timelock.address, poolBefore);
+      await expect(ssf.connect(timelock).releaseRewardAllocation(await v2.getAddress(), poolBefore))
+        .to.emit(ssf, "RewardAllocationReleased")
+        .withArgs(await v2.getAddress(), poolBefore);
     });
 
-    it("does NOT emit RewardPoolFunded(0,0) during rescue (event semantics corrected)", async function () {
-      const { ssf, timelock, contributor1, CONTRIB_AMOUNT } = await loadFixture(deployFixture);
-      const rewardAmount = ethers.parseUnits("100000", 18);
+    it("does NOT emit RewardPoolFunded(0,0) during a release (event semantics preserved)", async function () {
+      const { ssf, timelock, v2 } = await emptiedPool();
 
-      await ssf.connect(contributor1).contribute(CONTRIB_AMOUNT);
-      await ssf.connect(timelock).notifyRewardAmount(rewardAmount);
-
-      const lockDuration = await ssf.withdrawLockDuration();
-      await time.increase(Number(lockDuration) + 1);
-      await ssf.connect(contributor1).withdrawContribution(CONTRIB_AMOUNT);
-
-      // RewardPoolFunded should NOT be emitted — only RewardPoolReset
-      const tx   = await ssf.connect(timelock).rescueStrandedPool(timelock.address);
+      // RewardPoolFunded should NOT be emitted
+      const tx   = await ssf.connect(timelock).releaseRewardAllocation(await v2.getAddress(), await ssf.rewardPool());
       const rcpt = await tx.wait();
       const fundedLogs = rcpt.logs.filter(l => {
         try { return ssf.interface.parseLog(l)?.name === "RewardPoolFunded"; } catch { return false; }

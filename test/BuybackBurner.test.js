@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("BuybackBurner", function () {
 
@@ -53,11 +53,6 @@ describe("BuybackBurner", function () {
     it("sets srxToken correctly", async function () {
       const { burner, token } = await loadFixture(deployFixture);
       expect(await burner.srxToken()).to.equal(await token.getAddress());
-    });
-
-    it("sets default maxSlippageBps to 200", async function () {
-      const { burner } = await loadFixture(deployFixture);
-      expect(await burner.maxSlippageBps()).to.equal(200n);
     });
 
     it("totalBurned starts at 0", async function () {
@@ -152,27 +147,18 @@ describe("BuybackBurner", function () {
     });
   });
 
-  // ── setMaxSlippageBps ───────────────────────────────────────────────────────
+  // ── No slippage setting (132c0422, 1 Oct 2026) ───────────────────────────────
 
-  describe("setMaxSlippageBps", function () {
-    it("updates slippage and emits MaxSlippageUpdated", async function () {
-      const { burner, admin } = await loadFixture(deployFixture);
-      await expect(burner.connect(admin).setMaxSlippageBps(300n))
-        .to.emit(burner, "MaxSlippageUpdated")
-        .withArgs(300n);
-      expect(await burner.maxSlippageBps()).to.equal(300n);
-    });
-
-    it("reverts when slippage exceeds MAX_SLIPPAGE_CAP (5000 bps)", async function () {
-      const { burner, admin } = await loadFixture(deployFixture);
-      await expect(burner.connect(admin).setMaxSlippageBps(5001n))
-        .to.be.revertedWithCustomError(burner, "SlippageExceedsCap")
-        .withArgs(5001n, 5000n);
-    });
-
-    it("accepts exactly MAX_SLIPPAGE_CAP", async function () {
-      const { burner, admin } = await loadFixture(deployFixture);
-      await expect(burner.connect(admin).setMaxSlippageBps(5000n)).to.not.be.reverted;
+  describe("slippage", function () {
+    // ⛔ maxSlippageBps existed and nothing read it: with no on-chain price, the
+    //    contract had nothing to apply it to. A setting that looks like a control
+    //    and is not one was removed. What actually bounds a swap is minSrxOut, the
+    //    per-token caps and the exact approval (tested elsewhere in this file).
+    it("has no slippage setting that nothing reads", async function () {
+      const { burner } = await loadFixture(deployFixture);
+      for (const name of ["maxSlippageBps", "setMaxSlippageBps", "MAX_SLIPPAGE_CAP"]) {
+        expect(burner.interface.getFunction(name), name).to.equal(null);
+      }
     });
   });
 
@@ -284,6 +270,79 @@ describe("BuybackBurner", function () {
       await expect(
         burner.connect(user1).rescueETH(user1.address, ethers.parseEther("0.1"))
       ).to.be.revertedWithCustomError(burner, "AccessControlUnauthorizedAccount");
+    });
+  });
+
+  // ── Re-entry during a swap (Slither 0.11.6 reentrancy-balance, 7 Oct 2026) ──
+  //
+  // buyAndBurnWithToken measures the swap by the burner's balances before and after
+  // the router call. Slither flags those reads as possibly stale if the router calls
+  // back in. Every state-changing entry point a router could reach is nonReentrant
+  // (or admin-only, and the router is not an admin), so a call-back is refused. Proven
+  // here with a hostile router that even holds EXECUTOR_ROLE.
+  describe("re-entry during a swap", function () {
+    async function hostile() {
+      const ctx = await loadFixture(deployFixture);
+      const { token, burner, usdc, admin, EXECUTOR_ROLE } = ctx;
+      const router = await (await ethers.getContractFactory("MockReentrantRouter")).deploy();
+      await burner.connect(admin).setSwapRouter(await router.getAddress());
+      await burner.connect(admin).setSwapLimits(await usdc.getAddress(), 10n ** 12n, 10n ** 12n);
+      await burner.connect(admin).grantRole(EXECUTOR_ROLE, await router.getAddress()); // worst case
+      await token.connect(admin).transfer(await router.getAddress(), ethers.parseUnits("1000", 18));
+      await usdc.mint(await burner.getAddress(), 1_000_000_000n);
+      const swapData = router.interface.encodeFunctionData("swap", [
+        await usdc.getAddress(), 1_000_000_000n, await token.getAddress(), ethers.parseUnits("500", 18), await burner.getAddress(),
+      ]);
+      return { ...ctx, router, swapData };
+    }
+    const REENTRANT = ethers.id("ReentrancyGuardReentrantCall()").slice(0, 10);
+
+    it("a router calling burnHeld() mid-swap is refused, and the swap still burns what it bought", async function () {
+      const { burner, usdc, token, executor, router, swapData } = await hostile();
+      await router.arm(await burner.getAddress(), burner.interface.encodeFunctionData("burnHeld"));
+      const before = await burner.totalBurned();
+      await burner.connect(executor).buyAndBurnWithToken(await usdc.getAddress(), 1_000_000_000n, ethers.parseUnits("500", 18), swapData);
+      expect(await router.reentered()).to.equal(false);
+      expect((await router.reenterResult()).slice(0, 10)).to.equal(REENTRANT);
+      expect((await burner.totalBurned()) - before).to.equal(ethers.parseUnits("500", 18));
+      void token;
+    });
+
+    it("a router calling buyAndBurnWithToken() again mid-swap is refused", async function () {
+      const { burner, usdc, executor, router, swapData } = await hostile();
+      const inner = burner.interface.encodeFunctionData("buyAndBurnWithToken", [await usdc.getAddress(), 1n, 1n, swapData]);
+      await router.arm(await burner.getAddress(), inner);
+      await burner.connect(executor).buyAndBurnWithToken(await usdc.getAddress(), 1_000_000_000n, ethers.parseUnits("500", 18), swapData);
+      expect(await router.reentered()).to.equal(false);
+      expect((await router.reenterResult()).slice(0, 10)).to.equal(REENTRANT);
+    });
+
+    it("control: outside a swap the same router call to burnHeld() succeeds, so the refusal above is the lock", async function () {
+      const { burner, usdc, token, router } = await hostile();
+      await router.arm(await burner.getAddress(), burner.interface.encodeFunctionData("burnHeld"));
+      await router.swap(await usdc.getAddress(), 0n, await token.getAddress(), 0n, await router.getAddress());
+      expect(await router.reentered()).to.equal(true);
+    });
+  });
+
+  // ── The daily swap cap is a draining bucket (internal review, 7 Oct 2026) ──────
+  describe("daily swap cap", function () {
+    it("no burst across a reset: a full cap just before and another just after is refused", async function () {
+      const { token, burner, usdc, admin, executor } = await loadFixture(deployFixture);
+      const router = await (await ethers.getContractFactory("MockSwapRouter")).deploy();
+      await burner.connect(admin).setSwapRouter(await router.getAddress());
+      const CAP = 100_000n * 10n ** 6n;
+      await burner.connect(admin).setSwapLimits(await usdc.getAddress(), CAP, CAP);
+      await token.connect(admin).transfer(await router.getAddress(), ethers.parseUnits("1000", 18));
+      await usdc.mint(await burner.getAddress(), 1_000_000n * 10n ** 6n);
+      const swap = async (amt) => burner.connect(executor).buyAndBurnWithToken(
+        await usdc.getAddress(), amt, 1n,
+        router.interface.encodeFunctionData("swap", [await usdc.getAddress(), amt, await token.getAddress(), 1n, await burner.getAddress()]));
+      await swap(1n);                                   // T0: tiny swap
+      await time.increase(24 * 3600 - 3);
+      await swap(CAP - 10n * 10n ** 6n);                // just before T0 + 24h
+      await time.increase(2);
+      await expect(swap(CAP)).to.be.revertedWithCustomError(burner, "SwapLimitExceeded"); // just after
     });
   });
 });

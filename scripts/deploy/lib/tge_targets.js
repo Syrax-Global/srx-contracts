@@ -28,8 +28,14 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { getAddress, ZeroAddress, parseUnits, formatUnits } = require("ethers");
+const { getAddress, ZeroAddress, parseUnits, formatUnits, Contract } = require("ethers");
+
+/** What a Gnosis Safe answers. A wallet row on a real network must answer both. */
+const SAFE_ABI = ["function getOwners() view returns (address[])", "function getThreshold() view returns (uint256)"];
+/** Fewest signatures a launch-float wallet may require. */
+const MIN_SAFE_THRESHOLD = 2n;
 const { ALLOCATIONS, VESTING, TESTNET_CHAINS, TGE_PLAN, walletFor } = require("../00_config");
+const { launchPlan, readGenesisSold } = require("./genesis_seed");
 
 const MAX_SUPPLY = parseUnits("10000000000", 18);
 
@@ -66,20 +72,23 @@ function checksum(value, what) {
  * Only network-suffixed variables are read (e.g. VESTING_FOUNDERS_ETHEREUM), exactly
  * as the TGE script always has. There are no fallbacks: a missing value throws.
  */
-function buildTgeAllocations({ networkName, env = process.env }) {
+function buildTgeAllocations({ networkName, env = process.env, genesisSold = 0n }) {
   const NET = networkName.toUpperCase();
   const req = (key) => checksum(env[`${key}_${NET}`], `${key}_${NET}`);
 
-  // Built from TGE_PLAN in 00_config.js — the same list every other script reads.
+  // Built from TGE_PLAN in 00_config.js — the same list every other script reads —
+  // with the seed allocation split between the seed vault and the Genesis contract
+  // by what the Genesis round sold (lib/genesis_seed.js; 0 = no round, TGE_PLAN as is).
   // ⛔ Contract rows used to be `stakingAddr || WALLETS.staking`: with STAKING unset,
   //    1.7B SRX went to a plain wallet and the incentive pool was never registered.
-  return TGE_PLAN.map((row) => ({
+  const { plan, allocations } = launchPlan(genesisSold);
+  return plan.map((row) => ({
     label: row.label,
     destination:
       row.kind === "vault"  ? req(row.vaultEnv) :
       row.kind === "wallet" ? walletFor(row.wallet, networkName, env) :
       req(row.env),
-    amount: ALLOCATIONS[row.allocation],
+    amount: allocations[row.allocation],
     isVestingVault: row.kind === "vault",
   }));
 }
@@ -167,6 +176,15 @@ function checkAgainstManifest({ allocations, manifest, roles, networkName, chain
   if (sum !== MAX_SUPPLY) {
     failures.push(`Σ allocations = ${formatUnits(sum, 18)} SRX ≠ MAX_SUPPLY (10,000,000,000)`);
   }
+  // The seed allocation is split between the seed vault and the Genesis contract; the
+  // two together must still be exactly the seed allocation (lib/genesis_seed.js).
+  {
+    const seedPart = (label) => allocations.find((a) => a.label === label)?.amount ?? 0n;
+    const seed = seedPart("SeedInvestors") + seedPart("Genesis");
+    if (seed !== ALLOCATIONS.seedInvestors) {
+      failures.push(`seed vault + Genesis = ${formatUnits(seed, 18)} SRX ≠ the seed allocation ${formatUnits(ALLOCATIONS.seedInvestors, 18)}`);
+    }
+  }
 
   // ── 4. role holders ────────────────────────────────────────────────────────
   // ⛔ An unpinned role used to be a warning and a skip on every network, so a
@@ -208,6 +226,21 @@ async function checkOnChain({ allocations, manifest, provider, vaultAt, tokenAdd
         : `${a.label}: no contract at ${a.destination}`);
       continue;
     }
+    // ⛔ "Must be a multi-signature wallet" was checked as "has code", so any contract
+    //    passed (internal review, 7 Oct 2026). On a real network a wallet row must now
+    //    answer as a Safe and require at least MIN_SAFE_THRESHOLD signatures.
+    if (WALLET_ROWS.has(a.label) && !isTestnet) {
+      const safe = new Contract(a.destination, SAFE_ABI, provider);
+      let owners, threshold;
+      try { [owners, threshold] = await Promise.all([safe.getOwners(), safe.getThreshold()]); }
+      catch { failures.push(`${a.label}: ${a.destination} is not a multi-signature wallet (it does not answer getOwners/getThreshold)`); continue; }
+      if (BigInt(threshold) < MIN_SAFE_THRESHOLD) {
+        failures.push(`${a.label}: ${a.destination} needs only ${threshold} signature(s); a launch-float wallet needs at least ${MIN_SAFE_THRESHOLD}`);
+      } else if (BigInt(owners.length) < BigInt(threshold)) {
+        failures.push(`${a.label}: ${a.destination} has ${owners.length} owners for a threshold of ${threshold}`);
+      }
+      continue;
+    }
     if (!a.isVestingVault) continue;
 
     const vault = vaultAt(a.destination);
@@ -244,29 +277,37 @@ async function checkOnChain({ allocations, manifest, provider, vaultAt, tokenAdd
 }
 
 /**
- * The whole gate. Returns { allocations, failures, manifestPath, skipped }.
+ * The whole gate. Returns { allocations, genesisSold, failures, manifestPath, skipped }.
  * Does not throw on a mismatch — the caller decides — but DOES throw if the
  * allocation list itself cannot be built (a missing or invalid address).
  */
 async function runTgeTargetChecks({
   networkName, chainId, env = process.env, provider, vaultAt, tokenAddress,
   manifestPath = manifestPathFor(networkName),
+  genesisSold,
 }) {
-  const allocations = buildTgeAllocations({ networkName, env });
+  // What the Genesis round sold, from the Genesis contract (refuses while the round
+  // is open). A caller without a provider may pass it; otherwise there is no round.
+  if (genesisSold === undefined) {
+    genesisSold = provider
+      ? (await readGenesisSold({ networkName, env, provider, tokenAddress })).sold
+      : 0n;
+  }
+  const allocations = buildTgeAllocations({ networkName, env, genesisSold });
 
   if (!fs.existsSync(manifestPath)) {
     if (LOCAL_CHAINS.has(networkName)) {
-      return { allocations, failures: [], manifestPath, skipped: true };
+      return { allocations, genesisSold, failures: [], manifestPath, skipped: true };
     }
     return {
-      allocations, manifestPath, skipped: false,
+      allocations, genesisSold, manifestPath, skipped: false,
       failures: [`no manifest at ${manifestPath} — create it from deploy/addresses.example.json with the FINAL addresses`],
     };
   }
 
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); }
-  catch { return { allocations, manifestPath, skipped: false, failures: [`manifest ${manifestPath} is not valid JSON`] }; }
+  catch { return { allocations, genesisSold, manifestPath, skipped: false, failures: [`manifest ${manifestPath} is not valid JSON`] }; }
 
   const failures = checkAgainstManifest({
     allocations, manifest, roles: liveRoles({ networkName, env }), networkName, chainId,
@@ -276,10 +317,11 @@ async function runTgeTargetChecks({
   } else if (!LOCAL_CHAINS.has(networkName)) {
     failures.push("no provider given — the on-chain checks did not run");
   }
-  return { allocations, failures, manifestPath, skipped: false };
+  return { allocations, genesisSold, failures, manifestPath, skipped: false };
 }
 
 module.exports = {
+  MIN_SAFE_THRESHOLD,
   MAX_SUPPLY, LOCAL_CHAINS, VAULT_SCHEDULE, WALLET_ROWS,
   buildTgeAllocations, liveRoles, manifestPathFor,
   checkAgainstManifest, checkOnChain, runTgeTargetChecks,

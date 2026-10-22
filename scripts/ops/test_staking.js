@@ -2,10 +2,10 @@
  * Test: SRXStaking full lifecycle
  *
  * Tests: lock → tier assignment → addToPosition → reward accrual →
- *        claimRewards → earlyWithdraw → bonus USDC port setup
+ *        claimRewards → earlyWithdraw
  *
  * Uses TWO signers:
- *  - deployer  → GOVERNANCE_ROLE (setRewardRate, bonus token config)
+ *  - deployer  → GOVERNANCE_ROLE (setRewardRate)
  *  - investor  → staker wallet (INVESTOR_PRIVATE_KEY)
  *
  * Prerequisites:
@@ -76,7 +76,6 @@ async function main() {
     rewardAccrue: false,
     claimReward:  false,
     earlyWithdraw:false,
-    bonusPort:    false,
   };
 
   // ── Step 0: Fund investor wallet if needed ───────────────────────────────
@@ -237,27 +236,7 @@ async function main() {
     if (!returnOk)  console.log(`❌ Return amount too low`);
   }
 
-  // ── Step 7: Bonus USDC port — setBonusRewardToken ─────────────────────
-  console.log(`\n[7] Bonus reward port — setBonusRewardToken()...`);
-  const currentBonus = await staking.bonusRewardToken();
-  if (currentBonus !== ethers.ZeroAddress) {
-    console.log(`   Bonus token already set: ${currentBonus}`);
-    console.log(`   ✅ Bonus port previously configured`);
-    results.bonusPort = true;
-  } else {
-    // Use a mock address — on testnet we just verify the governance call works
-    // In production this would be the USDC contract address
-    const SEPOLIA_USDC = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
-    try {
-      await (await staking.setBonusRewardToken(SEPOLIA_USDC)).wait();
-      const bonusSet = await staking.bonusRewardToken();
-      console.log(`✅ Bonus reward token set: ${bonusSet}`);
-      console.log(`   (Sepolia USDC — real yield port activated)`);
-      results.bonusPort = bonusSet === SEPOLIA_USDC;
-    } catch (e) {
-      console.log(`❌ setBonusRewardToken failed: ${e.message.slice(0, 120)}`);
-    }
-  }
+  // (Step 7, the USDC "bonus" reward port, was removed with the stream itself: REG-50.)
 
   // ── Summary ────────────────────────────────────────────────────────────
   console.log("\n── Summary ────────────────────────────────────────────────");
@@ -271,18 +250,10 @@ async function main() {
   console.log(`${results.rewardAccrue  ? "✅" : "❌"} Reward accrual (earned() > 0)`);
   console.log(`${results.claimReward   ? "✅" : "❌"} claimRewards()`);
   console.log(`${results.earlyWithdraw ? "✅" : "❌"} earlyWithdraw — 10% burned, 90% returned`);
-  console.log(`${results.bonusPort     ? "✅" : "❌"} Bonus reward token (USDC real yield port)`);
 
   const allPass = Object.values(results).every(Boolean);
   console.log(`\n${allPass ? "✅ ALL STAKING TESTS PASSED" : "❌ ONE OR MORE CHECKS FAILED"}`);
 
-  if (results.bonusPort) {
-    console.log(`\nℹ️  To test USDC real yield:`);
-    console.log(`   1. Transfer USDC to staking contract`);
-    console.log(`   2. Call notifyBonusRewardAmount(amount) as governance`);
-    console.log(`   3. Call setBonusRewardRate(rate) as governance`);
-    console.log(`   4. Stake SRX, wait, call claimBonusRewards()`);
-  }
   console.log(`\nℹ️  To test normal unlock (no penalty): wait for lockEnd, call unlock()`);
   console.log(`   Lock end is 30 days from when the Obsidian position was created`);
 }

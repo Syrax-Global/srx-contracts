@@ -13,9 +13,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 ///      buyAndBurn() burns from msg.sender's own balance (A2-H-01 fix). The migrator
 ///      must therefore pull tokens from the user first, then call buyAndBurn() to
 ///      burn its own held balance.
-interface ISRXBurnable {
-    function buyAndBurn(uint256 amount) external;
-}
+import { ISRXBurnable } from "../token/ISRXBurnable.sol";
 
 /**
  * @title ZkSyncMigrator
@@ -27,7 +25,9 @@ interface ISRXBurnable {
  *
  * Migration flow (Strategy A):
  *  1. User approves ZkSyncMigrator to spend their SRX (on any supported chain).
- *  2. User calls migrate(amount). Tokens are burned. A MigrationRequest event fires.
+ *  2. User calls migrate(amount). The migrator pulls the tokens and burns them through
+ *     SRXToken.buyAndBurn (a permanent reduction counted in totalBurned; it is not a
+ *     transfer to a dead address). A MigrationRequest event fires.
  *  3. The Syrax Chain bridge oracle (operated by Syrax Global FZCO or DAO after
  *     decentralization) monitors migration events and issues equivalent native SRX
  *     on the Syrax Chain to the same address.
@@ -53,7 +53,8 @@ interface ISRXBurnable {
  * Oracle security:
  *  The bridge oracle verifies each MigrationRequest event using:
  *  - Block finality confirmation (≥64 blocks on Ethereum)
- *  - migrationId uniqueness check on the Syrax Chain
+ *  - uniqueness check on the Syrax Chain, keyed on (srcChainId, the migrator contract
+ *    that emitted the log, migrationId): an id is unique only per chain and contract
  *  - Amount matches burn log exactly
  *  Oracle operator must be replaced by a decentralized bridge (e.g. LayerZero)
  *  once the Syrax Chain has its own endpoint configured.
@@ -185,8 +186,11 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
         //    test/audit-poc/migration-replay.test.js case 3.
         //
         // ⭐ The chain id occupies the high 128 bits and the local counter the low
-        //    128, so ids stay uint256 and monotonic per chain while being globally
-        //    unique. Every chain id in use is far below 2^128.
+        //    128, so ids stay uint256 and monotonic per migrator contract, and
+        //    ids from different chains differ. They are unique per (chainId,
+        //    migrator contract), not globally: a second migrator on the same chain
+        //    restarts at 1 (N-05), so consumers must also key on the emitting
+        //    address. Every chain id in use is far below 2^128.
         unchecked { ++migrationCount; }
         migrationId = (block.chainid << 128) | migrationCount;
 
@@ -255,6 +259,7 @@ contract ZkSyncMigrator is AccessControl, ReentrancyGuard {
      * @param token     Token to recover.
      * @param recipient Where to send it. Must not be the zero address.
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function rescueTokens(address token, address recipient)
         external
         onlyRole(GOVERNANCE_ROLE)

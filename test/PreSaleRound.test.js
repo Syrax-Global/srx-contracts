@@ -7,6 +7,9 @@ describe("PreSaleRound", function () {
 
   // ── Constants ────────────────────────────────────────────────────────────────
 
+  // Where every vault the round creates returns revoked (unvested) SRX; fixed at the round's deployment.
+  const TREASURY = ethers.Wallet.createRandom().address;
+
   const CLIFF   = 273n * 86400n;
   const VESTING = 730n * 86400n;
 
@@ -132,7 +135,8 @@ describe("PreSaleRound", function () {
       HARD_CAP,
       SRX_PRICE_8DEC,
       false, // flatBonusEnabled — tier-ladder mode
-      0
+      0,
+      TREASURY // vaultRevokeRecipient (internal audit M2)
     );
     await round.waitForDeployment();
 
@@ -197,6 +201,32 @@ describe("PreSaleRound", function () {
       expect(await round.INSTITUTIONAL_BONUS_BPS()).to.equal(INSTITUTIONAL_BPS);
     });
 
+    it("stores the vault revoke recipient and hands it to every vault it creates (internal audit M2)", async function () {
+      const { round, admin, investor1 } = await loadFixture(deployFixture);
+      expect(await round.vaultRevokeRecipient()).to.equal(TREASURY);
+      await round.connect(admin).addInvestor(investor1.address, USD_10000_8DEC);
+      await round.connect(admin).deployVault(investor1.address);
+      const VestingVault = await ethers.getContractFactory("VestingVault");
+      const vault = VestingVault.attach(await round.getVault(investor1.address));
+      expect(await vault.revokeRecipient()).to.equal(TREASURY);
+    });
+
+    it("reverts with a zero or self vault revoke recipient (internal audit M2)", async function () {
+      const { round, token, mockUsdc, mockUsdt, mockWbtc, ethFeed, btcFeed, admin } = await loadFixture(deployFixture);
+      const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
+      const args = (recipient) => [
+        token.target, mockUsdc.target, mockUsdt.target, mockWbtc.target, ethFeed.target, btcFeed.target,
+        admin.address, HARD_CAP, SRX_PRICE_8DEC, false, 0, recipient,
+      ];
+      await expect(PreSaleRound.deploy(...args(ethers.ZeroAddress)))
+        .to.be.revertedWithCustomError(round, "ZeroAddress");
+      // the round's own address can never be a recipient: the next deployment's address is computable
+      const nonce = await ethers.provider.getTransactionCount(admin.address);
+      const self = ethers.getCreateAddress({ from: admin.address, nonce });
+      await expect(PreSaleRound.deploy(...args(self)))
+        .to.be.revertedWithCustomError(round, "ZeroAddress");
+    });
+
     it("reverts with zero srxToken", async function () {
       const { round, mockUsdc, mockUsdt, mockWbtc, ethFeed, btcFeed, admin } = await loadFixture(deployFixture);
       const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
@@ -212,7 +242,8 @@ describe("PreSaleRound", function () {
           HARD_CAP,
           SRX_PRICE_8DEC,
           false, // flatBonusEnabled — tier-ladder mode
-          0
+          0,
+          TREASURY // vaultRevokeRecipient (internal audit M2)
         )
       ).to.be.revertedWithCustomError(round, "ZeroAddress");
     });
@@ -232,7 +263,8 @@ describe("PreSaleRound", function () {
           HARD_CAP,
           0n,
           false, // flatBonusEnabled — tier-ladder mode
-          0
+          0,
+          TREASURY // vaultRevokeRecipient (internal audit M2)
         )
       ).to.be.revertedWithCustomError(round, "ZeroAmount");
     });
@@ -639,7 +671,8 @@ describe("PreSaleRound", function () {
         HARD_CAP,
         SRX_PRICE_8DEC,
         false, // flatBonusEnabled — tier-ladder mode
-        0
+        0,
+        TREASURY // vaultRevokeRecipient (internal audit M2)
       );
       await expect(
         roundNoEth.connect(investor1).invest({ value: ethers.parseEther("1") })
@@ -744,7 +777,8 @@ describe("PreSaleRound", function () {
         HARD_CAP,
         SRX_PRICE_8DEC,
         false, // flatBonusEnabled — tier-ladder mode
-        0
+        0,
+        TREASURY // vaultRevokeRecipient (internal audit M2)
       );
       await expect(
         roundNoUsdc.connect(investor1).investWithUSDC(1_000_000n)
@@ -831,7 +865,8 @@ describe("PreSaleRound", function () {
         HARD_CAP,
         SRX_PRICE_8DEC,
         false, // flatBonusEnabled — tier-ladder mode
-        0
+        0,
+        TREASURY // vaultRevokeRecipient (internal audit M2)
       );
       await expect(
         roundNoUsdt.connect(investor1).investWithUSDT(1_000_000n)
@@ -930,7 +965,8 @@ describe("PreSaleRound", function () {
         HARD_CAP,
         SRX_PRICE_8DEC,
         false, // flatBonusEnabled — tier-ladder mode
-        0
+        0,
+        TREASURY // vaultRevokeRecipient (internal audit M2)
       );
       await expect(
         roundNoWbtc.connect(investor1).investWithWBTC(100_000_000n)

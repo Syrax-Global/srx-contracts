@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { allocationSource } = require("../helpers/allocationSource");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 describe("poke closes the expired-multiplier window", function () {
   it("a third party can strip a stale 2.00x weight", async function () {
@@ -9,7 +10,7 @@ describe("poke closes the expired-multiplier window", function () {
     await token.connect(admin).genesis(admin.address);
     const S = await ethers.getContractFactory("SRXStaking");
     const { upgrades } = require("hardhat");
-    const st = await upgrades.deployProxy(S, [await token.getAddress(), admin.address], { kind: "uups" });
+    const st = await S.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await token.connect(admin).transfer(u1.address, ethers.parseUnits("100000", 18));
     await token.connect(u1).approve(await st.getAddress(), ethers.MaxUint256);
     await st.connect(u1).lock(ethers.parseUnits("100000", 18), 180 * 86400);

@@ -230,6 +230,7 @@ describe("Launch Protection × Cross-Contract Integration", function () {
       // PreSaleRound — note constructor order from contract source
       const HARD_CAP  = ethers.parseUnits("400000000", 18);  // 400M SRX
       const SRX_PRICE = 1_250_000n;                          // $0.0125 in 8-dec
+      const treasury = ethers.Wallet.createRandom(); // vaults return revoked SRX here (internal audit M2)
       const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
       const presale = await PreSaleRound.deploy(
         await token.getAddress(),
@@ -242,7 +243,8 @@ describe("Launch Protection × Cross-Contract Integration", function () {
         HARD_CAP,
         SRX_PRICE,
         false, // flatBonusEnabled — tier-ladder mode
-        0
+        0,
+        treasury.address // vaultRevokeRecipient (internal audit M2)
       );
       await presale.waitForDeployment();
 
@@ -351,6 +353,7 @@ describe("Launch Protection × Cross-Contract Integration", function () {
       const usdc = await MockERC20.deploy("USDC", "USDC", 6); await usdc.waitForDeployment();
       const usdt = await MockERC20.deploy("USDT", "USDT", 6); await usdt.waitForDeployment();
 
+      const treasury = ethers.Wallet.createRandom(); // vaults return revoked SRX here (internal audit M2)
       const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
       const presale = await PreSaleRound.deploy(
         await token.getAddress(),
@@ -363,7 +366,8 @@ describe("Launch Protection × Cross-Contract Integration", function () {
         ethers.parseUnits("400000000", 18),
         1_250_000n,
         false, // flatBonusEnabled — tier-ladder mode
-        0
+        0,
+        treasury.address // vaultRevokeRecipient (internal audit M2)
       );
       await presale.waitForDeployment();
 

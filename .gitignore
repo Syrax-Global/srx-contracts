@@ -131,3 +131,6 @@ Thumbs.db
 # Safe Transaction Builder batches written by the deploy and ops scripts (DEP-01, PSR-04)
 safe_batch.*.json
 presale_config.*.json
+
+# Test-network deploy progress (scripts/ops/deploy_testnet_suite.js). Addresses only, but working state.
+deployments/*.state.json

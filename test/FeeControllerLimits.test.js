@@ -6,6 +6,8 @@
 // (crypto multiplier <= 100%), so that is the binding constraint.
 //
 // Defaults at init: base 150, cryptoMult 7500 → lowest base = 112 bps; min 15, max 500.
+// Since REG-54 (12 Oct 2026) the floor and ceiling are constants, so only the base rate and
+// the crypto multiplier can approach the floor; both setters refuse to cross it.
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
@@ -14,9 +16,7 @@ describe("FeeController — fee-limit invariant (R7-03)", function () {
   async function fx() {
     const [admin, staking, other] = await ethers.getSigners();
     const FeeController = await ethers.getContractFactory("FeeController");
-    const fee = await upgrades.deployProxy(
-      FeeController, [staking.address, admin.address], { kind: "uups" }
-    );
+    const fee = await FeeController.deploy(...[staking.address, admin.address]);
     await fee.waitForDeployment();
     return { fee, admin, other };
   }
@@ -28,17 +28,10 @@ describe("FeeController — fee-limit invariant (R7-03)", function () {
     expect(await fee.minFeeBps()).to.be.lessThanOrEqual(lowest);
   });
 
-  it("REGRESSION: rejects a floor above the lowest base fee", async function () {
-    const { fee, admin } = await loadFixture(fx);
-    // 200 > 112 (crypto base) — would clamp every tier upward.
-    await expect(fee.connect(admin).setFeeLimits(200, 500))
-      .to.be.revertedWithCustomError(fee, "InvalidBps");
-  });
-
-  it("accepts a floor at or below the lowest base fee", async function () {
-    const { fee, admin } = await loadFixture(fx);
-    await fee.connect(admin).setFeeLimits(100, 500);
-    expect(await fee.minFeeBps()).to.equal(100n);
+  it("the floor itself cannot move: there is no setter (REG-54)", async function () {
+    const { fee } = await loadFixture(fx);
+    expect(fee.interface.getFunction("setFeeLimits")).to.equal(null);
+    expect(await fee.MIN_FEE_BPS()).to.equal(15n);
   });
 
   it("REGRESSION: rejects a base rate cut that would fall under the floor", async function () {
@@ -59,20 +52,12 @@ describe("FeeController — fee-limit invariant (R7-03)", function () {
     const { fee, admin } = await loadFixture(fx);
     await fee.connect(admin).setBaseFeeRate(300);          // raise base
     expect(await fee.baseFeeRateBps()).to.equal(300n);
-    await fee.connect(admin).setFeeLimits(200, 500);       // now 200 <= 225 lowest base
-    expect(await fee.minFeeBps()).to.equal(200n);
     await fee.connect(admin).setCryptoFeeMultiplier(9_000);
     expect(await fee.cryptoFeeMultiplierBps()).to.equal(9_000n);
-  });
-
-  it("raise-both ordering: base first, then floor", async function () {
-    const { fee, admin } = await loadFixture(fx);
-    // Floor-first fails...
-    await expect(fee.connect(admin).setFeeLimits(400, 500))
-      .to.be.revertedWithCustomError(fee, "InvalidBps");
-    // ...base-first succeeds.
-    await fee.connect(admin).setBaseFeeRate(500);          // lowest base = 375
-    await fee.connect(admin).setFeeLimits(300, 500);
-    expect(await fee.minFeeBps()).to.equal(300n);
+    // Lowest legal cut: base 20 → crypto base 15 (= the floor) is accepted.
+    await fee.connect(admin).setCryptoFeeMultiplier(7_500);
+    await fee.connect(admin).setBaseFeeRate(20);
+    expect(await fee.baseFeeRateBps()).to.equal(20n);
+    expect(await fee.minFeeBps()).to.equal(15n);
   });
 });

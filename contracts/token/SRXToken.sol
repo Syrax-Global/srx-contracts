@@ -14,6 +14,11 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 import { Nonces } from "@openzeppelin/contracts/utils/Nonces.sol";
 import { Time } from "@openzeppelin/contracts/utils/types/Time.sol";
 
+/// @dev The one view the token reads from a wind-down exit (SRXStaking, StabilisationFund).
+interface IWindDownExit {
+    function windDown() external view returns (bool);
+}
+
 /**
  * @title SRXToken
  * @notice Syrax Token — native utility and governance token.
@@ -26,21 +31,41 @@ import { Time } from "@openzeppelin/contracts/utils/types/Time.sol";
  *  - EIP-2612 Permit for gasless approvals.
  *
  * Supply guarantee:
- *  Total supply never exceeds MAX_SUPPLY. Bridge mints only occur when
- *  an equivalent burn is verified by the LayerZero message layer. The
- *  only supply-reducing operation is buyAndBurn, called by the treasury
- *  after open-market purchases.
+ *  Total supply never exceeds MAX_SUPPLY (cap enforced in _update). Genesis is a
+ *  one-shot mint of 10B. A bridge send BURNS on this chain (OFT _debit); a bridge
+ *  return MINTS here, but only up to what was sent to that chain (outstandingByEid)
+ *  and within that chain's inbound limit (a draining bucket, see below). The only
+ *  PERMANENT supply reductions are buyAndBurn and ZkSyncMigrator.migrate (which
+ *  calls buyAndBurn); both add to totalBurned. Genuine SRX across all chains is
+ *  therefore 10B minus totalBurned (⚠️ open, internal audit M4/L9: a spoke's own
+ *  buyAndBurn is a permanent reduction the hub does not see). A compromised spoke
+ *  can forge SRX on that spoke, but can bring back to Ethereum at most the inbound
+ *  limit at once, refilling at the limit per 24 hours until the guardian freezes it:
+ *  the limit times (1 + days of reaction time) (test/BridgeConservation.property.test.js,
+ *  test/security-triage-2026-10.test.js).
  *
  * Role model:
- *  DEFAULT_ADMIN_ROLE  — grants/revokes all roles; transfer to Gnosis Safe pre-mainnet.
- *  PAUSER_ROLE         — emergency pause of all transfers (including bridging).
- *  GOVERNANCE_ROLE     — reserved for future parameter governance calls.
+ *  DEFAULT_ADMIN_ROLE  — grants/revokes all roles. After the launch hand-over it is
+ *                        held by the SRXTimelock (48 h), not the Safe (MULTISIG_SPEC.md).
+ *  PAUSER_ROLE         — emergency pause of all transfers (including bridging), the
+ *                        bridge-only stop, and the per-chain inbound freeze. Held by
+ *                        GuardianModule after the hand-over, which bounds how long it
+ *                        may keep the token paused.
+ *
+ * While paused, one kind of transfer still goes through (Security ruling, 12 Oct
+ * 2026): out of a contract governance has listed as a wind-down exit (SRXStaking,
+ * StabilisationFund) while that contract reports windDown() == true. A holder gets
+ * their own deposit back into their own wallet; they cannot move it on until the
+ * pause ends. A pause therefore never blocks an exit-only withdrawal.
+ *  GOVERNANCE_ROLE     — launch limits (maxTransferAmount, maxWalletBalance), the
+ *                        limit exemptions, setInboundLimit and unfreezeInbound.
  *  BURN_ROLE           — treasury-controlled buy-and-burn.
  *
- * ⚠ Multi-sig prerequisite:
- *  Before mainnet deployment, DEFAULT_ADMIN_ROLE MUST be transferred from the
- *  EOA deployer to a Gnosis Safe with ≥3/5 threshold. Leaving an EOA as admin
- *  is a critical security risk on a token of this scale.
+ * ⚠ Hand-over prerequisite:
+ *  Before mainnet launch the deployer EOA must hold no role here. scripts/ops/
+ *  migrate_roles.js moves the roles to the Timelock and GuardianModule, and
+ *  scripts/verify/verify_roles.js checks the end state (MULTISIG_SPEC.md).
+ *  Leaving an EOA as admin is a critical security risk on a token of this scale.
  */
 contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, Pausable {
 
@@ -81,7 +106,10 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     uint256 public maxWalletBalance;
 
     /**
-     * @notice Addresses exempt from both maxTransferAmount and maxWalletBalance checks.
+     * @notice Addresses exempt from the launch limits. An exempt sender OR recipient
+     *         bypasses maxTransferAmount; only an exempt RECIPIENT bypasses
+     *         maxWalletBalance (an exempt sender still cannot push an ordinary
+     *         wallet over the cap).
      *         Must include: all vesting vaults, staking contract, treasury, SSF,
      *         presale contract, DEX liquidity pool addresses, and the bridge.
      *         Set via setExemptFromLimits() before enabling launch protection.
@@ -107,6 +135,24 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     error SupplyCapExceeded(uint256 resultingSupply, uint256 cap);
     /// @notice An inbound bridge credit exceeds what this chain has sent to its source.
     error UnbackedInboundCredit(uint32 srcEid, uint256 amount, uint256 outstanding);
+    /// @notice The bridge is stopped (bridgePaused): no sends, and returns wait to be retried.
+    error BridgeStopped();
+
+    // ── Bridge-only stop, and wind-down exits (Security ruling, 12 Oct 2026) ────
+    //
+    // ⛔ The circuit breaker drove pause(), freezing EVERY transfer from one hot key.
+    //    GuardianModule's MODULE_BRIDGE now drives this stop instead: bridge sends and
+    //    returns halt, ordinary transfers carry on. A refused return stays verified at
+    //    the LayerZero endpoint and can be retried once the bridge restarts.
+
+    /// @notice Bridge sends and returns are stopped; ordinary transfers are not.
+    bool public bridgePaused;
+    /// @notice Contracts whose transfers out continue during a pause while they report
+    ///         windDown() == true (SRXStaking, StabilisationFund). Add-only: never unset.
+    mapping(address => bool) public isWindDownExit;
+
+    event BridgePausedSet(bool paused);
+    event WindDownExitAdded(address indexed account);
 
     // ── Bridge accounting (N-01) ───────────────────────────────────────────────
     //
@@ -126,6 +172,44 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
 
     event BridgeOutflow(uint32 indexed dstEid, uint256 amount, uint256 outstanding);
     event BridgeInflow(uint32 indexed srcEid, uint256 amount, uint256 outstanding);
+
+    // ── Inbound limits (external disclosure A, 7 Oct 2026) ──────────────────────
+    //
+    // ⛔ outstandingByEid bounds what a chain can return to what was sent there,
+    //    but it cannot tell real SRX from forged: a compromised spoke owner or
+    //    LayerZero delegate could mint on the spoke and bring back everything ever
+    //    sent to it, leaving honest holders' SRX unbacked (reported 3 Oct).
+    //
+    // ⭐ So each chain's returns are rate-limited, and the guardian can freeze one
+    //    chain's returns at once. The limit is a draining bucket (the model of
+    //    LayerZero's RateLimiter): returns add to inboundInFlight, which drains
+    //    linearly at inboundLimit per INBOUND_WINDOW, and a return that would take it
+    //    above inboundLimit is refused. So at most inboundLimit can come back at any
+    //    moment, refilling at inboundLimit per 24 hours; over any 24 hours, at most
+    //    twice the limit. Fails closed: a chain with no limit returns nothing. A
+    //    refused message reverts, and LayerZero V2 keeps it verified and retryable,
+    //    so a real return is delayed, never lost. A single return above the limit
+    //    waits for governance to raise it.
+    // ⛔ The first version (7 Oct, same day) counted returns in fixed 24-hour windows
+    //    that reset at once, so a full limit just before a reset and another just
+    //    after brought back twice the limit within seconds (internal review).
+
+    uint256 public constant INBOUND_WINDOW = 1 days;
+    /// @notice Most SRX in flight from each remote chain at once, and its refill per window. 0 = none.
+    mapping(uint32 => uint256) public inboundLimit;
+    /// @notice Returns counted against the limit as of inboundUpdatedAt, before draining.
+    mapping(uint32 => uint256) public inboundInFlight;
+    /// @notice When inboundInFlight was last updated, per remote chain.
+    mapping(uint32 => uint256) public inboundUpdatedAt;
+    /// @notice Returns from this chain are refused until governance lifts it.
+    mapping(uint32 => bool) public inboundFrozen;
+
+    event InboundLimitSet(uint32 indexed eid, uint256 perWindow);
+    event InboundFrozenSet(uint32 indexed eid, bool frozen);
+    error InboundLimitExceeded(uint32 eid, uint256 amount, uint256 available);
+    /// @notice A limit above MAX_SUPPLY would overflow the draining bucket (internal audit TB-02).
+    error LimitTooHigh(uint256 perWindow, uint256 cap);
+    error InboundChainFrozen(uint32 eid);
     error WalletExceedsMaxBalance(uint256 resultingBalance, uint256 limit);
 
     error OwnershipCannotBeRenounced();
@@ -169,6 +253,12 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(GOVERNANCE_ROLE,    _admin);
         _grantRole(PAUSER_ROLE,        _admin);
+        // External disclosure B (4 Oct 2026): SRX sent here by mistake must be
+        // rescuable. Under launch limits, rescueTokens to an ordinary wallet
+        // reverted above maxTransferAmount, so this contract exempts itself. The
+        // recipient's wallet cap still applies, and nothing moves while paused.
+        isExemptFromLimits[address(this)] = true;
+        emit ExemptionUpdated(address(this), true);
     }
 
     // ── Genesis ────────────────────────────────────────────────────────────────
@@ -197,6 +287,11 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
      *         Callers should transfer or receive tokens before calling this function:
      *           - Treasury: holds SRX from open-market purchases, then calls buyAndBurn.
      *           - ZkSyncMigrator: pulls tokens from user via safeTransferFrom, then burns.
+     *
+     *         While the token is paused, burns, migrations and buybacks stop: a burn
+     *         is a token movement, and a pause stops every token movement. This is
+     *         intended (external disclosure C, 4 Oct 2026). Admin controls such as
+     *         setPeer keep working while paused.
      *
      * @param amount Amount to burn (18-decimal SRX). Must be > 0.
      */
@@ -250,20 +345,57 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         _unpause();
     }
 
+    /// @notice Stop or restart bridge sends and returns, leaving ordinary transfers running.
+    function setBridgePaused(bool paused_) external onlyRole(PAUSER_ROLE) {
+        bridgePaused = paused_;
+        emit BridgePausedSet(paused_);
+    }
+
+    /// @notice Add a wind-down exit. Governance only, and ADD-ONLY (Security, 12 Oct 2026):
+    ///         there is no way to unlist, so no later vote can delist staking or the Fund and
+    ///         silently break the exit promise. A listing only lets that contract's own
+    ///         transfers out continue during a pause, and only while it is wound down.
+    function addWindDownExit(address account) external onlyRole(GOVERNANCE_ROLE) {
+        isWindDownExit[account] = true;
+        emit WindDownExitAdded(account);
+    }
+
+    // ── Inbound bridge limits (disclosure A) ───────────────────────────────────
+
+    /// @notice Set the most SRX `eid` may return per 24 hours. 0 refuses all returns.
+    /// @dev ⛔ Internal audit TB-02 (16 Oct 2026): type(uint256).max as "no limit" overflowed
+    ///      _drainedInFlight the next block, which bricked returns from that chain and this
+    ///      setter with them. No chain can return more than the whole supply anyway.
+    function setInboundLimit(uint32 eid, uint256 perWindow) external onlyRole(GOVERNANCE_ROLE) {
+        if (perWindow > MAX_SUPPLY) revert LimitTooHigh(perWindow, MAX_SUPPLY);
+        // Drain at the old rate up to now, so a new limit never rewrites the past.
+        inboundInFlight[eid] = _drainedInFlight(eid);
+        inboundUpdatedAt[eid] = block.timestamp;
+        inboundLimit[eid] = perWindow;
+        emit InboundLimitSet(eid, perWindow);
+    }
+
+    /// @notice SRX that `eid` could return right now.
+    function inboundAvailable(uint32 eid) external view returns (uint256) {
+        uint256 inFlight = _drainedInFlight(eid);
+        uint256 limit = inboundLimit[eid];
+        return limit > inFlight ? limit - inFlight : 0;
+    }
+
+    /// @notice Freeze returns from one chain at once (the guardian's fast path).
+    function freezeInbound(uint32 eid) external onlyRole(PAUSER_ROLE) {
+        inboundFrozen[eid] = true;
+        emit InboundFrozenSet(eid, true);
+    }
+
+    /// @notice Lift a freeze. Governance only, so a compromised guardian cannot undo one.
+    function unfreezeInbound(uint32 eid) external onlyRole(GOVERNANCE_ROLE) {
+        inboundFrozen[eid] = false;
+        emit InboundFrozenSet(eid, false);
+    }
+
     // ── Bridge Peer Configuration (SC-LZ-001 hardening) ────────────────────────
 
-    /**
-     * @notice Override setPeer to require the contract is NOT paused.
-     *
-     *         The base OFT `setPeer` is gated by `onlyOwner`. This override adds a
-     *         second guard: while the token is paused (e.g. GuardianModule responding
-     *         to a suspected key compromise), peer configuration cannot be changed.
-     *         If an attacker compromises the Ownable owner key, the guardian can
-     *         pause the contract to freeze peer changes until governance intervenes.
-     *
-     *         Calling pattern: pause first → investigate → either rotate ownership
-     *         and unpause, OR governance executes an authorised setPeer.
-     */
     /**
      * @dev ⛔ THIS WAS `whenNotPaused`, WHICH MADE THE DOCUMENTED INCIDENT
      *      RESPONSE IMPOSSIBLE. INCIDENT_RESPONSE.md step 5 says to freeze bridge
@@ -315,12 +447,18 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         address to,
         uint256 amount
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (to == address(0)) revert ZeroAddress();
+        if (to == address(0) || to == address(this)) revert ZeroAddress(); // self: a no-op that still emitted
         if (amount == 0)      revert ZeroAmount();
         if (token == address(this)) {
             // Use internal _transfer — the contract is the holder, no approval needed.
             // _update() launch-protection checks will run; mint/burn aren't involved.
             _transfer(address(this), to, amount);
+        } else if (token == address(0)) {
+            // Internal audit TB-05 / Aderyn H-1 (22 Oct 2026): native value an executor sends
+            // with a bridge delivery (lzReceive is payable) had no way out. token == 0 is ETH.
+            // slither-disable-next-line arbitrary-send-eth -- reviewed 22 Oct 2026: DEFAULT_ADMIN_ROLE (the Timelock, 48 h) only; moves only ETH stranded at this contract, which holds none for anyone
+            (bool ok, ) = to.call{value: amount}("");
+            if (!ok) revert ZeroAmount();
         } else {
             IERC20(token).safeTransfer(to, amount);
         }
@@ -350,6 +488,7 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         override
         returns (uint256 amountSentLD, uint256 amountReceivedLD)
     {
+        if (bridgePaused) revert BridgeStopped();
         (amountSentLD, amountReceivedLD) = super._debit(_from, _amountLD, _minAmountLD, _dstEid);
         uint256 outstanding = outstandingByEid[_dstEid] + amountSentLD;
         outstandingByEid[_dstEid] = outstanding;
@@ -361,23 +500,46 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         override
         returns (uint256 amountReceivedLD)
     {
+        if (bridgePaused) revert BridgeStopped();
         uint256 outstanding = outstandingByEid[_srcEid];
         if (_amountLD > outstanding) revert UnbackedInboundCredit(_srcEid, _amountLD, outstanding);
+        _consumeInbound(_srcEid, _amountLD); // disclosure A: frozen chains, and the daily limit
         unchecked { outstandingByEid[_srcEid] = outstanding - _amountLD; }
         emit BridgeInflow(_srcEid, _amountLD, outstanding - _amountLD);
         return super._credit(_to, _amountLD, _srcEid);
     }
 
+    /// @dev In-flight returns after draining at inboundLimit per INBOUND_WINDOW.
+    function _drainedInFlight(uint32 eid) internal view returns (uint256) {
+        uint256 inFlight = inboundInFlight[eid];
+        uint256 drained = ((block.timestamp - inboundUpdatedAt[eid]) * inboundLimit[eid]) / INBOUND_WINDOW;
+        return inFlight > drained ? inFlight - drained : 0;
+    }
+
+    /// @dev Disclosure A: a frozen chain returns nothing; any other at most what its
+    ///      draining bucket has room for.
+    function _consumeInbound(uint32 eid, uint256 amount) internal {
+        if (inboundFrozen[eid]) revert InboundChainFrozen(eid);
+        uint256 inFlight = _drainedInFlight(eid);
+        uint256 limit = inboundLimit[eid];
+        uint256 available = limit > inFlight ? limit - inFlight : 0;
+        if (amount > available) revert InboundLimitExceeded(eid, amount, available);
+        inboundInFlight[eid] = inFlight + amount;
+        inboundUpdatedAt[eid] = block.timestamp;
+    }
+
     /**
      * @dev Hooks into every token transfer to:
-     *  1. Block transfers while paused (emergency circuit breaker).
+     *  1. Block transfers while paused, except a wound-down exit's own transfers out.
      *  2. Update ERC20Votes checkpoints for governance power tracking.
      */
     function _update(address from, address to, uint256 value)
         internal
         override(ERC20, ERC20Votes)
-        whenNotPaused
     {
+        // The external call is made only for a listed exit, and only while paused.
+        if (paused()) _requireWindDownExit(from);
+
         // ── Supply cap ─────────────────────────────────────────────────────────
         // ⛔ THE HEADLINE GUARANTEE OF THIS CONTRACT WAS NOT ENFORCED ANYWHERE.
         //    The natspec above states "Total supply never exceeds MAX_SUPPLY",
@@ -413,8 +575,12 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
                 if (value > maxTransferAmount)
                     revert TransferExceedsMaxAmount(value, maxTransferAmount);
             }
-            // Max wallet — recipient is not exempt
-            if (maxWalletBalance != 0 && !isExemptFromLimits[to]) {
+            // Max wallet — recipient is not exempt. ⛔ Internal audit L10 (TB-06, 16 Oct 2026):
+            // a staker can build a principal above the cap in tranches, and every exit returns
+            // it whole, so the cap blocked unlock and even exitAfterWindDown, which the docs
+            // say cannot be blocked. Principal coming back from a listed exit (staking, the
+            // fund) is the holder's own, so the cap does not apply to it.
+            if (maxWalletBalance != 0 && !isExemptFromLimits[to] && !isWindDownExit[from]) {
                 if (balanceOf(to) + value > maxWalletBalance)
                     revert WalletExceedsMaxBalance(balanceOf(to) + value, maxWalletBalance);
             }
@@ -422,6 +588,12 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         // ──────────────────────────────────────────────────────────────────────
 
         super._update(from, to, value);
+    }
+
+    /// @dev While paused, only a listed exit that is wound down may send (Security ruling,
+    ///      12 Oct 2026). Anything else gets the usual EnforcedPause.
+    function _requireWindDownExit(address from) private view {
+        if (!isWindDownExit[from] || !IWindDownExit(from).windDown()) _requireNotPaused();
     }
 
     /**

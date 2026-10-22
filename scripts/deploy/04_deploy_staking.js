@@ -19,16 +19,16 @@ async function main() {
   const admin    = WALLETS.admin;
 
   if (!srxToken) throw new Error(`SRX_TOKEN_${network.name.toUpperCase()} not set in .env`);
+  // REG-50: rewards can only be backed by what the launch distributor (step 03) records
+  // delivering here, so its address is fixed into the contract now.
+  const tgeDistributor = process.env[`TGE_DISTRIBUTOR_${network.name.toUpperCase()}`];
+  if (!tgeDistributor) throw new Error(`TGE_DISTRIBUTOR_${network.name.toUpperCase()} not set in .env — run Step 3 first (04)`);
 
   // ── Deploy SRXStaking ────────────────────────────────────────────────────────
 
   console.log("\nDeploying SRXStaking (UUPS proxy)...");
   const SRXStaking = await ethers.getContractFactory("SRXStaking");
-  const stakingProxy = await upgrades.deployProxy(
-    SRXStaking,
-    [srxToken, admin],
-    { initializer: "initialize", kind: "uups" }
-  );
+  const stakingProxy = await SRXStaking.deploy(...[srxToken, admin, tgeDistributor]);
   await stakingProxy.waitForDeployment();
   const stakingAddress = await stakingProxy.getAddress();
   console.log(`SRXStaking proxy: ${stakingAddress}`);
@@ -37,11 +37,7 @@ async function main() {
 
   console.log("\nDeploying FeeController (UUPS proxy)...");
   const FeeController = await ethers.getContractFactory("FeeController");
-  const feeProxy = await upgrades.deployProxy(
-    FeeController,
-    [stakingAddress, admin],
-    { initializer: "initialize", kind: "uups" }
-  );
+  const feeProxy = await FeeController.deploy(...[stakingAddress, admin]);
   await feeProxy.waitForDeployment();
   const feeAddress = await feeProxy.getAddress();
   console.log(`FeeController proxy: ${feeAddress}`);

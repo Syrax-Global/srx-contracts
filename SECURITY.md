@@ -8,8 +8,9 @@ please report it responsibly. **Do not open a public GitHub issue.**
 ### Contact
 
 - **Email:** security@syrax.global
-- **PGP key:** [FILL — publish PGP key + fingerprint at TGE]
-- **Encrypted alternative:** [Signal or Keybase handle — FILL]
+- **Encrypted reports:** a PGP key and its fingerprint will be published here before
+  mainnet. Until then, email the address above and ask; we will arrange an encrypted
+  channel before you send any details.
 
 ### What to Include
 
@@ -35,13 +36,13 @@ please report it responsibly. **Do not open a public GitHub issue.**
 
 ## Bug Bounty Programme
 
-> **Status:** Programme launches at TGE. Self-hosted until Immunefi sponsorship
-> is in place. Funds are pre-allocated from the ecosystem treasury.
+> **Status:** Programme launches at TGE, run by Syrax. Funds are pre-allocated from
+> the ecosystem treasury.
 
 ### Scope
 
 In scope:
-- All 13 production contracts in `contracts/` (excluding `contracts/mocks/`)
+- Every production contract in `contracts/` (excluding `contracts/mocks/` and `contracts/echidna/`)
 - Deployed mainnet contracts (Ethereum + BNB Chain at launch)
 - Cross-chain bridge logic (LayerZero V2 OFT integration)
 - Frontend wallet-interaction code (when public)
@@ -104,6 +105,8 @@ reporters in OFAC-restricted jurisdictions cannot receive payment.
 | Internal R5 | 2026-06-12 | Internal | All 7, fresh-eyes — remediation code as primary surface | `docs/audits/` |
 | Proof pass 1 | 2026-09-10 | Internal | Executable proofs only | `REMEDIATION.md` |
 | Proof pass 2 | 2026-09-23 | Internal | Full pre-external-audit sweep, contracts and deploy path | `REMEDIATION.md` |
+| Internal audit | 2026-10-16 | Internal | Every contract, six review groups: twin and sibling sweep, privileged functions, accounting, entry points, funds with no exit, every documented guarantee against a test | `REMEDIATION.md` |
+| Class sweep + second static analyser | 2026-10-22 | Internal | Every contract, per class of mistake reported publicly; Aderyn alongside Slither; accounting invariants | `REMEDIATION.md`, `docs/audits/STATIC_ANALYSIS_TRIAGE.md` |
 | External | TBD (pre-mainnet) | External firm | Not yet commissioned | Pending |
 
 Across rounds R1–R5, 42 findings were identified and all actionable items remediated. Those
@@ -111,13 +114,15 @@ rounds did not catch everything: two later proof passes, which count a finding o
 test demonstrates it, found 31 defects on 10 September and, on 23 September, a Critical, three
 Highs and a further deployment High. Fixes and the items still open are in `REMEDIATION.md`.
 Verification coverage:
-- **817 Hardhat tests** (1 pending, 23 Sep 2026) + **7 Foundry invariants** (256 runs × depth 50) and **3 property-fuzz tests** (1,000 runs each).
-- Slither static analysis in CI (`fail-on: high`).
+- **1,261 Hardhat tests** (0 pending, 22 Oct 2026) + **32 Foundry invariants** (256 runs × depth 50) and **5 property-fuzz tests** (1,000 runs each; 10,000 in the nightly profile).
+- Aderyn 0.6.8 alongside Slither; every finding of both is fixed or explained in `docs/audits/STATIC_ANALYSIS_TRIAGE.md`.
+- Slither static analysis in CI: version pinned (0.11.6), failing on Medium and High. No detector that can report a High is excluded repo-wide; each reviewed exception is a dated comment beside the code. Foundry is pinned too (forge v1.8.5, forge-std v1.16.1).
 - Foundry invariant campaign (nightly, in CI). Echidna is a local harness only.
 
 The audit history is in [`docs/audits/`](docs/audits/); the full per-round reports are held internally and
-are available to an external auditor on request. Internal audits are complete; an independent external audit
-is next, and is a **mandatory gate before mainnet**.
+are available to an external auditor on request. The items the 16 October internal audit left open
+for a decision are listed in `REMEDIATION.md`. An independent external audit is next, and is a
+**mandatory gate before mainnet**.
 
 ---
 
@@ -135,12 +140,13 @@ Testnet-only issues are out of scope unless they also exist in mainnet code.
 
 ## Hall of Fame
 
-We will publicly acknowledge security researchers who responsibly disclose
-vulnerabilities (with their consent). This section will be populated post-TGE.
+We publicly acknowledge security researchers who responsibly disclose
+vulnerabilities (with their consent). Reports on pre-mainnet code are credited here
+too; only the latest deployed mainnet version is eligible for a reward.
 
 | Researcher | Date | Severity | Description |
 |---|---|---|---|
-| — | — | — | — |
+| [ibnu76](https://github.com/ibnu76) | 20 Sep 2026 | High, Low | StabilisationFund: rewards scheduled against accrued-but-unclaimed rewards (SSF-H2), and no minimum contribution, so a 1-wei position could block the stranded-pool rescue (SSF-L1). Both fixed; see `REMEDIATION.md`. |
 
 ---
 

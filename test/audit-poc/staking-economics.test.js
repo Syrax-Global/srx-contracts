@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
+const { allocationSource } = require("../helpers/allocationSource");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("AUDIT PoC — economic staking", function () {
@@ -33,9 +34,7 @@ describe("AUDIT PoC — economic staking", function () {
     await token.connect(admin).genesis(admin.address);
 
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(
-      SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" }
-    );
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
     const sa = await staking.getAddress();
 
@@ -220,7 +219,7 @@ describe("AUDIT PoC — dust staker captures the emission stream", function () {
     const token = await SRXToken.deploy(await ep.getAddress(), admin.address); await token.waitForDeployment();
     await token.connect(admin).genesis(admin.address);
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" });
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
     const sa = await staking.getAddress();
 
@@ -262,7 +261,7 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
   const LOCK_180D = 180 * 86400;
   const E = (n) => ethers.parseUnits(String(n), 18);
 
-  it("F6: [FIXED] addToPosition on an expired lock no longer adds capital at 2.00x", async function () {
+  it("F6: [FIXED] addToPosition on an expired lock no longer adds capital at 2.00x without a live 180-day lock", async function () {
     const [admin, u1] = await ethers.getSigners();
     const MockLZEndpoint = await ethers.getContractFactory("MockLZEndpoint");
     const ep = await MockLZEndpoint.deploy(40161); await ep.waitForDeployment();
@@ -270,7 +269,7 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
     const token = await SRXToken.deploy(await ep.getAddress(), admin.address); await token.waitForDeployment();
     await token.connect(admin).genesis(admin.address);
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" });
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
     const sa = await staking.getAddress();
 
@@ -283,8 +282,9 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
     await staking.connect(u1).lock(E(100_000), LOCK_180D);
     await time.increase(LOCK_180D + 1); // lock over — fully liquid
 
-    // newDuration = 0 keeps the ALREADY-EXPIRED lockEnd, but weightedAmount is
-    // recomputed from the stored lockDuration, which is still LOCK_180D.
+    // Internal audit M5/M6 (16 Oct 2026): newDuration = 0 now RE-COMMITS. The lock end becomes
+    // max(lockEnd, now + lockDuration), so the top-up serves a full new 180-day term, and the
+    // 2.00x weight is earned by that live lock rather than carried over from the expired one.
     await staking.connect(u1).addToPosition(E(900_000), 0);
 
     const p = await staking.positions(u1.address);
@@ -294,14 +294,23 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
     console.log("  lockEnd:", p.lockEnd.toString(), " now:", now.toString(), " => lock expired:", p.lockEnd < now);
     console.log("  lockDuration still:", p.lockDuration.toString(), "(180d =", LOCK_180D, ")");
 
-    // ⛔ This line used to assert `p.amount * 2n` — the DEFECT — under a [FIXED]
-    //    title, so the suite stayed green while the bug was live (found 23 Sep 2026).
-    expect(p.lockEnd).to.be.lessThan(now);        // no live lock...
-    expect(p.weightedAmount).to.equal(p.amount);  // ...so 1.00x, never 2.00x
-    expect(await staking.totalWeightedStake()).to.equal(p.amount);
+    // ⛔ The defect (found 23 Sep 2026) was 2.00x with NO live lock, and the old assertion
+    //    here was the defect itself under a [FIXED] title. The property is now: a 2.00x
+    //    weight always comes with a live lock of the full duration.
+    expect(p.lockEnd).to.equal(now + BigInt(LOCK_180D));       // a genuine new 180-day commitment...
+    expect(p.weightedAmount).to.equal(p.amount * 2n);          // ...which is what earns 2.00x
+    expect(await staking.totalWeightedStake()).to.equal(p.amount * 2n);
+
+    // The top-up cannot earn the multiplier without serving the full term: nothing can leave
+    // until the new 180 days are over.
+    await expect(staking.connect(u1).unlock()).to.be.revertedWithCustomError(staking, "LockNotExpired");
+    await time.increase(LOCK_180D - 86400);
+    await expect(staking.connect(u1).unlock()).to.be.revertedWithCustomError(staking, "LockNotExpired");
+    await time.increase(86400 + 1);
+    await expect(staking.connect(u1).unlock()).to.not.be.reverted;
   });
 
-  it("F6c: [FIXED] poke-then-top-up by 1 wei cannot restore the 2.00x weight", async function () {
+  it("F6c: [FIXED] poke-then-top-up by 1 wei cannot restore the 2.00x weight without a live 180-day lock", async function () {
     const [admin, u1] = await ethers.getSigners();
     const MockLZEndpoint = await ethers.getContractFactory("MockLZEndpoint");
     const ep = await MockLZEndpoint.deploy(40161);
@@ -309,7 +318,7 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
     const token = await SRXToken.deploy(await ep.getAddress(), admin.address);
     await token.connect(admin).genesis(admin.address);
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" });
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     const sa = await staking.getAddress();
     await token.connect(admin).transfer(sa, E(1_000_000));
     await staking.connect(admin).notifyRewardAmount(E(1_000_000));
@@ -322,13 +331,20 @@ describe("AUDIT PoC — 2x weight retained and topped up with no lock", function
     await expect(staking.connect(u1).addToPosition(1n, 0))
       .to.emit(staking, "PositionIncreased");
     const p = await staking.positions(u1.address);
-    expect(p.weightedAmount).to.equal(p.amount);
+    const now = BigInt(await time.latest());
+    // The 1-wei top-up re-commits the WHOLE position to a full 180 days from now: the 2.00x
+    // weight is back only because a live lock of the full duration came with it.
+    expect(p.lockEnd).to.equal(now + BigInt(LOCK_180D));
+    expect(p.weightedAmount).to.equal(p.amount * 2n);
+    await expect(staking.connect(u1).unlock()).to.be.revertedWithCustomError(staking, "LockNotExpired");
 
-    // A genuine re-lock is still allowed, at any duration, and earns its multiplier.
-    await staking.connect(u1).addToPosition(1n, 7 * 86400);
+    // While that lock is live the commitment cannot be downgraded, but an equal re-lock is allowed.
+    await expect(staking.connect(u1).addToPosition(1n, 7 * 86400))
+      .to.be.revertedWithCustomError(staking, "InvalidLockDuration");
+    await staking.connect(u1).addToPosition(1n, LOCK_180D);
     const q = await staking.positions(u1.address);
     expect(q.lockEnd).to.be.greaterThan(BigInt(await time.latest()));
-    expect(q.weightedAmount).to.equal(q.amount); // 7-day multiplier is 1.00x
+    expect(q.weightedAmount).to.equal(q.amount * 2n); // 180-day multiplier is 2.00x, with a live lock
   });
 });
 
@@ -344,7 +360,7 @@ describe("AUDIT PoC — F6 minimal-capital variant", function () {
     const token = await SRXToken.deploy(await ep.getAddress(), admin.address); await token.waitForDeployment();
     await token.connect(admin).genesis(admin.address);
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" });
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
     const sa = await staking.getAddress();
 

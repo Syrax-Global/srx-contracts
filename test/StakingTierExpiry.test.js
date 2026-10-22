@@ -8,6 +8,7 @@
 // Thresholds: Slate 50k, Onyx 250k, Obsidian 1M (weighted while locked, raw after).
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
+const { allocationSource } = require("./helpers/allocationSource");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("SRXStaking — tier expiry (R7-01)", function () {
@@ -29,9 +30,7 @@ describe("SRXStaking — tier expiry (R7-01)", function () {
     await token.connect(admin).genesis(admin.address);
 
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(
-      SRXStaking, [await token.getAddress(), admin.address], { kind: "uups" }
-    );
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
 
     for (const u of [user1, user2]) {

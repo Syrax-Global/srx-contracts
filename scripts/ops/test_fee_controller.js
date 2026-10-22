@@ -263,29 +263,32 @@ async function main() {
   const existingCount = await fee.feeDestinationCount();
   console.log(`   Existing destinations: ${existingCount}`);
 
-  // We'll configure: slot 0 = Treasury (5000), slot 1 = RealYield (5000)
+  // We'll configure: slot 0 = Treasury (5000), slot 1 = AutoBurn (5000).
+  // ⛔ REG-50: fees are never routed to SRXStaking (this slot was "RealYield" pointed at
+  //    the staking proxy until 12 Oct 2026; staking can no longer turn fees into rewards).
   const TREASURY_LABEL   = ethers.encodeBytes32String("Treasury");
-  const REALYIELD_LABEL  = ethers.encodeBytes32String("RealYield");
+  const BURN_LABEL       = ethers.encodeBytes32String("AutoBurn");
   const OVERBPS_LABEL    = ethers.encodeBytes32String("Overflow");
 
   const treasuryAddr  = "0x334baF9BF0dd1971E1A6197D4bCf0630bf6cc425"; // SRXTreasury proxy
-  const realYieldAddr = "0x6c448AFbC38900FcE4C005d0699b3f191574418a"; // SRXStaking proxy (test addr)
+  // Testnet stand-in for the buy-back: the BuybackBurner if deployed, else the deployer.
+  const burnAddr      = process.env[`BUYBACK_BURNER_${NET}`] || deployer.address;
 
   try {
     if (existingCount === 0n) {
       console.log(`   Setting slot 0: Treasury (5000 bps)...`);
       await (await fee.setFeeDestination(0, treasuryAddr,  5000, true, TREASURY_LABEL)).wait();
-      console.log(`   Setting slot 1: RealYield (5000 bps)...`);
-      await (await fee.setFeeDestination(1, realYieldAddr, 5000, true, REALYIELD_LABEL)).wait();
+      console.log(`   Setting slot 1: AutoBurn (5000 bps)...`);
+      await (await fee.setFeeDestination(1, burnAddr, 5000, true, BURN_LABEL)).wait();
     } else if (existingCount === 1n) {
       console.log(`   Slot 0 already exists — updating slot 0 to 5000 bps...`);
       await (await fee.setFeeDestination(0, treasuryAddr,  5000, true, TREASURY_LABEL)).wait();
-      console.log(`   Adding slot 1: RealYield (5000 bps)...`);
-      await (await fee.setFeeDestination(1, realYieldAddr, 5000, true, REALYIELD_LABEL)).wait();
+      console.log(`   Adding slot 1: AutoBurn (5000 bps)...`);
+      await (await fee.setFeeDestination(1, burnAddr, 5000, true, BURN_LABEL)).wait();
     } else {
       console.log(`   ${existingCount} destinations already exist — updating slots 0 and 1...`);
       await (await fee.setFeeDestination(0, treasuryAddr,  5000, true, TREASURY_LABEL)).wait();
-      await (await fee.setFeeDestination(1, realYieldAddr, 5000, true, REALYIELD_LABEL)).wait();
+      await (await fee.setFeeDestination(1, burnAddr, 5000, true, BURN_LABEL)).wait();
       // Deactivate any extra slots so total is exactly 10000
       for (let i = 2n; i < existingCount; i++) {
         const d = await fee.feeDestinations(i);
@@ -338,7 +341,7 @@ async function main() {
     } else {
       // 8 slots full — update slot 1 to 5001 instead
       console.log(`   Max destinations reached — updating slot 1 to 5001 bps → total becomes 10001...`);
-      await (await fee.setFeeDestination(1, realYieldAddr, 5001, true, REALYIELD_LABEL)).wait();
+      await (await fee.setFeeDestination(1, burnAddr, 5001, true, BURN_LABEL)).wait();
     }
 
     const [validAfter, totalAfter] = await fee.validateFeeDistribution();
@@ -369,7 +372,7 @@ async function main() {
     if (destCountNow < 8n) {
       await (await fee.setFeeDestinationActive(Number(destCountNow), false)).wait();
     } else {
-      await (await fee.setFeeDestination(1, realYieldAddr, 5000, true, REALYIELD_LABEL)).wait();
+      await (await fee.setFeeDestination(1, burnAddr, 5000, true, BURN_LABEL)).wait();
     }
     const [restoredValid, restoredTotal] = await fee.validateFeeDistribution();
     console.log(`   Restored: valid=${restoredValid}, total=${restoredTotal} bps`);
@@ -398,10 +401,8 @@ async function main() {
   console.log(`\n${allPass ? "✅ ALL FEE CONTROLLER TESTS PASSED" : "⚠️  ONE OR MORE CHECKS FAILED"}`);
 
   console.log(`\nℹ️  Notes:`);
-  console.log(`   - Routing table is now configured: Treasury (50%) + RealYield (50%)`);
+  console.log(`   - Routing table is now configured: Treasury (50%) + AutoBurn (50%)`);
   console.log(`   - The overflow slot is deactivated — table is valid and committed`);
-  console.log(`   - In production, activate real yield by: governance call to notifyBonusRewardAmount()`);
-  console.log(`     on SRXStaking, then update the RealYield destination to point to the staking contract`);
   console.log(`   - Investor staking position carries forward — lockEnd: 2026-06-15`);
 }
 

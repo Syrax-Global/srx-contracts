@@ -26,6 +26,7 @@
 
 const { ethers, network } = require("hardhat");
 const { LZ_ENDPOINTS, WALLETS } = require("./00_config");
+const { assertGenesisChain } = require("./lib/genesis_seed");
 
 // ── SRX seed price ─────────────────────────────────────────────────────────────
 // $0.0125 expressed as 8-decimal fixed point (matching Chainlink format)
@@ -133,9 +134,13 @@ async function requireFeed(address, expected) {
 }
 
 // ── Existing token address (optional — leave blank to deploy fresh) ────────────
+// ⭐ The Genesis round is funded from the seed allocation at launch
+//    (lib/genesis_seed.js), so it is deployed against the launch token BEFORE the
+//    launch steps 02-06, and closed (finalize()) before Step 3.
 const EXISTING_TOKEN = {
-  sepolia:  process.env.SRX_TOKEN_SEPOLIA  || "",
-  ethereum: process.env.SRX_TOKEN_ETHEREUM || "",
+  sepolia:   process.env.SRX_TOKEN_SEPOLIA   || "",
+  ethereum:  process.env.SRX_TOKEN_ETHEREUM  || "",
+  localhost: process.env.SRX_TOKEN_LOCALHOST || "", // the rehearsal's suite token
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +152,8 @@ async function main() {
   if (!STABLECOINS[net] || !CHAINLINK_FEEDS[net]) {
     throw new Error(`Network "${net}" is not configured. Add it to STABLECOINS and CHAINLINK_FEEDS.`);
   }
+  // ⛔ PSR-03 (Jared, 1 Oct 2026): Ethereum only — see assertGenesisChain.
+  assertGenesisChain(net);
 
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  SRX PreSaleRound Deployment`);
@@ -201,6 +208,10 @@ async function main() {
   console.log(`  ${nativeSymbol}/USD feed:          ${nativeTokenFeed}`);
   console.log(`  BTC/USD feed:          ${btcUsd}`);
   console.log(`  Admin:                 ${admin}`);
+  // Internal audit M2: a revoked buyer vault's unvested SRX goes here, fixed at deployment.
+  const vaultRevokeRecipient = process.env[`TREASURY_${net.toUpperCase()}`] || WALLETS.treasury;
+  if (!vaultRevokeRecipient) throw new Error("No treasury address (TREASURY_<NET> or WALLET_TREASURY) for vaultRevokeRecipient. Nothing was deployed.");
+  console.log(`  Vault revoke recipient: ${vaultRevokeRecipient}`);
 
   const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
   const presale = await PreSaleRound.deploy(
@@ -214,7 +225,8 @@ async function main() {
     HARD_CAP_SRX,
     SRX_PRICE_USD_8DEC,
     FLAT_BONUS_ENABLED,
-    FLAT_BONUS_BPS
+    FLAT_BONUS_BPS,
+    vaultRevokeRecipient
   );
   await presale.waitForDeployment();
   const presaleAddress = await presale.getAddress();
@@ -274,11 +286,9 @@ async function main() {
        SRX_TOKEN_${net.toUpperCase()}=${tokenAddress}
        PRESALE_ROUND_${net.toUpperCase()}=${presaleAddress}
 
-  2. Fund the PreSaleRound with SRX tokens.
-     On testnet: call genesis(presaleAddress) on the SRXToken as admin.
-     On mainnet: OPEN DECISION (PSR-03) — the funding source and which chain(s)
-     carry the round are not settled. The cap is per contract, so a round on two
-     chains is two caps.
+  2. Funding: nothing to do now. At launch the seed allocation funds the round
+     (PSR-03, settled): close it with finalize() before launch Step 3, and Step 6
+     sends it exactly what it sold. Then run 06b_genesis_vaults.js. On Ethereum only.
 
   3. Approve each buyer once they have passed identity checks and accepted
      their purchase agreement — no one else can buy, on chain or off:

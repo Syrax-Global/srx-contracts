@@ -6,9 +6,12 @@
  * Runs as a pm2 process on any VPS. No third-party automation platform needed.
  *
  * What it does:
- *  1. Polls the SRXToken contract for OFTSent (bridge) events on a configurable
- *     block interval.
- *  2. Reports each bridge transfer to GuardianModule.recordBridgeActivity().
+ *  1. Polls the SRXToken contract for OFTSent (tokens leaving) AND OFTReceived
+ *     (tokens arriving) events on a configurable block interval. ⛔ It used to count
+ *     OFTSent only; the threat the breaker exists for is forged RETURNS to Ethereum,
+ *     which are OFTReceived on the hub (internal audit 16 Oct 2026, CONTROL-08).
+ *  2. Reports each bridge movement, in either direction, to
+ *     GuardianModule.recordBridgeActivity().
  *     The contract accumulates volume on-chain and auto-trips the circuit
  *     breaker if the threshold is exceeded — no trip logic needed here.
  *  3. Posts a Discord alert whenever the circuit breaker trips or stays tripped.
@@ -16,7 +19,8 @@
  *     never double-count or miss blocks.
  *
  * Setup on your VPS:
- *  1. Copy this file to your server (or git pull it)
+ *  1. git pull the repo on your server. This file also needs lib/bridge_events.js beside
+ *     it, so copy the lib folder with it if you copy rather than pull.
  *  2. Create .env in the same directory with the vars below
  *  3. npm install ethers dotenv node-fetch   (if not already installed globally)
  *  4. pm2 start circuit_breaker_monitor.js --name srx-cb-monitor
@@ -42,11 +46,11 @@ const path       = require("path");
 
 // ── ABIs (minimal) ────────────────────────────────────────────────────────────
 
-const OFT_SENT_TOPIC = ethers.id("OFTSent(bytes32,uint32,address,uint256,uint256)");
-
-const OFT_SENT_ABI = [
-  "event OFTSent(bytes32 indexed guid, uint32 dstEid, address indexed fromAddress, uint256 amountSentLD, uint256 amountReceivedLD)",
-];
+// The two event signatures and the per-log -> amount mapping live in lib/bridge_events.js
+// so they can be unit tested without starting the poll loop.
+const {
+  OFT_SENT_TOPIC, OFT_RECEIVED_TOPIC, OFT_EVENTS_ABI, bridgeActivityFromLog,
+} = require("./lib/bridge_events");
 
 const GUARDIAN_ABI = [
   "function recordBridgeActivity(bytes32 moduleId, uint256 amount) external",
@@ -122,7 +126,7 @@ async function scanBlocks(ctx, fromBlock, toBlock) {
 
   const logs = await provider.getLogs({
     address:   tokenAddr,
-    topics:    [OFT_SENT_TOPIC],
+    topics:    [[OFT_SENT_TOPIC, OFT_RECEIVED_TOPIC]], // either event
     fromBlock,
     toBlock,
   });
@@ -130,26 +134,23 @@ async function scanBlocks(ctx, fromBlock, toBlock) {
   if (logs.length === 0) return;
 
   console.log(
-    `[monitor] ${logs.length} OFTSent event(s) in blocks ${fromBlock}–${toBlock}`
+    `[monitor] ${logs.length} OFTSent/OFTReceived event(s) in blocks ${fromBlock}–${toBlock}`
   );
 
   for (const log of logs) {
-    let parsed;
-    try {
-      parsed = tokenIface.parseLog(log);
-    } catch {
-      continue;
-    }
+    const activity = bridgeActivityFromLog(tokenIface, log, tokenAddr);
+    if (!activity) continue;
 
-    const { amountSentLD, dstEid, fromAddress } = parsed.args;
-    const amountFormatted = ethers.formatUnits(amountSentLD, 18);
+    const amountFormatted = ethers.formatUnits(activity.amount, 18);
 
     console.log(
-      `[monitor] Bridge transfer: ${amountFormatted} SRX → EID ${dstEid} from ${fromAddress}`
+      activity.direction === "out"
+        ? `[monitor] Bridge transfer out: ${amountFormatted} SRX → EID ${activity.eid} from ${activity.account}`
+        : `[monitor] Bridge transfer in: ${amountFormatted} SRX ← EID ${activity.eid} to ${activity.account}`
     );
 
     try {
-      const tx      = await guardian.recordBridgeActivity(MODULE_BRIDGE, amountSentLD);
+      const tx      = await guardian.recordBridgeActivity(MODULE_BRIDGE, activity.amount);
       const receipt = await tx.wait();
 
       // Check if this tx tripped the circuit breaker
@@ -255,7 +256,7 @@ async function init() {
 
   const provider   = new ethers.JsonRpcProvider(rpcUrl);
   const cbWallet   = new ethers.Wallet(cbKey, provider);
-  const tokenIface = new ethers.Interface(OFT_SENT_ABI);
+  const tokenIface = new ethers.Interface(OFT_EVENTS_ABI);
   const guardian   = new ethers.Contract(guardianAddr, GUARDIAN_ABI, cbWallet);
 
   const MODULE_BRIDGE = await guardian.MODULE_BRIDGE();

@@ -23,8 +23,10 @@ pragma solidity ^0.8.24;
  * salt makes the record meaningless, which is how a privacy deletion can be
  * honoured on a chain that keeps everything.
  *
- * The same commitment is the `agreementRef` of the buyer's approval in
- * PreSaleRound, which ties a payment to the agreement it was made under.
+ * The same commitment is meant to be the `agreementRef` of the buyer's approval in
+ * PreSaleRound. That link is by procedure and is checked off-chain: PreSaleRound
+ * does not read this registry, so it stores whatever non-zero reference the
+ * presale admin gives it and does not verify that the wallet accepted it here.
  *
  * No admin, no owner, no funds, no upgrade path: nothing here can be changed or
  * taken away once written. An amended agreement is a new commitment.

@@ -1,5 +1,6 @@
 const { expect }  = require("chai");
 const { ethers, upgrades } = require("hardhat");
+const { allocationSource } = require("./helpers/allocationSource");
 const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 /**
@@ -35,20 +36,12 @@ describe("FeeController", function () {
 
     // ── Deploy SRXStaking (UUPS) ──────────────────────────────────────────
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(
-      SRXStaking,
-      [await token.getAddress(), admin.address],
-      { kind: "uups", initializer: "initialize" }
-    );
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
 
     // ── Deploy FeeController (UUPS) ───────────────────────────────────────
     const FeeController = await ethers.getContractFactory("FeeController");
-    const fee = await upgrades.deployProxy(
-      FeeController,
-      [await staking.getAddress(), admin.address],
-      { kind: "uups", initializer: "initialize" }
-    );
+    const fee = await FeeController.deploy(...[await staking.getAddress(), admin.address]);
     await fee.waitForDeployment();
 
     // ── Grant GOVERNANCE_ROLE to governance signer ────────────────────────
@@ -166,10 +159,14 @@ describe("FeeController", function () {
       expect(await fee.calculateFee(bronze.address, PaymentType.Crypto)).to.equal(84n);
     });
 
-    it("applies silver discount on crypto base: 112 × 0.40 = 44 bps", async function () {
+    it("applies silver discount on crypto base: 150 × 0.75 × 0.40 = 45 bps, rounded once", async function () {
       const { fee, silver } = await loadFixture(deployFixture);
-      // base=112, discount=6000, effective = 112*4000/10000 = 44
-      expect(await fee.calculateFee(silver.address, PaymentType.Crypto)).to.equal(44n);
+      // ⛔ This asserted 44: the crypto base was rounded to 112 first (112.5 → 112), then
+      //    112 × 0.40 = 44.8 → 44, losing a basis point. The exact figure is
+      //    150 × 7500 × 4000 / 10^8 = 45 (Slither divide-before-multiply, 7 Oct 2026).
+      expect(await fee.calculateFee(silver.address, PaymentType.Crypto)).to.equal(45n);
+      const [, , shown] = await fee.feeBreakdown(silver.address, PaymentType.Crypto);
+      expect(shown).to.equal(45n); // the breakdown shows the fee actually charged
     });
 
     it("applies 100% gold discount: clamped to the 15 bps floor, not 0", async function () {
@@ -182,31 +179,18 @@ describe("FeeController", function () {
   // ── Fee clamping ───────────────────────────────────────────────────────────
 
   describe("Fee clamping", function () {
-    it("enforces minFeeBps floor when effective fee would be below it", async function () {
-      const { fee, governance, gold } = await loadFixture(deployFixture);
-
-      // Set a floor of 10 bps — gold tier would produce 0, should be clamped to 10
-      await fee.connect(governance).setFeeLimits(10, 500);
-      expect(await fee.calculateFee(gold.address, PaymentType.Fiat)).to.equal(10n);
+    it("a 100% discount pays the fixed 0.15% floor, not zero (REG-54)", async function () {
+      const { fee, gold } = await loadFixture(deployFixture);
+      // gold's tier discount takes the computed fee to 0; the constant floor clamps it to 15.
+      expect(await fee.calculateFee(gold.address, PaymentType.Fiat)).to.equal(15n);
     });
 
-    it("enforces maxFeeBps cap when base rate is set above cap", async function () {
+    it("the base rate can reach the fixed 5% ceiling, and no further (REG-54)", async function () {
       const { fee, governance, stranger } = await loadFixture(deployFixture);
-
-      // Raise max to 1000 bps, raise base to 800 bps
-      await fee.connect(governance).setFeeLimits(0, 1000);
-      await fee.connect(governance).setBaseFeeRate(800);
-
-      // Effective = 800, cap = 1000 → 800 (under cap, normal)
-      expect(await fee.calculateFee(stranger.address, PaymentType.Fiat)).to.equal(800n);
-    });
-
-    it("caps fee at maxFeeBps when effective would exceed it", async function () {
-      const { fee, governance, stranger } = await loadFixture(deployFixture);
-
-      // Lower the cap to 100 bps — base is 150, uncapped effective = 150
-      await fee.connect(governance).setFeeLimits(0, 100);
-      expect(await fee.calculateFee(stranger.address, PaymentType.Fiat)).to.equal(100n);
+      await fee.connect(governance).setBaseFeeRate(500);
+      expect(await fee.calculateFee(stranger.address, PaymentType.Fiat)).to.equal(500n);
+      await expect(fee.connect(governance).setBaseFeeRate(501))
+        .to.be.revertedWithCustomError(fee, "InvalidBps");
     });
   });
 
@@ -247,16 +231,9 @@ describe("FeeController", function () {
         .to.be.revertedWithCustomError(fee, "InvalidBps");
     });
 
-    it("setFeeLimits reverts if min > max", async function () {
-      const { fee, governance } = await loadFixture(deployFixture);
-      await expect(fee.connect(governance).setFeeLimits(500, 100))
-        .to.be.revertedWithCustomError(fee, "InvalidBps");
-    });
-
-    it("setFeeLimits reverts if max > BPS_DENOMINATOR (A4-M-01: cap cannot exceed 100%)", async function () {
-      const { fee, governance } = await loadFixture(deployFixture);
-      await expect(fee.connect(governance).setFeeLimits(0, 10_001))
-        .to.be.revertedWithCustomError(fee, "InvalidBps");
+    it("there is no setFeeLimits: the floor and ceiling are constants (REG-54, supersedes A4-M-01)", async function () {
+      const { fee } = await loadFixture(deployFixture);
+      expect(fee.interface.getFunction("setFeeLimits")).to.equal(null);
     });
 
     it("setStakingContract updates address and emits event", async function () {
@@ -295,22 +272,17 @@ describe("FeeController", function () {
   // ── Pause ──────────────────────────────────────────────────────────────────
 
   describe("Pause behaviour", function () {
-    it("pauses calculateFee when paused", async function () {
+    it("calculateFee and feeBreakdown still answer while paused (external report, 22 Oct 2026)", async function () {
       const { fee, admin, stranger } = await loadFixture(deployFixture);
 
       await fee.connect(admin).pause();
-      await expect(
-        fee.calculateFee(stranger.address, PaymentType.Fiat)
-      ).to.be.revertedWithCustomError(fee, "EnforcedPause");
-    });
-
-    it("pauses feeBreakdown when paused", async function () {
-      const { fee, admin, stranger } = await loadFixture(deployFixture);
-
-      await fee.connect(admin).pause();
-      await expect(
-        fee.feeBreakdown(stranger.address, PaymentType.Fiat)
-      ).to.be.revertedWithCustomError(fee, "EnforcedPause");
+      expect(await fee.paused()).to.equal(true);
+      expect(await fee.calculateFee(stranger.address, PaymentType.Fiat)).to.equal(150n);
+      expect(await fee.calculateFee(stranger.address, PaymentType.SRX)).to.equal(0n);
+      const b = await fee.feeBreakdown(stranger.address, PaymentType.SRX);
+      expect(b.effectiveBps).to.equal(0n);
+      expect(b.tierName).to.equal("SRX");
+      expect((await fee.feeBreakdown(stranger.address, PaymentType.Fiat)).effectiveBps).to.equal(150n);
     });
 
     it("unpause restores fee calculation", async function () {

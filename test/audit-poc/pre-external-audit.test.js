@@ -7,6 +7,7 @@
 // IDs match the sweep's record (REMEDIATION.md, "Pre-external-audit sweep").
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
+const { allocationSource } = require("../helpers/allocationSource");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 const { approveBuyers } = require("../helpers/buyers");
 
@@ -27,7 +28,7 @@ describe("PSR-01 — payment tokens are valued by their real decimals", function
   const CAP = E(300_000_000);      // Genesis: 300M SRX
 
   async function round({ stableDecimals, feedDecimals = 8 }) {
-    const [admin, buyer] = await ethers.getSigners();
+    const [admin, buyer, treasury] = await ethers.getSigners();
     const { token } = await srxToken(admin);
     const M = await ethers.getContractFactory("MockERC20");
     const usdc = await M.deploy("USD Coin", "USDC", stableDecimals);
@@ -40,7 +41,7 @@ describe("PSR-01 — payment tokens are valued by their real decimals", function
     const R = await ethers.getContractFactory("PreSaleRound");
     const r = await R.deploy(
       await token.getAddress(), await usdc.getAddress(), await usdt.getAddress(), await wbtc.getAddress(),
-      await ethFeed.getAddress(), await btcFeed.getAddress(), admin.address, CAP, PRICE, true, 5_000n,
+      await ethFeed.getAddress(), await btcFeed.getAddress(), admin.address, CAP, PRICE, true, 5_000n, treasury.address,
     );
     await token.connect(admin).transfer(await r.getAddress(), CAP);
     await approveBuyers(r, admin, [buyer]);
@@ -97,10 +98,7 @@ async function ssfFixture() {
   const [admin, guardian, a, b, target] = await ethers.getSigners();
   const { token } = await srxToken(admin);
   const SSF = await ethers.getContractFactory("StabilisationFund");
-  const ssf = await upgrades.deployProxy(
-    SSF, [await token.getAddress(), admin.address, 3_000, 7_000, 30 * 86400],
-    { kind: "uups", initializer: "initialize" },
-  );
+  const ssf = await SSF.deploy(...[await token.getAddress(), admin.address, 3_000, 7_000, 30 * 86400, ethers.parseUnits("10000000", 18), await allocationSource(token, ethers.parseUnits("1500000000", 18))]);
   await ssf.connect(admin).grantRole(await ssf.GUARDIAN_ROLE(), guardian.address);
   await ssf.connect(admin).setDeployTarget(target.address, true);
   const addr = await ssf.getAddress();
@@ -163,7 +161,7 @@ async function stakingFixture() {
   const [admin, u1, u2] = await ethers.getSigners();
   const { token } = await srxToken(admin);
   const S = await ethers.getContractFactory("SRXStaking");
-  const staking = await upgrades.deployProxy(S, [await token.getAddress(), admin.address], { kind: "uups" });
+  const staking = await S.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
   const sa = await staking.getAddress();
   for (const u of [u1, u2]) {
     await token.connect(admin).transfer(u.address, E(10_000_000));
@@ -172,26 +170,8 @@ async function stakingFixture() {
   return { admin, u1, u2, token, staking, sa };
 }
 
-describe("STK-H2 — the bonus stream never promises more than it holds", function () {
-  it("a routine bonus-rate reset keeps total bonus within the funded pool", async function () {
-    const { admin, u1, u2, staking, sa } = await stakingFixture();
-    const M = await ethers.getContractFactory("MockERC20");
-    const usdc = await M.deploy("USD Coin", "USDC", 6);
-    await staking.connect(admin).setBonusRewardToken(await usdc.getAddress());
-    await usdc.mint(sa, 1_000n * 10n ** 6n);
-    await staking.connect(admin).notifyBonusRewardAmount(1_000n * 10n ** 6n);
-    await staking.connect(u1).lock(E(1_000), 7 * 86400);
-    await staking.connect(u2).lock(E(1_000), 7 * 86400);
-    await staking.connect(admin).setBonusRewardRate(10n ** 6n);
-
-    await time.increase(500);
-    await staking.connect(admin).setBonusRewardRate(10n ** 6n);
-    await time.increase(1_000);
-
-    const owed = (await staking.earnedBonus(u1.address)) + (await staking.earnedBonus(u2.address));
-    expect(owed).to.be.lessThanOrEqual(1_000n * 10n ** 6n);
-  });
-});
+// STK-H2 (the bonus stream over-promising its pool) is moot: REG-50 removed the bonus
+// stream from SRXStaking on 11 Oct 2026. See test/REG50.FixedRewardPools.test.js.
 
 describe("STK-M1 — rounding can never wrap the reward liability and freeze emissions", function () {
   it("after many global updates and a full exit, the liability stays within the pool", async function () {
@@ -215,7 +195,7 @@ describe("STK-M1 — rounding can never wrap the reward liability and freeze emi
 
 // ── Batch 2: guardian, airdrop, migrator, presale admin paths, bridge ownership ──
 async function presale({ flat = true, bonus = 5_000n } = {}) {
-  const [admin, i1, i2] = await ethers.getSigners();
+  const [admin, i1, i2, treasury] = await ethers.getSigners();
   const { token } = await srxToken(admin);
   const M = await ethers.getContractFactory("MockERC20");
   const usdc = await M.deploy("USD Coin", "USDC", 6);
@@ -224,7 +204,7 @@ async function presale({ flat = true, bonus = 5_000n } = {}) {
   const R = await ethers.getContractFactory("PreSaleRound");
   const r = await R.deploy(
     await token.getAddress(), await usdc.getAddress(), ethers.ZeroAddress, ethers.ZeroAddress,
-    await ethFeed.getAddress(), ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, flat, flat ? bonus : 0n,
+    await ethFeed.getAddress(), ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, flat, flat ? bonus : 0n, treasury.address,
   );
   await token.connect(admin).transfer(await r.getAddress(), E(300_000_000));
   await approveBuyers(r, admin, [i1, i2]);
@@ -335,7 +315,7 @@ describe("N-02 — bridge ownership is two-step and cannot be renounced", functi
     await expect(token.connect(next).renounceOwnership())
       .to.be.revertedWithCustomError(token, "OwnershipCannotBeRenounced");
     const N = await ethers.getContractFactory("SRXOFTNative");
-    const native = await N.deploy(await ep.getAddress(), admin.address, 40161);
+    const native = await N.deploy(await ep.getAddress(), admin.address, 40161, admin.address);
     await expect(native.connect(admin).renounceOwnership())
       .to.be.revertedWithCustomError(native, "OwnershipCannotBeRenounced");
   });
@@ -372,6 +352,7 @@ describe("N-01 — the bridge cannot create SRX beyond what Ethereum sent out", 
                  extraOptions: "0x", composeMsg: "0x", oftCmd: "0x" };
     await token.connect(admin).send(sp, { nativeFee: 0n, lzTokenFee: 0n }, admin.address);
     expect(await token.outstandingByEid(SPOKE)).to.equal(E(4_000_000_000));
+    await token.connect(admin).setInboundLimit(SPOKE, E(4_000_000_000)); // returns fail closed (disclosure A)
 
     // A forged return of more than was sent is refused...
     await expect(token.connect(epSigner).lzReceive(origin(2), ethers.ZeroHash, msgTo(attacker.address, E(4_000_000_001)), ethers.ZeroAddress, "0x"))
@@ -387,14 +368,15 @@ describe("N-01 — the bridge cannot create SRX beyond what Ethereum sent out", 
     const Ep = await ethers.getContractFactory("MockLZEndpoint");
     const ep = await Ep.deploy(SPOKE);
     const N = await ethers.getContractFactory("SRXOFTNative");
-    const native = await N.deploy(await ep.getAddress(), admin.address, HUB);
+    const native = await N.deploy(await ep.getAddress(), admin.address, HUB, admin.address);
     const epSigner = await impersonate(await ep.getAddress());
     const hubPeer = b32(admin.address), otherPeer = b32(user.address);
     await native.connect(admin).setPeer(HUB, hubPeer);
-    await native.connect(admin).setPeer(OTHER, otherPeer);
+    // Disclosure A (7 Oct 2026): a peer for any chain but the hub is now refused outright.
+    await expect(native.connect(admin).setPeer(OTHER, otherPeer)).to.be.revertedWithCustomError(native, "NotHub");
 
     await expect(native.connect(epSigner).lzReceive({ srcEid: OTHER, sender: otherPeer, nonce: 1 }, ethers.ZeroHash,
-      msgTo(user.address, E(10)), ethers.ZeroAddress, "0x")).to.be.revertedWithCustomError(native, "NotHub");
+      msgTo(user.address, E(10)), ethers.ZeroAddress, "0x")).to.be.reverted;
 
     await native.connect(epSigner).lzReceive({ srcEid: HUB, sender: hubPeer, nonce: 1 }, ethers.ZeroHash,
       msgTo(user.address, E(10)), ethers.ZeroAddress, "0x");
@@ -542,13 +524,13 @@ describe("PSR-10 — purchases can be halted without ending the round", function
 
 describe("PSR-12 — oracle and payment-token details", function () {
   it("the price views apply the purchase checks: a negative or future-dated answer is refused", async function () {
-    const [admin] = await ethers.getSigners();
+    const [admin, treasury] = await ethers.getSigners();
     const { token } = await srxToken(admin);
     const F = await ethers.getContractFactory("MockChainlinkFeed");
     const feed = await F.deploy(2_500n * 10n ** 8n);
     const R = await ethers.getContractFactory("PreSaleRound");
     const r = await R.deploy(token.target, ethers.ZeroAddress, ethers.ZeroAddress, ethers.ZeroAddress,
-      feed.target, ethers.ZeroAddress, admin.address, E(1_000_000), 1_250_000n, true, 5_000n);
+      feed.target, ethers.ZeroAddress, admin.address, E(1_000_000), 1_250_000n, true, 5_000n, treasury.address);
     await feed.setPrice(-1);
     // Before the fix currentEthPrice() returned 2^256 - 1 for this.
     await expect(r.currentEthPrice()).to.be.revertedWithCustomError(r, "InvalidOraclePrice");
@@ -577,13 +559,13 @@ describe("PSR-12 — oracle and payment-token details", function () {
   });
 
   it("a fee-charging USDT is credited at what arrived, not the nominal amount", async function () {
-    const [admin, i1] = await ethers.getSigners();
+    const [admin, i1, treasury] = await ethers.getSigners();
     const { token } = await srxToken(admin);
     const Fee = await ethers.getContractFactory("MockFeeOnTransferERC20");
     const usdt = await Fee.deploy(6, 100); // 1% fee
     const R = await ethers.getContractFactory("PreSaleRound");
     const r = await R.deploy(token.target, ethers.ZeroAddress, usdt.target, ethers.ZeroAddress,
-      ethers.ZeroAddress, ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, true, 5_000n);
+      ethers.ZeroAddress, ethers.ZeroAddress, admin.address, E(300_000_000), 1_250_000n, true, 5_000n, treasury.address);
     await token.connect(admin).transfer(r.target, E(300_000_000));
     await approveBuyers(r, admin, [i1]);
     await usdt.mint(i1.address, U6(10_000));
@@ -596,12 +578,14 @@ describe("PSR-12 — oracle and payment-token details", function () {
 });
 
 describe("G-I2 — changing the fee floor and ceiling leaves a public record", function () {
-  it("setFeeLimits emits FeeLimitsUpdated with the old and new values", async function () {
+  // Superseded by REG-54 (12 Oct 2026): the floor and ceiling are constants, so there is no
+  // change to record. The record G-I2 asked for is now the code itself.
+  it("there is no setter and no FeeLimitsUpdated event; the limits are constants", async function () {
     const [admin, staking] = await ethers.getSigners();
     const FC = await ethers.getContractFactory("FeeController");
-    const fc = await upgrades.deployProxy(FC, [staking.address, admin.address], { kind: "uups" });
-    const [oldMin, oldMax] = [await fc.minFeeBps(), await fc.maxFeeBps()];
-    await expect(fc.connect(admin).setFeeLimits(0n, 500n))
-      .to.emit(fc, "FeeLimitsUpdated").withArgs(oldMin, oldMax, 0n, 500n);
+    const fc = await FC.deploy(...[staking.address, admin.address]);
+    expect(fc.interface.getFunction("setFeeLimits")).to.equal(null);
+    expect(fc.interface.getEvent("FeeLimitsUpdated")).to.equal(null);
+    expect([await fc.minFeeBps(), await fc.maxFeeBps()]).to.deep.equal([15n, 500n]);
   });
 });

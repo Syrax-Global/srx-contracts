@@ -259,9 +259,12 @@ describe("GuardianModule", function () {
 
       await guardian_module.connect(guardian).pauseAll("system-wide incident");
 
-      for (const stub of [tokenStub, bridgeStub, stakingStub, feeStub, treasuryStub, ssfStub]) {
+      for (const stub of [tokenStub, stakingStub, feeStub, treasuryStub, ssfStub]) {
         expect(await stub.paused()).to.be.true;
       }
+      // MODULE_BRIDGE drives the bridge-only stop, never the target's pause().
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused()).to.be.false;
     });
 
     // PD-F11 said pauseAll "omits the Stabilisation Fund". The contract does NOT
@@ -403,9 +406,10 @@ describe("GuardianModule", function () {
       await guardian_module.connect(guardian).pauseAll("emergency pause");
       await guardian_module.connect(governance).emergencyUnpauseAll("governance restore");
 
-      for (const stub of [tokenStub, bridgeStub, stakingStub, feeStub, treasuryStub]) {
+      for (const stub of [tokenStub, stakingStub, feeStub, treasuryStub]) {
         expect(await stub.paused()).to.be.false;
       }
+      expect(await bridgeStub.bridgePaused()).to.be.false;
     });
 
     it("skips modules that are already unpaused", async function () {
@@ -523,7 +527,7 @@ describe("GuardianModule", function () {
         MODULE_BRIDGE, VOLUME_THRESHOLD - 1n
       );
 
-      expect(await bridgeStub.paused()).to.be.false;
+      expect(await bridgeStub.bridgePaused()).to.be.false;
       const [tripped] = await guardian_module.getCircuitBreakerStatus(MODULE_BRIDGE);
       expect(tripped).to.be.false;
     });
@@ -536,7 +540,8 @@ describe("GuardianModule", function () {
         MODULE_BRIDGE, VOLUME_THRESHOLD
       );
 
-      expect(await bridgeStub.paused()).to.be.true;
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused(), "a trip must never pause ordinary transfers").to.be.false;
       const [tripped] = await guardian_module.getCircuitBreakerStatus(MODULE_BRIDGE);
       expect(tripped).to.be.true;
     });
@@ -551,16 +556,32 @@ describe("GuardianModule", function () {
         .withArgs(MODULE_BRIDGE, VOLUME_THRESHOLD, VOLUME_THRESHOLD, await ethers.provider.getBlock("latest").then(b => b.timestamp + 1));
     });
 
-    it("accumulates volume across multiple calls in same window", async function () {
+    it("accumulates volume across calls moments apart", async function () {
       const { guardian_module, circuitBreaker, bridgeStub, MODULE_BRIDGE } =
         await withCircuitBreaker();
 
       const half = VOLUME_THRESHOLD / 2n;
       await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, half);
-      expect(await bridgeStub.paused()).to.be.false;
+      expect(await bridgeStub.bridgePaused()).to.be.false;
 
-      await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, half);
-      expect(await bridgeStub.paused()).to.be.true;
+      // A draining bucket: a sliver drains between blocks, so the second report is a
+      // little over half.
+      await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, half + VOLUME_THRESHOLD / 100n);
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused(), "a trip must never pause ordinary transfers").to.be.false;
+    });
+
+    it("trips on a burst straddling what used to be a window reset (draining bucket)", async function () {
+      // ⛔ With fixed windows, 90% just before a reset and 90% just after never tripped
+      //    (internal review, 7 Oct 2026).
+      const { guardian_module, circuitBreaker, bridgeStub, MODULE_BRIDGE } =
+        await withCircuitBreaker();
+      await time.increase(Number(WINDOW_DURATION) - 5);
+      await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, (VOLUME_THRESHOLD * 9n) / 10n);
+      await time.increase(6);
+      await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, (VOLUME_THRESHOLD * 9n) / 10n);
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused(), "a trip must never pause ordinary transfers").to.be.false;
     });
 
     it("resets volume after window expires", async function () {
@@ -571,7 +592,7 @@ describe("GuardianModule", function () {
       await guardian_module.connect(circuitBreaker).recordBridgeActivity(
         MODULE_BRIDGE, (VOLUME_THRESHOLD * 9n) / 10n
       );
-      expect(await bridgeStub.paused()).to.be.false;
+      expect(await bridgeStub.bridgePaused()).to.be.false;
 
       // Advance past window — volume resets
       await time.increase(Number(WINDOW_DURATION) + 1);
@@ -580,7 +601,7 @@ describe("GuardianModule", function () {
       await guardian_module.connect(circuitBreaker).recordBridgeActivity(
         MODULE_BRIDGE, (VOLUME_THRESHOLD * 9n) / 10n
       );
-      expect(await bridgeStub.paused()).to.be.false;
+      expect(await bridgeStub.bridgePaused()).to.be.false;
     });
 
     it("governance can reset a tripped circuit breaker", async function () {
@@ -623,9 +644,10 @@ describe("GuardianModule", function () {
       ).to.be.revertedWithCustomError(guardian_module, "CircuitBreakerAlreadyTripped");
     });
 
-    it("auto-resets tripped flag when window expires (A4-M-02)", async function () {
-      // Principle: a volume spike in window A should not permanently block window B.
-      // The fix rolls the window BEFORE checking tripped, clearing the flag on new window.
+    it("a trip lasts until governance resets it, however much time passes (G-L1, replaces A4-M-02)", async function () {
+      // ⛔ A4-M-02 cleared the trip when a new window began. unpauseModule() checks only
+      //    the trip, so the GUARDIAN could then reopen what only governance may reopen
+      //    (internal review, 7 Oct 2026). Now reports are refused until governance resets.
       const { guardian_module, circuitBreaker, governance, MODULE_BRIDGE } =
         await withCircuitBreaker();
 
@@ -634,21 +656,48 @@ describe("GuardianModule", function () {
       let [tripped] = await guardian_module.getCircuitBreakerStatus(MODULE_BRIDGE);
       expect(tripped).to.be.true;
 
-      // Governance unpauses the bridge but does NOT call resetCircuitBreaker()
-      await guardian_module.connect(governance).governanceUnpause(MODULE_BRIDGE, "market stable");
-
+      // Time alone never clears it (sweep 22 Oct: governance reopening the module now also
+      // resets the breaker, so that path is tested separately below).
       // Advance past the window boundary (1 hour + 1 second)
       const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
       await time.increase(Number(WINDOW_DURATION) + 1);
 
-      // Recording activity in the new window should succeed (auto-reset) not revert
+      // Still tripped: a routine report is refused and clears nothing.
+      await expect(
+        guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, 1n)
+      ).to.be.revertedWithCustomError(guardian_module, "CircuitBreakerAlreadyTripped");
+      [tripped] = await guardian_module.getCircuitBreakerStatus(MODULE_BRIDGE);
+      expect(tripped).to.be.true;
+
+      // Governance resets it; reporting then resumes.
+      await guardian_module.connect(governance).resetCircuitBreaker(MODULE_BRIDGE);
       await expect(
         guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, 1n)
       ).to.not.be.reverted;
+    });
 
-      // The tripped flag should now be false (new window)
-      [tripped] = await guardian_module.getCircuitBreakerStatus(MODULE_BRIDGE);
-      expect(tripped).to.be.false;
+    it("the reported G-L1 bypass is closed: after a trip and a new window, the guardian still cannot unpause", async function () {
+      const { guardian_module, circuitBreaker, guardian, governance, bridgeStub, MODULE_BRIDGE } =
+        await withCircuitBreaker();
+      await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, VOLUME_THRESHOLD);
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused(), "a trip must never pause ordinary transfers").to.be.false;
+      await time.increase(Number(WINDOW_DURATION) * 2);
+      await expect(guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, 1n)).to.be.reverted;
+      await expect(guardian_module.connect(guardian).unpauseModule(MODULE_BRIDGE, "reopen"))
+        .to.be.revertedWithCustomError(guardian_module, "CircuitBreakerAlreadyTripped");
+      // control: governance can
+      await guardian_module.connect(governance).resetCircuitBreaker(MODULE_BRIDGE);
+      await guardian_module.connect(governance).governanceUnpause(MODULE_BRIDGE, "governance decision");
+      expect(await bridgeStub.bridgePaused()).to.be.false;
+    });
+
+    it("the breaker stops at the guardian's sunset: no trip after expiry", async function () {
+      const { guardian_module, circuitBreaker, bridgeStub, MODULE_BRIDGE } = await withCircuitBreaker();
+      await time.increaseTo(Number(await guardian_module.effectiveSunset()) + 1);
+      await expect(guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, VOLUME_THRESHOLD))
+        .to.be.revertedWithCustomError(guardian_module, "GuardianExpired");
+      expect(await bridgeStub.bridgePaused()).to.be.false;
     });
 
     it("governance must separately unpause after reset", async function () {
@@ -656,14 +705,16 @@ describe("GuardianModule", function () {
         await withCircuitBreaker();
 
       await guardian_module.connect(circuitBreaker).recordBridgeActivity(MODULE_BRIDGE, VOLUME_THRESHOLD);
-      expect(await bridgeStub.paused()).to.be.true;
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused(), "a trip must never pause ordinary transfers").to.be.false;
 
       await guardian_module.connect(governance).resetCircuitBreaker(MODULE_BRIDGE);
       // Circuit breaker reset but module still paused
-      expect(await bridgeStub.paused()).to.be.true;
+      expect(await bridgeStub.bridgePaused()).to.be.true;
+      expect(await bridgeStub.paused(), "a trip must never pause ordinary transfers").to.be.false;
 
       await guardian_module.connect(governance).governanceUnpause(MODULE_BRIDGE, "safe to resume");
-      expect(await bridgeStub.paused()).to.be.false;
+      expect(await bridgeStub.bridgePaused()).to.be.false;
     });
   });
 

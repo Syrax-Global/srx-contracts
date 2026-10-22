@@ -61,7 +61,8 @@ describe("TGEDistributor", function () {
         admin.address,            // admin (can call triggerTGE + revoke)
         BigInt(cliffDays)   * 86400n,
         BigInt(vestingDays) * 86400n,
-        BigInt(tgeBps)
+        BigInt(tgeBps),
+        treasuryWallet.address    // revokeRecipient (internal audit M2)
       );
       await vault.waitForDeployment();
       return vault;

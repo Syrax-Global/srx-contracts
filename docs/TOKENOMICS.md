@@ -6,7 +6,7 @@
 > SRX has not been offered, sold or distributed. This describes the contracts and their configuration; it is
 > not an offer, and it makes no statement about price or value.
 
-**Maximum supply:** 10,000,000,000 SRX, minted once at genesis. No further SRX can be minted.
+**Maximum supply:** 10,000,000,000 SRX, minted once at genesis. No function creates new supply afterwards: SRX sent to another chain is burned on Ethereum and can be re-credited there only up to what was sent. The only permanent reductions are burns.
 
 ## Allocation
 
@@ -14,7 +14,7 @@
 |---|---:|---:|---|---|
 | Founders | 1,000,000,000 | 10.00% | Vesting contract | 0% at launch; held 365 days, then released evenly over 1095 days |
 | Core team | 600,000,000 | 6.00% | Vesting contract | 0% at launch; held 182 days, then released evenly over 730 days |
-| Seed investors | 400,000,000 | 4.00% | Vesting contract | 0% at launch; held 273 days, then released evenly over 730 days |
+| Seed investors | 400,000,000 | 4.00% | Vesting contracts, each on this schedule | 0% at launch; held 273 days, then released evenly over 730 days |
 | Presale: launch tranche | 250,000,000 | 2.50% | Multi-signature wallet | Transferable at launch |
 | Presale: vesting | 1,150,000,000 | 11.50% | Vesting contract | 0% at launch; held 30 days, then released evenly over 180 days |
 | Ecosystem fund | 1,300,000,000 | 13.00% | Vesting contract | 0% at launch; held 30 days, then released evenly over 1460 days |

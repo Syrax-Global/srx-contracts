@@ -12,7 +12,7 @@
 | D2-T2 | Deployer key compromise (single hot EOA key in `.env`) | Total launch control: genesis, all initial roles | Hardware-wallet signing (below) |
 | D2-T3 | Genesis is multi-tx; reorg/interruption between steps | 10B SRX stranded in TGEDistributor mid-sequence | Recovery procedure (below) |
 | D2-T4 | Wrong constructor args (LZ endpoint / oracle feed per chain) | Bridge or presale wired to a wrong/hostile contract | Per-chain arg manifest + verification |
-| D2-T5 | Stale role-migration script run by mistake | Upgrade authority left on admin/deployer | Deprecate `pre_mainnet_roles.js` (below) |
+| D2-T5 | Stale role-migration script run by mistake | Governance and spend authority left on admin/deployer | Deprecate `pre_mainnet_roles.js` (below) |
 | D2-T6 | Unverified bytecode on explorer | Users can't trust the contract; phishing surface | Etherscan source-match gate |
 
 ---
@@ -68,21 +68,39 @@ every initial role. **For mainnet, do NOT use a raw private key.**
   except for RPC). Treat it as a key-ceremony environment (see `KEY_MANAGEMENT_CEREMONY.md`).
 - `DEPLOYER_PRIVATE_KEY` stays testnet-only and must never hold mainnet value.
 
+### ⛔ The testnet deployer is never a mainnet key (Security ruling, 12 Oct 2026)
+
+`0x049fea6abBbc88487Ca14A7910d37E1feCdb9236`, the Sepolia / BNB-testnet deployer that holds the
+testnet SRX owner, admin and governance roles, is **never** a mainnet deployer, owner, admin or
+gas payer, on any chain.
+- Mainnet keys are generated fresh inside the custody model, with the Safe as admin
+  (`Blockchain/MAINNET_PROVISIONING_PLAN.md` §3.3; board d609496f).
+- No public-facing service (faucet, relayer, backend) ever holds an owner or admin key.
+- The testnet deployer's roles move in the DEP-01 rehearsal (board b772c558) and are then
+  renounced.
+- A mainnet run of any deploy script with this address as signer, admin or any `WALLET_*`
+  value is a stop: abort and report it, never "just this once".
+
 ---
 
 ## D2-3 — Genesis atomicity & interruption recovery (closes D2-T3)
 
-`06_execute_tge.js` runs four separate transactions: `genesis` → `distribute` → `triggerTGE`(×5) →
-`notifyRewardAmount`. Between `genesis` and `distribute`, the TGEDistributor holds the entire 10B
-supply. If the sequence is interrupted (reorg, gas spike, RPC drop, machine failure):
+`06_execute_tge.js` runs separate transactions, in order: `setAllocations` → `genesis` →
+`distribute` → two Timelock `executeBatch` calls (declare every vault's grant, then start every
+vesting clock, for all 6 vaults) → `notifyRewardAmount`. On mainnet the first five are queued
+as one Safe batch (DEP-01) and `notifyRewardAmount` follows once the Safe has executed it.
+Between `genesis` and `distribute`, the TGEDistributor holds the entire 10B supply. If the
+sequence is interrupted (reorg, gas spike, RPC drop, machine failure):
 
 - **The state is recoverable, not lost.** `genesis` is one-shot (re-running aborts on
-  `genesisComplete`). `distribute` is one-shot (`distributed` flag). `triggerTGE` is per-vault
-  one-shot. The script's pre-flight checks already detect each completed step and refuse to repeat.
+  `genesisComplete`). `distribute` is one-shot (`distributed` flag). The vault setup runs as
+  Timelock operations that are atomic and execute once. The script's pre-flight checks already
+  detect each completed step and refuse to repeat.
 - **Recovery:** re-run `06_execute_tge.js`; its pre-flight skips completed steps and resumes. The
-  TGEDistributor holding 10B mid-sequence is safe because `distribute()` is `onlyAdmin` and
-  `recoverToken()` provides an admin escape hatch if distribution must be re-routed (only after
-  `distributed`).
+  TGEDistributor holding 10B mid-sequence is safe because `distribute()` is `onlyAdmin`. If
+  distribution must be re-routed, the way is to correct the list with `setAllocations()`, which
+  can be repeated until `distribute()` has run. `recoverToken()` is no escape hatch before
+  that: it works only after `distributed`.
 - **Deploy during low network congestion**, with adequate gas, on a finalized-block RPC, and confirm
   each tx to finality before the next. Do NOT batch-broadcast.
 - After `genesis`, **immediately verify** `distributorBal == MAX_SUPPLY` (the script does this) before
@@ -107,16 +125,19 @@ bridge to a hostile contract; a wrong feed mis-prices the entire presale. The pr
 ## D2-5 — Deprecate the stale role script (closes D2-T5)
 
 There are **two** role-migration scripts and they disagree:
-- `scripts/ops/migrate_roles.js` (Round 4) — current. Handles `UPGRADER_ROLE` (the SC-TRUST-001
-  split), Safe-batch generation, full topology. **This is the canonical tool.**
+- `scripts/ops/migrate_roles.js` (Round 4) — current. Handles the full role set
+  (`GOVERNANCE_ROLE`, `SPENDER_ROLE`, `PAUSER_ROLE`, `BURN_ROLE`; the Safe keeps `WIND_DOWN_ROLE` on
+  SRXStaking and StabilisationFund; there is no `UPGRADER_ROLE`, REG-53), Safe-batch generation, full
+  topology. **This is the canonical tool.**
 - `scripts/ops/pre_mainnet_roles.js` (legacy) — **stale.** It migrates only `GOVERNANCE_ROLE` and
-  `PROPOSER_ROLE`; it predates the `UPGRADER_ROLE` split and does NOT migrate upgrade authority or
-  `DEFAULT_ADMIN_ROLE`/`PAUSER_ROLE`. Running it and assuming "roles are hardened" would leave
-  **upgrade authority on the admin/deployer** — exactly the SC-TRUST-001 hole Round 4 closed.
+  `PROPOSER_ROLE`; it predates the Round 4 role split and does NOT migrate `SPENDER_ROLE`,
+  `DEFAULT_ADMIN_ROLE` or `PAUSER_ROLE`. Running it and assuming "roles are hardened" would leave
+  **control of the treasury and of role management on the admin/deployer** — exactly the
+  SC-TRUST-001 hole Round 4 closed.
 
-**Action:** add a loud deprecation banner to `pre_mainnet_roles.js` pointing to `migrate_roles.js`
-+ `verify_roles.js`, or delete it. The role end-state is owned solely by `migrate_roles.js` →
-`verify_roles.js`. Never trust a "roles done" claim that wasn't `verify_roles.js`-green.
+**Done (R7-12, 7 Oct 2026):** `pre_mainnet_roles.js` now refuses to run and points to
+`migrate_roles.js` + `verify_roles.js`. The role end-state is owned solely by `migrate_roles.js`
+→ `verify_roles.js`. Never trust a "roles done" claim that wasn't `verify_roles.js`-green.
 
 ---
 

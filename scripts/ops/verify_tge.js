@@ -8,6 +8,8 @@
 const { ethers, network } = require("hardhat");
 require("dotenv").config();
 const { ALLOCATIONS, VESTING, TGE_PLAN, walletFor, launchFloat } = require("../deploy/00_config");
+const { launchPlan, readGenesisSold } = require("../deploy/lib/genesis_seed");
+const { walletCapConflicts, missingExemptions } = require("../deploy/lib/launch_checks");
 
 function env(key) {
   const val = process.env[key];
@@ -34,6 +36,11 @@ async function main() {
   for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
     vaults[row.label] = env(`${row.vaultEnv}_${NET}${suffix}`);
   }
+
+  // The seed allocation is split between the seed vault and the Genesis round by what
+  // the round sold (lib/genesis_seed.js); every amount below comes from this split.
+  const genesis = await readGenesisSold({ networkName: network.name, provider: ethers.provider, tokenAddress: await token.getAddress() });
+  const { plan, allocations: AMOUNTS } = launchPlan(genesis.sold);
 
   if (suffix) console.log(`ℹ️  Using TGE test stack addresses (${NET}_TGE)\n`);
   else        console.log(`ℹ️  Using standard ${NET} addresses\n`);
@@ -79,10 +86,12 @@ async function main() {
     Treasury: env(`TREASURY_${NET}${suffix}`),
     StabilisationFund: await ssf.getAddress(),
   };
-  const checks = TGE_PLAN.filter((r) => r.kind !== "vault").map((row) => ({
+  // The Genesis contract is checked in its own section below: by now it has passed
+  // everything it received into its buyers' vaults (06b_genesis_vaults.js).
+  const checks = plan.filter((r) => r.kind !== "vault" && r.label !== "Genesis").map((row) => ({
     label: row.label,
     addr: row.kind === "wallet" ? walletFor(row.wallet, network.name) : contractAddr[row.label],
-    expected: ethers.formatUnits(ALLOCATIONS[row.allocation], 18).replace(/\.0$/, ""),
+    expected: ethers.formatUnits(AMOUNTS[row.allocation], 18).replace(/\.0$/, ""),
   }));
   checks.push({ label: "TGEDistributor", addr: env(`TGE_DISTRIBUTOR_${NET}${suffix}`), expected: "0" });
 
@@ -105,7 +114,7 @@ async function main() {
     const vault     = await ethers.getContractAt("VestingVault", addr);
     const bal       = await token.balanceOf(addr);
     const triggered = await vault.tgeTriggered();
-    const expected  = ALLOCATIONS[row.allocation];
+    const expected  = AMOUNTS[row.allocation];
     const balOk     = bal === expected;
     const tsStr     = triggered
       ? new Date(Number(await vault.tgeTimestamp()) * 1000).toISOString().slice(0, 19) + "Z"
@@ -129,13 +138,49 @@ async function main() {
     }
   }
 
+  // ── The Genesis round, funded from the seed allocation ──────────────────────
+  // Every buyer's vault exists, runs on the seed schedule and holds what they are
+  // owed; the Genesis contract itself holds nothing (anything it held could leave
+  // unlocked through recoverSRX). Seed vault + buyers' vaults = the seed allocation.
+  if (genesis.sold > 0n) {
+    console.log("\n── Genesis round (funded from the seed allocation) ────────");
+    const round = await ethers.getContractAt("PreSaleRound", genesis.address);
+    const seed = VESTING.seedInvestors;
+    let inVaults = 0n, count = 0;
+    for (const investor of await round.getInvestorList()) {
+      const addr = await round.getVault(investor);
+      if (!check(addr !== ethers.ZeroAddress, `Genesis buyer ${investor} has no vault (run 06b_genesis_vaults.js)`)) continue;
+      const vault = await ethers.getContractAt("VestingVault", addr);
+      const [ben, cliff, vest, bps, started, bal, inv] = await Promise.all([
+        vault.beneficiary(), vault.cliffDuration(), vault.vestingDuration(), vault.tgeUnlockBps(),
+        vault.tgeTriggered(), token.balanceOf(addr), round.investors(investor),
+      ]);
+      check(ethers.getAddress(ben) === ethers.getAddress(investor), `Genesis vault ${addr} pays ${ben}, not ${investor}`);
+      check(cliff === seed.cliffDuration && vest === seed.vestingDuration && bps === seed.tgeUnlockBps, `Genesis vault ${addr} is not on the seed schedule`);
+      check(started, `Genesis vault ${addr} clock not started`);
+      check(bal === inv.srxAllocation, `Genesis vault ${addr} holds ${ethers.formatUnits(bal, 18)} SRX, owed ${ethers.formatUnits(inv.srxAllocation, 18)}`);
+      inVaults += bal; count++;
+    }
+    const left = await token.balanceOf(genesis.address);
+    // Internal audit L6: what matters is that no buyer is still owed SRX here. A surplus
+    // (anyone can send SRX) is recoverable and can no longer reach buyers' SRX.
+    const leftOk = check((await round.pendingDeployment()) === 0n, `the Genesis contract still owes buyers ${ethers.formatUnits(await round.pendingDeployment(), 18)} SRX`);
+    if (left !== 0n) console.log(`  ⚠️ ${ethers.formatUnits(left, 18)} SRX surplus in the Genesis contract (recoverable with recoverSRX)`);
+    const soldOk = check(inVaults === genesis.sold, `Genesis vaults hold ${ethers.formatUnits(inVaults, 18)} SRX, the round sold ${ethers.formatUnits(genesis.sold, 18)}`);
+    const seedOk = check(AMOUNTS.seedInvestors + inVaults === ALLOCATIONS.seedInvestors, "seed vault + Genesis vaults ≠ the seed allocation");
+    console.log(`  ${count} buyers' vaults: ${ethers.formatUnits(inVaults, 18)} SRX  ${soldOk ? "✅" : "❌"} (sold ${ethers.formatUnits(genesis.sold, 18)})`);
+    console.log(`  Owed to buyers without a vault: none  ${leftOk ? "✅" : "❌"}`);
+    console.log(`  Seed vault + Genesis vaults = the seed allocation  ${seedOk ? "✅" : "❌"}`);
+  }
+
   // ── The launch-day float ─────────────────────────────────────────────────────
   // Right after TGE, the liquid rows hold exactly the published float (5%).
   {
+    const float = launchFloat(plan, AMOUNTS);
     let liquid = 0n;
-    for (const row of TGE_PLAN.filter((r) => r.liquid)) liquid += await token.balanceOf(walletFor(row.wallet, network.name));
-    const ok = check(liquid === launchFloat(), `launch float ${ethers.formatUnits(liquid, 18)} SRX != ${ethers.formatUnits(launchFloat(), 18)}`);
-    console.log(`\n  Launch float (liquid rows): ${ethers.formatUnits(liquid, 18)} SRX  ${ok ? "✅" : "❌"} (expect ${ethers.formatUnits(launchFloat(), 18)})`);
+    for (const row of plan.filter((r) => r.liquid)) liquid += await token.balanceOf(walletFor(row.wallet, network.name));
+    const ok = check(liquid === float, `launch float ${ethers.formatUnits(liquid, 18)} SRX != ${ethers.formatUnits(float, 18)}`);
+    console.log(`\n  Launch float (liquid rows): ${ethers.formatUnits(liquid, 18)} SRX  ${ok ? "✅" : "❌"} (expect ${ethers.formatUnits(float, 18)})`);
   }
 
   // ── Launch protection vs the vesting schedules ───────────────────────────────
@@ -148,33 +193,63 @@ async function main() {
   //    reverts, indefinitely, and the first anyone hears of it is a founder
   //    reporting a failed transaction.
   //
-  // ⚠️ It cannot be fixed by exempting the sender: SRXToken.sol:82-88 REQUIRES
+  // ⚠️ It cannot be fixed by exempting the sender: the isExemptFromLimits note in SRXToken.sol REQUIRES
   //    DEX pool addresses to be exempt, so skipping the cap whenever the sender is
   //    exempt would let every purchase from the pool bypass it and would defeat
   //    launch protection entirely. The incompatibility is real, so it is checked
   //    here instead of being designed away.
 
+  // ⭐ Checked against each beneficiary's WHOLE remaining entitlement, for the launch
+  //    vaults and every Genesis buyer's vault (lib/launch_checks.js). Set
+  //    PLANNED_MAX_WALLET (whole SRX) to check a cap BEFORE switching it on; re-run
+  //    this after any setMaxWalletBalance.
   console.log("\n── Launch protection vs vesting ───────────────────────────");
-  const walletCap = await token.maxWalletBalance();
-  if (walletCap === 0n) {
-    console.log("  maxWalletBalance is 0 (disabled) — no conflict possible");
-  } else {
-    console.log(`  maxWalletBalance: ${ethers.formatUnits(walletCap, 18)} SRX`);
-    for (const [label, addr] of Object.entries(vaults)) {
-      if (addr === ethers.ZeroAddress) continue;
-      const vault = await ethers.getContractAt("VestingVault", addr);
-      const ben   = await vault.beneficiary();
-      if (await token.isExemptFromLimits(ben)) {
-        console.log(`  ${label.padEnd(12)}: beneficiary exempt ✅`);
-        continue;
-      }
-      const releasableNow = await vault.releasable();
-      const benBal        = await token.balanceOf(ben);
-      const wouldExceed   = benBal + releasableNow > walletCap;
-      check(!wouldExceed,
-        `${label} beneficiary cannot claim: ${ethers.formatUnits(releasableNow, 18)} SRX releasable would breach the ${ethers.formatUnits(walletCap, 18)} SRX wallet cap`);
-      console.log(`  ${label.padEnd(12)}: releasable ${ethers.formatUnits(releasableNow, 18)} SRX  ${wouldExceed ? "❌ WOULD REVERT" : "✅"}`);
+  const onChainCap = await token.maxWalletBalance();
+  const walletCap = process.env.PLANNED_MAX_WALLET ? ethers.parseUnits(process.env.PLANNED_MAX_WALLET, 18) : onChainCap;
+  console.log(`  wallet cap checked: ${walletCap === 0n ? "none (0)" : ethers.formatUnits(walletCap, 18) + " SRX"}${process.env.PLANNED_MAX_WALLET ? " (planned)" : ""}`);
+  const capVaults = [];
+  const vaultAddrs = Object.entries(vaults).filter(([, a]) => a !== ethers.ZeroAddress);
+  if (genesis.sold > 0n) {
+    const round = await ethers.getContractAt("PreSaleRound", genesis.address);
+    for (const inv of await round.getInvestorList()) {
+      const a = await round.getVault(inv);
+      if (a !== ethers.ZeroAddress) vaultAddrs.push([`Genesis ${inv.slice(0, 8)}`, a]);
     }
+  }
+  for (const [label, addr] of vaultAddrs) {
+    const vault = await ethers.getContractAt("VestingVault", addr);
+    const ben = await vault.beneficiary();
+    capVaults.push({
+      label, beneficiary: ben,
+      exempt: await token.isExemptFromLimits(ben),
+      beneficiaryBalance: await token.balanceOf(ben),
+      initialAllocation: await vault.initialAllocation(),
+      released: await vault.released(),
+    });
+  }
+  const capFailures = walletCapConflicts({ cap: walletCap, vaults: capVaults });
+  for (const f of capFailures) check(false, f);
+  console.log(`  ${capVaults.length} vaults checked: ${capFailures.length === 0 ? "no beneficiary can be locked out ✅" : capFailures.length + " would be locked out ❌"}`);
+
+  // Every contract that moves SRX for users must be exempt before protection is on
+  // (staking exits, early-exit penalties to 0xdEaD, vault releases, the Genesis vaults…).
+  const transferCap = process.env.PLANNED_MAX_TRANSFER ? ethers.parseUnits(process.env.PLANNED_MAX_TRANSFER, 18) : await token.maxTransferAmount();
+  if (walletCap !== 0n || transferCap !== 0n) {
+    const optional = (k) => { const v = process.env[`${k}_${NET}${suffix}`]; return v && v.toLowerCase() !== "none" ? v : null; };
+    const required = [
+      { label: "SRXToken itself", address: await token.getAddress() },
+      { label: "SRXStaking", address: await staking.getAddress() },
+      { label: "SRXTreasury", address: contractAddr.Treasury },
+      { label: "StabilisationFund", address: await ssf.getAddress() },
+      { label: "TGEDistributor", address: await tge.getAddress() },
+      { label: "0xdEaD (early-exit penalties)", address: "0x000000000000000000000000000000000000dEaD" },
+      ...vaultAddrs.map(([label, address]) => ({ label: `${label} vault`, address })),
+      ...(genesis.address ? [{ label: "Genesis round", address: genesis.address }] : []),
+      ...["MIGRATOR", "BUYBACK_BURNER", "AIRDROP"].filter(optional).map((k) => ({ label: k, address: optional(k) })),
+    ];
+    const missing = await missingExemptions({ required, isExempt: (a) => token.isExemptFromLimits(a) });
+    for (const m of missing) check(false, m);
+    console.log(`  ${required.length} protocol addresses: ${missing.length === 0 ? "all exempt ✅" : missing.length + " NOT exempt ❌"}`);
   }
 
   // ── Staking pool ─────────────────────────────────────────────────────────────

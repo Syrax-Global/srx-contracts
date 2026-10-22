@@ -11,11 +11,23 @@
  * market-maker inventory (each to a multi-signature wallet), and the Staking,
  * Treasury and Stabilisation Fund contracts.
  *
+ * ⭐ The Genesis round is funded from the seed allocation (lib/genesis_seed.js): the
+ *    Genesis contract receives exactly what it sold and the seed vault the rest. The
+ *    round must be CLOSED before this step; the script refuses, having sent nothing,
+ *    if it is still open. PRESALE_ROUND_<NETWORK> names it, or "none".
+ *
  * ⭐ The rows are read from TGE_PLAN, not written out here, so this script, the TGE
  *    gate (lib/tge_targets.js) and the generated tokenomics cannot disagree.
  *
+ * ⭐ THE VAULTS' ADMIN IS THE TIMELOCK (Jared, 30 Sep 2026). A vault's admin can
+ *    revoke() it and send the unvested remainder anywhere; behind the Timelock that
+ *    is a public 48-hour proposal, not an instant Safe power. The vault admin also
+ *    declares each grant and starts each clock, so this script SCHEDULES those two
+ *    as Timelock operations (lib/vaultOps.js); 06_execute_tge executes them.
+ *
  * Prerequisites:
  *  - SRXToken deployed (Step 1) — SRX_TOKEN_<NETWORK> set in .env
+ *  - Governance deployed (Step 2) — TIMELOCK_<NETWORK> set in .env
  *  - Treasury deployed (Step 4 sets TREASURY_<NETWORK> — run Step 4 first OR
  *    use WALLET_TREASURY as placeholder and upgrade later)
  *
@@ -24,6 +36,8 @@
 const { ethers, network } = require("hardhat");
 const { WALLETS, ALLOCATIONS, VESTING, TGE_PLAN } = require("./00_config");
 const { createAdminBatch } = require("./lib/adminTx");
+const { vaultOps } = require("./lib/vaultOps");
+const { launchPlan, readGenesisSold } = require("./lib/genesis_seed");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -33,8 +47,25 @@ async function main() {
   const treasury  = process.env[`TREASURY_${network.name.toUpperCase()}`] || WALLETS.treasury;
   const staking   = process.env[`STAKING_${network.name.toUpperCase()}`]  || WALLETS.staking;
   const admin     = WALLETS.admin;
+  const timelockAddr = process.env[`TIMELOCK_${network.name.toUpperCase()}`];
 
   if (!srxToken) throw new Error(`SRX_TOKEN_${network.name.toUpperCase()} not set in .env`);
+  if (!timelockAddr) throw new Error(`TIMELOCK_${network.name.toUpperCase()} not set in .env — run Step 2 first; the vaults' admin is the Timelock`);
+  const timelock = await ethers.getContractAt("SRXTimelock", timelockAddr);
+
+  // ── The Genesis round is funded from the seed allocation ─────────────────
+  //
+  // ⭐ Read BEFORE anything is deployed: the seed vault's grant, scheduled below,
+  //    is the seed allocation minus what the Genesis round sold, so the round must
+  //    be closed. readGenesisSold refuses otherwise, and nothing has been sent.
+  const genesis = await readGenesisSold({ networkName: network.name, provider: ethers.provider, tokenAddress: srxToken });
+  const { plan, allocations: amounts } = launchPlan(genesis.sold);
+  if (genesis.sold > 0n) {
+    console.log(`\nGenesis round ${genesis.address} is closed and sold ${ethers.formatUnits(genesis.sold, 18)} SRX.`);
+    console.log(`  Seed allocation ${ethers.formatUnits(ALLOCATIONS.seedInvestors, 18)} SRX → Genesis contract ${ethers.formatUnits(amounts.genesis, 18)} + seed vault ${ethers.formatUnits(amounts.seedInvestors, 18)}`);
+  } else {
+    console.log(`\nNo Genesis round sold anything: the whole seed allocation goes to the seed vault.`);
+  }
 
   const VestingVault = await ethers.getContractFactory("VestingVault");
 
@@ -47,8 +78,9 @@ async function main() {
   for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
     const v = VESTING[row.schedule];
     const vault = await VestingVault.deploy(
-      srxToken, WALLETS[row.beneficiary], admin,
-      v.cliffDuration, v.vestingDuration, v.tgeUnlockBps
+      srxToken, WALLETS[row.beneficiary], timelockAddr,
+      v.cliffDuration, v.vestingDuration, v.tgeUnlockBps,
+      treasury // revokeRecipient, fixed at deployment (internal audit M2)
     );
     await vault.waitForDeployment();
     vaults[row.label] = await vault.getAddress();
@@ -68,15 +100,24 @@ async function main() {
   // ⭐ Declaring it up front also makes an UNDERFUNDED vault fail here, at setup,
   //    instead of silently shorting the beneficiary years into the schedule.
 
-  // declareExpectedAllocation() is gated by each vault's immutable `admin` field
-  // (set to WALLETS.admin above), not the deployer — same SC-TRUST-002 pattern as
-  // TGEDistributor.setAllocations() below. One batch covers both groups of calls.
+  // declareExpectedAllocation() and triggerTGE() are gated by each vault's
+  // immutable `admin` — the Timelock — so both are scheduled as Timelock
+  // operations here, by the admin Safe (the Timelock's admin until hand-over),
+  // never by the deployer (SC-TRUST-002). One batch covers these and
+  // TGEDistributor.setAllocations() below.
   const batch = createAdminBatch("03_vesting");
 
-  console.log("\nDeclaring expected allocations on each vault...");
-  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
-    const amount = ALLOCATIONS[row.allocation];
-    await batch.send(vaultContracts[row.label], "declareExpectedAllocation", [amount], `${row.label} vault: declareExpectedAllocation(${ethers.formatUnits(amount, 18)} SRX)`);
+  const PROPOSER = await timelock.PROPOSER_ROLE();
+  const minDelay = await timelock.getMinDelay();
+  const ops = vaultOps(vaults, amounts);
+  console.log(`\nScheduling the vault setup through the Timelock (ready after ${minDelay}s)...`);
+  if (!(await timelock.hasRole(PROPOSER, admin))) {
+    await batch.send(timelock, "grantRole", [PROPOSER, admin],
+      "Timelock: grant PROPOSER → admin Safe (TEMPORARY — to schedule the vault setup; revoked in migrate_roles phase 2)");
+  }
+  for (const [name, op] of [["declare every grant", ops.declare], ["start every vesting clock", ops.trigger]]) {
+    if (await timelock.isOperation(op.id)) { console.log(`  ✓ (already scheduled) ${name}`); continue; }
+    await batch.send(timelock, "scheduleBatch", [...op.args, minDelay], `Timelock: schedule — ${name} (${op.targets.length} vaults)`);
   }
 
   // ── Deploy TGEDistributor ─────────────────────────────────────────────────
@@ -96,13 +137,13 @@ async function main() {
 
   console.log("\nConfiguring allocations on TGEDistributor...");
 
-  const contractDestination = { Staking: staking, Treasury: treasury, StabilisationFund: WALLETS.strategic };
-  const allocations = TGE_PLAN.map((row) => ({
+  const contractDestination = { Staking: staking, Treasury: treasury, StabilisationFund: WALLETS.strategic, Genesis: genesis.address };
+  const allocations = plan.map((row) => ({
     destination:
       row.kind === "vault"  ? vaults[row.label] :
       row.kind === "wallet" ? WALLETS[row.wallet] :
       contractDestination[row.label],
-    amount: ALLOCATIONS[row.allocation],
+    amount: amounts[row.allocation],
     isVestingVault: row.kind === "vault",
     label: row.label,
   }));
@@ -119,6 +160,7 @@ async function main() {
     console.log(`${row.vaultEnv}_${NET}=${vaults[row.label]}`);
   }
   console.log(`TGE_DISTRIBUTOR_${NET}=${tgeAddress}`);
+  console.log(`\n⏳ The vault setup executes in Step 6, at least ${minDelay}s after the Safe runs this batch.`);
   console.log(`\nNext steps:`);
   console.log(`  4. Deploy Staking + FeeController (Step 4)`);
   console.log(`  5. Deploy Treasury (Step 5)`);

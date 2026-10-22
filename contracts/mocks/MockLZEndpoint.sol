@@ -7,7 +7,9 @@ import {
 
 // Minimal mock of LayerZero EndpointV2 for unit tests.
 // Implements what SRXToken/SRXOFTNative construction and an outbound send() call.
-// Does NOT deliver messages — tests impersonate the endpoint to call lzReceive.
+// Does NOT deliver messages — tests impersonate the endpoint to call lzReceive. It does
+// record each outbound message (MockSent), so a test can relay the exact bytes the OApp
+// produced instead of rebuilding them (test/Bridge.test.js).
 contract MockLZEndpoint {
     uint32 public immutable eid;
     uint64 public nonce;
@@ -30,15 +32,18 @@ contract MockLZEndpoint {
         return fee;
     }
 
-    // Called by OFT.send. Records nothing and delivers nothing; the burn and the
-    // outflow accounting happen in the OFT before this call.
-    function send(MessagingParams calldata, address)
+    event MockSent(address indexed sender, uint32 dstEid, bytes32 receiver, uint64 nonce, bytes32 guid, bytes message);
+
+    // Called by OFT.send. Delivers nothing; the burn and the outflow accounting happen
+    // in the OFT before this call. Emits the message so a test can relay it.
+    function send(MessagingParams calldata _params, address)
         external
         payable
         returns (MessagingReceipt memory receipt)
     {
         receipt.nonce = ++nonce;
         receipt.guid = keccak256(abi.encode(address(this), receipt.nonce));
+        emit MockSent(msg.sender, _params.dstEid, _params.receiver, receipt.nonce, receipt.guid, _params.message);
     }
 
     // Fallback so any unexpected OApp call silently succeeds in tests

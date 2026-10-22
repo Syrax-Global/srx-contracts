@@ -20,7 +20,7 @@
  */
 
 const { ethers, network, run } = require("hardhat");
-const { LZ_ENDPOINTS, WALLETS, VESTING, GOVERNANCE, TGE_PLAN } = require("../deploy/00_config");
+const { LZ_ENDPOINTS, LZ_EIDS, WALLETS, VESTING, GOVERNANCE, TGE_PLAN, TESTNET_CHAINS } = require("../deploy/00_config");
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -184,8 +184,9 @@ async function main() {
   }
 
   // ── Step 7: Bridge (SRXOFTNative on remote chains only) ──────────────────
-  //   constructor(address _lzEndpoint, address _admin)
-  //   Not deployed on origin chain (Ethereum / Sepolia).
+  //   constructor(address _lzEndpoint, address _admin, uint32 _hubEid, address _hub)
+  //   Not deployed on origin chain (Ethereum / Sepolia). The spoke Timelock beside it is
+  //   SRXTimelock(delay, [Safe], [0x0], 0x0) (07 step A, SPOKE-01).
 
   const isOriginChain = network.name === "sepolia" || network.name === "ethereum";
   const oftNativeAddr = envOpt(`SRX_OFT_NATIVE_${NET}`);
@@ -194,7 +195,14 @@ async function main() {
     results.push(await verify(
       "SRXOFTNative",
       oftNativeAddr,
-      [lzEndpoint, admin]
+      [lzEndpoint, admin,
+       TESTNET_CHAINS.has(network.name) ? LZ_EIDS.sepolia : LZ_EIDS.ethereum,
+       envOpt(TESTNET_CHAINS.has(network.name) ? "SRX_TOKEN_SEPOLIA" : "SRX_TOKEN_ETHEREUM")]
+    ));
+    results.push(await verify(
+      "SRXTimelock (spoke)",
+      envOpt(`SPOKE_TIMELOCK_${NET}`),
+      [GOVERNANCE.timelockDelayFor(network.name), [admin], ["0x0000000000000000000000000000000000000000"], "0x0000000000000000000000000000000000000000"]
     ));
   }
 

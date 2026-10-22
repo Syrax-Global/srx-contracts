@@ -34,6 +34,7 @@ reviewed this code.
 | R5 | 2026-06-12 | All 7, fresh-eyes — remediation code as primary surface | 7 | 0 Critical/High/Medium; 4 Low code fixes + 3 info |
 | Proof pass 1 | 2026-09-10 | Executable proofs only — a finding counts once a test demonstrates it | 31 | All dispositioned; one (F6) later found not fixed |
 | Proof pass 2 | 2026-09-23 | Full pre-external-audit sweep, contracts and deploy path | 1 Critical, 4 High, 11 Medium, plus Low/Info | Fixed with proofs, or listed as open |
+| Internal audit | 2026-10-16 | Six independent groups over every contract: twin sweep, every state-changing function, accounting invariants, entry-point hooks, funds with no exit, docs against code | 0 Critical, 0 High, 12 Medium, 17 Low, about 30 Info | 6 Medium and 12 Low fixed with fail-first tests; 3 being built; 9 waiting for a design decision (`REMEDIATION.md`, top section) |
 
 **Rounds 1–5:** 42 findings; all actionable items fixed. The two Round-4 High findings were
 governance/deployment topology and were remediated. Round 5 — a fresh-eyes re-review with
@@ -63,13 +64,13 @@ Every SRX smart-contract audit covers all seven, either in one pass or across ro
 
 ## Round 4 Highlights (2026-05-29)
 
-The most recent internal audit read all 13 production contracts in full. Headline
-outcome: **the dominant risk was deployment-time role topology, not contract logic.**
+The Round 4 audit read all 13 production contracts in full (the suite is 16 contracts now, 15 in the
+audit scope). Headline outcome: **the dominant risk was deployment-time role topology, not contract logic.**
 
 | ID | Severity | Resolution |
 |---|---|---|
-| SC-TRUST-001 | High | Dedicated `UPGRADER_ROLE` separated from `GOVERNANCE_ROLE`; `_authorizeUpgrade` re-gated across all 4 UUPS contracts. |
-| SC-TRUST-002 | High | `verify_roles.js` deployment gate — fails unless the deployer EOA holds zero roles and `UPGRADER_ROLE` is Timelock-only. |
+| SC-TRUST-001 | High | Dedicated `UPGRADER_ROLE` separated from `GOVERNANCE_ROLE`; `_authorizeUpgrade` re-gated across all 4 UUPS contracts. (Superseded by REG-53, 12 Oct 2026: no SRX contract is upgradeable and `UPGRADER_ROLE` no longer exists. The `SPENDER_ROLE` half still holds.) |
+| SC-TRUST-002 | High | `verify_roles.js` deployment gate — fails unless the deployer EOA holds zero roles and `UPGRADER_ROLE` is Timelock-only. (Since REG-53 there is no `UPGRADER_ROLE`; the gate checks the contracts are not proxies instead.) |
 | SC-TRUST-003 | Medium | StabilisationFund fast-path deployment restricted to a governance-approved target allowlist. |
 | SC-LZ-001 | Medium | Bridge `setPeer` ownership migration to Timelock documented as a deployment gate. |
 | SC-TRUST-004 | Medium | PreSaleRound admin = Gnosis Safe documented as a deployment gate. |
@@ -81,11 +82,11 @@ outcome: **the dominant risk was deployment-time role topology, not contract log
 
 ## Verification Coverage
 
-- **817 Hardhat unit/integration tests** + 1 pending (23 Sep 2026).
-- **Foundry** — 7 token invariants (supply equation, balance sum, voting power, burn cap,
-  burn monotonic, genesis once, no holder above supply) at 256 runs × depth 50, and 3
-  PreSaleRound property-fuzz tests at 1,000 runs each.
-- **Slither** static analysis enforced in CI (`fail-on: high`).
+- **Over 1,200 Hardhat unit/integration tests** (1,204 passing at the last full run, 16 Oct 2026), 0 failing.
+- **Foundry** — 16 invariants (7 token: supply equation, balance sum, voting power, burn cap,
+  burn monotonic, genesis once, no holder above supply; 4 bridge conservation; 5 reward pools) at
+  256 runs × depth 50, and 5 property-fuzz tests (4 PreSaleRound, 1 GenesisAgreementRegistry) at 1,000 runs each.
+- **Slither** 0.11.6 static analysis enforced in CI (`fail-on: medium`): 0 High, 0 Medium.
 - **Foundry** invariant campaign (nightly, in CI). Echidna is a local harness
   only — the CI job was removed rather than left green over a suite whose
   properties could not fail.
@@ -95,7 +96,8 @@ outcome: **the dominant risk was deployment-time role topology, not contract log
 ## External Audit
 
 An independent external audit is a **mandatory blocking gate before any mainnet
-deployment**. Internal audits are complete; the independent external audit is next.
+deployment**. The internal audits are done (a few items from the 16 October 2026 one are open for design
+decisions); the independent external audit is next. It is upcoming and has not been engaged.
 No external report exists yet.
 Any external report will be published in this directory alongside the internal history
 when one exists.

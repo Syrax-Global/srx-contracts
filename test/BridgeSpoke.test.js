@@ -20,7 +20,7 @@ async function spoke() {
   const Ep = await ethers.getContractFactory("MockLZEndpoint");
   const ep = await Ep.deploy(SPOKE);
   const N = await ethers.getContractFactory("SRXOFTNative");
-  const native = await N.deploy(await ep.getAddress(), admin.address, HUB);
+  const native = await N.deploy(await ep.getAddress(), admin.address, HUB, admin.address);
   const hubPeer = b32(admin.address);
   await native.connect(admin).setPeer(HUB, hubPeer);
   const epSigner = await impersonate(await ep.getAddress());
@@ -36,7 +36,8 @@ describe("SRXOFTNative — spoke paths", function () {
     const Ep = await ethers.getContractFactory("MockLZEndpoint");
     const ep = await Ep.deploy(SPOKE);
     const N = await ethers.getContractFactory("SRXOFTNative");
-    await expect(N.deploy(await ep.getAddress(), admin.address, 0)).to.be.revertedWithCustomError(N, "NotHub");
+    await expect(N.deploy(await ep.getAddress(), admin.address, 0, admin.address)).to.be.revertedWithCustomError(N, "NotHub");
+    await expect(N.deploy(await ep.getAddress(), admin.address, HUB, ethers.ZeroAddress)).to.be.revertedWithCustomError(N, "ZeroAddress");
   });
 
   it("buyAndBurn burns only the caller's own SRX, needs BURN_ROLE, and refuses zero", async function () {

@@ -29,7 +29,7 @@ const DAY = 86_400n;
 const NAMES = {
   Founders:          ["Founders", "Vesting contract"],
   CoreTeam:          ["Core team", "Vesting contract"],
-  SeedInvestors:     ["Seed investors", "Vesting contract"],
+  SeedInvestors:     ["Seed investors", "Vesting contracts, each on this schedule"],
   PresaleLaunch:     ["Presale: launch tranche", "Multi-signature wallet"],
   Presale:           ["Presale: vesting", "Vesting contract"],
   EcosystemDAO:      ["Ecosystem fund", "Vesting contract"],
@@ -73,7 +73,7 @@ function render() {
   L.push("> SRX has not been offered, sold or distributed. This describes the contracts and their configuration; it is");
   L.push("> not an offer, and it makes no statement about price or value.");
   L.push("");
-  L.push(`**Maximum supply:** ${srx(SUPPLY)} SRX, minted once at genesis. No further SRX can be minted.`);
+  L.push(`**Maximum supply:** ${srx(SUPPLY)} SRX, minted once at genesis. No function creates new supply afterwards: SRX sent to another chain is burned on Ethereum and can be re-credited there only up to what was sent. The only permanent reductions are burns.`);
   L.push("");
 
   L.push("## Allocation");
@@ -150,4 +150,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { render, OUT };
+module.exports = { render, OUT, NAMES, srx, pct, schedule, SUPPLY };

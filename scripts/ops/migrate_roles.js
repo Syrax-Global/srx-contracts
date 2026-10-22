@@ -11,20 +11,25 @@
  *
  * ⛔ Previously the end state KEPT the Safe as DEFAULT_ADMIN_ROLE everywhere, and
  *    the gate required it. One Safe batch could then grant itself SPENDER_ROLE and
- *    withdraw the treasury, re-grant UPGRADER_ROLE, or use the StabilisationFund's
+ *    withdraw the treasury, or use the StabilisationFund's
  *    GOVERNANCE_ROLE path to send all 1.5B SRX anywhere — none of it delayed.
  *
  * ── Two phases, because ownership of the token needs the Timelock to accept ──
- *   PHASE 1 (default) — every step reversible while the Safe is still admin:
- *     1. grant the Timelock DEFAULT_ADMIN / GOVERNANCE / UPGRADER / SPENDER,
+ *   PHASE 1 (default) — before the irreversible phase 2. Most steps can still be undone
+ *   while the Safe is admin, BUT revoking the Safe's SPENDER_ROLE
+ *   cannot be: each of those roles administers itself, so the Safe cannot re-grant it
+ *   and putting it back needs a Timelock operation:
+ *     1. grant the Timelock DEFAULT_ADMIN / GOVERNANCE / SPENDER,
  *        GuardianModule PAUSER, the Governor PROPOSER + CANCELLER on the Timelock;
- *     2. revoke the Safe's GOVERNANCE / UPGRADER / SPENDER / PAUSER / BURN;
+ *     2. revoke the Safe's GOVERNANCE / SPENDER / PAUSER / BURN (it keeps WIND_DOWN on staking and the fund);
  *     3. SRXToken: setDelegate(Timelock) and transferOwnership(Timelock) (two-step);
  *     4. grant the Safe PROPOSER on the Timelock TEMPORARILY and schedule
  *        SRXToken.acceptOwnership() through it.
  *   Wait at least the Timelock delay (48 h on mainnet).
  *   PHASE 2 (`--finalize`) — irreversible:
  *     5. execute the scheduled acceptOwnership() (execution is open to anyone);
+ *        (First it lists any OTHER Timelock operation still pending, since those survive
+ *        the revoke; needs TIMELOCK_DEPLOY_BLOCK_<NET>. Warns only, cancels nothing.)
  *     6. revoke the Safe's PROPOSER, then its DEFAULT_ADMIN on every contract and
  *        on the Timelock — the Safe's own admin rights go LAST.
  *
@@ -41,6 +46,11 @@
  * Required .env (per network, e.g. _ETHEREUM): SRX_TOKEN, TREASURY, STAKING,
  *   FEE_CONTROLLER, STABILISATION, TIMELOCK, GOVERNOR, GUARDIAN_MODULE, and ADMIN_ADDRESS.
  *
+ * Covers GuardianModule and ZkSyncMigrator since 30 Sep 2026 (both left the Safe as
+ * DEFAULT_ADMIN). Optional env: MIGRATOR (its address, or "none").
+ * It cannot fix an IMMUTABLE admin(): VestingVault, PreSaleRound and
+ * TGEDistributor fix theirs at deployment — see verify_roles.js.
+ *
  * Usage:
  *   npx hardhat run scripts/ops/migrate_roles.js --network ethereum            # phase 1 JSON
  *   MIGRATE_FINALIZE=1 npx hardhat run scripts/ops/migrate_roles.js --network ethereum
@@ -51,8 +61,9 @@ const { ethers, network, artifacts } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
+const { pendingTimelockOps, parseOpList, parseBlock } = require("../deploy/lib/gate_checks");
 
-const NET  = network.name.toUpperCase();
+const NET  =network.name.toUpperCase();
 const ARGS = process.argv.slice(2);
 const EXECUTE  = ARGS.includes("--execute")  || process.env.MIGRATE_EXECUTE  === "1";
 const FINALIZE = ARGS.includes("--finalize") || process.env.MIGRATE_FINALIZE === "1";
@@ -60,7 +71,7 @@ const FINALIZE = ARGS.includes("--finalize") || process.env.MIGRATE_FINALIZE ===
 const ROLE = {
   DEFAULT_ADMIN_ROLE: ethers.ZeroHash,
   GOVERNANCE_ROLE: ethers.id("GOVERNANCE_ROLE"),
-  UPGRADER_ROLE:   ethers.id("UPGRADER_ROLE"),
+  WIND_DOWN_ROLE:  ethers.id("WIND_DOWN_ROLE"),
   PAUSER_ROLE:     ethers.id("PAUSER_ROLE"),
   SPENDER_ROLE:    ethers.id("SPENDER_ROLE"),
   BURN_ROLE:       ethers.id("BURN_ROLE"),
@@ -94,12 +105,28 @@ async function main() {
   // Contracts whose roles move, and which roles each has.
   const targets = [
     { name: "SRXToken",          addr: srxToken,                  roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE", "BURN_ROLE"] },
-    { name: "SRXTreasury",       addr: envAddr("TREASURY"),       roles: ["GOVERNANCE_ROLE", "UPGRADER_ROLE", "PAUSER_ROLE", "SPENDER_ROLE"] },
-    { name: "SRXStaking",        addr: envAddr("STAKING"),        roles: ["GOVERNANCE_ROLE", "UPGRADER_ROLE", "PAUSER_ROLE"] },
-    { name: "FeeController",     addr: envAddr("FEE_CONTROLLER"), roles: ["GOVERNANCE_ROLE", "UPGRADER_ROLE", "PAUSER_ROLE"] },
-    { name: "StabilisationFund", addr: envAddr("STABILISATION"),  roles: ["GOVERNANCE_ROLE", "UPGRADER_ROLE", "PAUSER_ROLE"] },
+    { name: "SRXTreasury",       addr: envAddr("TREASURY"),       roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE", "SPENDER_ROLE"] },
+    { name: "SRXStaking",        addr: envAddr("STAKING"),        roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
+    { name: "FeeController",     addr: envAddr("FEE_CONTROLLER"), roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
+    { name: "StabilisationFund", addr: envAddr("STABILISATION"),  roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
+    // ⛔ 30 Sep 2026: GuardianModule was not handed over. 08 makes the Safe its
+    //    DEFAULT_ADMIN, from which it could grant itself GOVERNANCE_ROLE and
+    //    un-pause everything or reset a tripped circuit breaker with no delay. The
+    //    Safe keeps GUARDIAN_ROLE (pause) via GUARDIAN_MULTISIG and nothing else.
+    { name: "GuardianModule",    addr: guardianM,                  roles: ["GOVERNANCE_ROLE"] },
   ];
-  const HOLDER = { GOVERNANCE_ROLE: timelock, UPGRADER_ROLE: timelock, SPENDER_ROLE: timelock, PAUSER_ROLE: guardianM };
+  // ZkSyncMigrator: the Safe is its constructor admin; since 30 Sep 2026 (Jared) it
+  // is handed to the Timelock like the core contracts, when this network has one
+  // (MIGRATOR_<NET>; "none" or unset means no migrator here). BuybackBurner,
+  // SRXAirdrop and the spokes stay Safe-administered by design (MULTISIG_SPEC).
+  const migratorAddr = (process.env[`MIGRATOR_${NET}`] || process.env.MIGRATOR || "").trim();
+  if (migratorAddr && migratorAddr.toLowerCase() !== "none") {
+    targets.push({ name: "ZkSyncMigrator", addr: ethers.getAddress(migratorAddr), roles: ["GOVERNANCE_ROLE"] });
+  }
+  // REG-53 (12 Oct 2026): no UPGRADER_ROLE exists any more (the contracts are not upgradeable).
+  // The Safe KEEPS WIND_DOWN_ROLE on SRXStaking and StabilisationFund: the fast, one-way
+  // exit-only switch (it is deliberately not in the revoked lists above).
+  const HOLDER = { GOVERNANCE_ROLE: timelock, SPENDER_ROLE: timelock, PAUSER_ROLE: guardianM };
 
   const acceptData = token.interface.encodeFunctionData("acceptOwnership");
   const minDelay   = await tl.getMinDelay();
@@ -115,16 +142,22 @@ async function main() {
   };
 
   if (!FINALIZE) {
-    console.log("\nPHASE 1 — reversible grants, revocations and ownership transfer\n");
+    console.log("\nPHASE 1 — grants, revocations and ownership transfer (the Safe's SPENDER revocation cannot be undone by the Safe)\n");
     // 1. grants
     for (const t of targets) {
       role(t.addr, "grantRole", "DEFAULT_ADMIN_ROLE", timelock, `${t.name}: grant DEFAULT_ADMIN → Timelock`);
-      for (const r of t.roles) if (HOLDER[r]) role(t.addr, "grantRole", r, HOLDER[r], `${t.name}: grant ${r} → ${r === "PAUSER_ROLE" ? "GuardianModule" : "Timelock"}`);
+      for (const r of t.roles) {
+        // GuardianModule cannot hold PAUSER on itself; it has no PAUSER role.
+        if (HOLDER[r] && !(r === "PAUSER_ROLE" && t.addr === guardianM)) {
+          role(t.addr, "grantRole", r, HOLDER[r], `${t.name}: grant ${r} → ${r === "PAUSER_ROLE" ? "GuardianModule" : "Timelock"}`);
+        }
+      }
     }
     role(timelock, "grantRole", "PROPOSER_ROLE",  governor, "Timelock: grant PROPOSER → Governor");
     role(timelock, "grantRole", "CANCELLER_ROLE", governor, "Timelock: grant CANCELLER → Governor");
     role(timelock, "grantRole", "CANCELLER_ROLE", admin,    "Timelock: grant CANCELLER → Safe (veto only; kept at launch)");
-    // 2. the Safe gives up every operational role (it is still admin, so reversible)
+    // 2. the Safe gives up every operational role. SPENDER_ROLE administers itself, so the
+    //    Safe cannot undo that revocation; the rest it still could. (It keeps WIND_DOWN_ROLE.)
     for (const t of targets) for (const r of t.roles) role(t.addr, "revokeRole", r, admin, `${t.name}: revoke ${r} from the Safe`);
     // 3. bridge authority: delegate, then two-step ownership
     steps.push({
@@ -154,6 +187,27 @@ async function main() {
     console.log("\nPHASE 2 — IRREVERSIBLE: the Safe hands over its own admin rights\n");
     if (!(await tl.isOperationReady(opId)) && !(await tl.isOperationDone(opId))) {
       throw new Error("The scheduled acceptOwnership is not ready yet (or was never scheduled). Run phase 1, then wait the Timelock delay.");
+    }
+    // ⛔ Internal audit 16 Oct 2026, CONTROL-05: the Safe has been a PROPOSER since phase 1,
+    //    and anything it scheduled in that window stays executable by anyone after the
+    //    revoke below. List what is still pending BEFORE the Safe gives the role up, so
+    //    it can be cancelled (CANCELLER_ROLE) while it is still a decision. The
+    //    acceptOwnership scheduled by phase 1 is expected and is executed by step 5.
+    //    This only warns: it never cancels anything.
+    try {
+      const fromBlock = parseBlock(process.env[`TIMELOCK_DEPLOY_BLOCK_${NET}`] || process.env.TIMELOCK_DEPLOY_BLOCK);
+      const allowList = [opId, ...parseOpList(process.env[`TIMELOCK_ALLOWED_OPS_${NET}`] || process.env.TIMELOCK_ALLOWED_OPS)];
+      const pendingOps = await pendingTimelockOps({ timelock: tl, fromBlock, allowList });
+      if (pendingOps.length) {
+        console.log(`   ⚠️  ${pendingOps.length} OTHER Timelock operation(s) are scheduled and still pending. They will stay executable by anyone after the Safe's PROPOSER is revoked:`);
+        for (const id of pendingOps) console.log(`        • ${id}`);
+        console.log("      Cancel any you do not recognise (CANCELLER_ROLE) BEFORE running this phase, or list the expected ones in TIMELOCK_ALLOWED_OPS_" + NET + ".\n");
+      } else {
+        console.log(`   ✓ No other Timelock operation is pending (read from block ${fromBlock}).\n`);
+      }
+    } catch (e) {
+      console.log(`   ⚠️  COULD NOT LIST PENDING TIMELOCK OPERATIONS: ${e.message}`);
+      console.log("      Anything the Safe scheduled as a temporary PROPOSER survives the revoke below. verify_roles.js fails until this can be read.\n");
     }
     // 5. execute the acceptance
     steps.push({
@@ -191,7 +245,7 @@ async function main() {
         name: `SRX launch role migration — phase ${FINALIZE ? 2 : 1} (${network.name})`,
         description: FINALIZE
           ? "IRREVERSIBLE. Executes the Timelock's acceptance of token ownership, then removes the Safe's remaining admin rights. Review every transaction."
-          : "Reversible. Moves every operational role behind the Timelock and schedules the token ownership acceptance. Review every transaction.",
+          : "Moves every operational role behind the Timelock and schedules the token ownership acceptance. Not freely reversible: revoking the Safe's SPENDER_ROLE cannot be undone by the Safe (it needs a Timelock operation). Review every transaction.",
         txBuilderVersion: "1.16.5",
       },
       transactions: todo.map((s) => ({ to: s.to, value: "0", data: s.data })),

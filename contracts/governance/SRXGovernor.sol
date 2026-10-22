@@ -22,7 +22,8 @@ import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
  *  - Spend from SRXTreasury
  *  - Adjust fee parameters (FeeController)
  *  - Adjust staking tier thresholds (SRXStaking)
- *  - Upgrade UUPS-proxy contracts
+ *  - Wind down a contract and release its unused reward allocation to a successor
+ *    (no SRX contract is upgradeable, REG-53)
  *  - Set bridge peers (SRXToken)
  *  - Change governor parameters (via GovernorSettings)
  *
@@ -30,7 +31,7 @@ import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
  *  votingDelay:   1 day   — time between proposal creation and voting start
  *  votingPeriod:  7 days  — duration of the voting window
  *  proposalThreshold: 1,000,000 SRX (0.01% of supply) to create a proposal
- *  quorum:        4%      — of total delegated supply must vote FOR
+ *  quorum:        4%      — of the fixed 10B cap (400M SRX), counting For + Abstain (OZ GovernorCountingSimple); a proposal also needs more For than Against
  *  timelock:      48 hours — after vote passes, delay before execution
  *
  * Governance activation timeline:
@@ -128,8 +129,10 @@ contract SRXGovernor is
         override(Governor, GovernorVotesQuorumFraction)
         returns (uint256)
     {
-        blockNumber; // silences unused-parameter; the cap is time-invariant by design
-        return (GLOBAL_SUPPLY_CAP * quorumNumerator()) / quorumDenominator();
+        // ⛔ Internal audit CONTROL-04 (16 Oct 2026): this read quorumNumerator(), the
+        //    CURRENT setting, so lowering it revived proposals that had failed quorum.
+        //    The numerator in force at the proposal's snapshot is the one that counts.
+        return (GLOBAL_SUPPLY_CAP * quorumNumerator(blockNumber)) / quorumDenominator();
     }
 
     function proposalThreshold()

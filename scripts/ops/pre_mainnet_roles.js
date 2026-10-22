@@ -1,5 +1,11 @@
 /**
- * pre_mainnet_roles.js — Pre-mainnet role hardening
+ * ⛔⛔ DEPRECATED — REFUSES TO RUN (internal review, 7 Oct 2026; DEPLOYMENT_SECURITY D2-T5).
+ *    It migrates only GOVERNANCE_ROLE and PROPOSER_ROLE and leaves UPGRADER_ROLE (and more)
+ *    on the admin, so running it would look like a hand-over and not be one. The launch
+ *    hand-over is scripts/ops/migrate_roles.js (phases 1 and 2), checked by
+ *    scripts/verify/verify_roles.js. Kept for its history only.
+ *
+ * pre_mainnet_roles.js — Pre-mainnet role hardening (legacy)
  *
  * Fixes role assignments on the TGE teststack that were left in a
  * "deployer-as-admin" state for testnet convenience. Must be run before
@@ -93,6 +99,7 @@ const PROPOSER_ROLE   = ethers.keccak256(ethers.toUtf8Bytes("PROPOSER_ROLE"));
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
+  throw new Error("pre_mainnet_roles.js is deprecated and does only part of the hand-over. Use scripts/ops/migrate_roles.js, then scripts/verify/verify_roles.js.");
   if (network.name !== "sepolia") {
     console.error(`\n  This script must run on sepolia.`);
     console.error(`  npx hardhat run scripts/ops/pre_mainnet_roles.js --network sepolia`);

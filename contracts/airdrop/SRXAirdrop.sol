@@ -23,10 +23,13 @@ import { SafeERC20 }     from "@openzeppelin/contracts/token/ERC20/utils/SafeERC
  *   4. After the deadline, admin calls rescueUnclaimed() to recover undistributed SRX.
  *
  * Multiple rounds:
- *   setMerkleRoot() can be called again after the previous deadline has passed,
- *   or to replace an active airdrop (admin responsibility to not accidentally
- *   invalidate ongoing claims). Each new root starts fresh — claimed[] is NOT
- *   reset, so previously claimed addresses cannot claim again in any round.
+ *   setMerkleRoot() starts a new round only after the previous deadline has passed.
+ *   ⛔ While a round is open its root cannot be replaced, only its deadline moved
+ *   later (internal review, 7 Oct 2026): a replacement root could list the admin
+ *   for the whole balance and drain the round, contradicting "recoverable only after
+ *   its deadline". A wrong root waits for its deadline (at least MIN_CLAIM_WINDOW).
+ *   Each new root starts fresh — claimed[] is NOT reset, so previously claimed
+ *   addresses cannot claim again in any round.
  *   Use a fresh recipient list per round, or deploy a new contract per round.
  *
  * Off-chain tooling:
@@ -46,8 +49,8 @@ import { SafeERC20 }     from "@openzeppelin/contracts/token/ERC20/utils/SafeERC
  *     const leaf  = keccak256(inner)
  *
  * Role model:
- *   DEFAULT_ADMIN_ROLE — set Merkle root + deadline, rescue unclaimed tokens,
- *                        recover accidentally sent tokens other than SRX.
+ *   DEFAULT_ADMIN_ROLE — set Merkle root + deadline, rescue unclaimed tokens after
+ *                        the deadline.
  */
 contract SRXAirdrop is AccessControl {
     using SafeERC20 for IERC20;
@@ -95,6 +98,8 @@ contract SRXAirdrop is AccessControl {
     error DeadlineMustBeFuture();
     error ClaimWindowTooShort(uint256 deadline, uint256 minimum);
     error DeadlineCannotMoveEarlier(uint256 current, uint256 attempted);
+    /// @notice A live round's root cannot be replaced; only its deadline can move later.
+    error RoundStillOpen(uint256 deadline);
 
     // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -113,7 +118,9 @@ contract SRXAirdrop is AccessControl {
     // ── Admin ──────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Activate or replace the airdrop with a new Merkle root and deadline.
+     * @notice Activate the airdrop, or start a new round once the previous deadline has
+     *         passed. While a round is live its root cannot be replaced (RoundStillOpen);
+     *         only its deadline may be moved later, never earlier.
      *         Fund this contract with SRX before calling.
      *
      * @param root     Merkle root of the (address → amount) distribution tree.
@@ -133,6 +140,7 @@ contract SRXAirdrop is AccessControl {
         //    allocation. While a round is open its deadline may only move later,
         //    and any round lasts at least MIN_CLAIM_WINDOW.
         bool roundOpen = merkleRoot != bytes32(0) && block.timestamp <= claimDeadline;
+        if (roundOpen && root != merkleRoot) revert RoundStillOpen(claimDeadline);
         if (roundOpen && deadline < claimDeadline) revert DeadlineCannotMoveEarlier(claimDeadline, deadline);
         if (deadline < block.timestamp + MIN_CLAIM_WINDOW)
             revert ClaimWindowTooShort(deadline, block.timestamp + MIN_CLAIM_WINDOW);
@@ -148,6 +156,7 @@ contract SRXAirdrop is AccessControl {
      *         Transfers the full SRX balance to `to`.
      * @param to Recipient of the unclaimed tokens (typically Treasury).
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function rescueUnclaimed(address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (block.timestamp <= claimDeadline) revert DeadlineNotPassed();
         if (to == address(0)) revert ZeroAddress();

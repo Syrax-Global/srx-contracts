@@ -23,7 +23,7 @@ describe("PreSaleRound — flat bonus mode (Genesis)", function () {
   const srx = (n) => ethers.parseUnits(String(n), 18);
 
   async function baseFixture() {
-    const [admin, investor1, investor2] = await ethers.getSigners();
+    const [admin, investor1, investor2, treasury] = await ethers.getSigners();
 
     const MockLZEndpoint = await ethers.getContractFactory("MockLZEndpoint");
     const endpoint = await MockLZEndpoint.deploy(40161);
@@ -41,7 +41,7 @@ describe("PreSaleRound — flat bonus mode (Genesis)", function () {
     const ethFeed = await MockFeed.deploy(ETH_PRICE_8DEC);
     const btcFeed = await MockFeed.deploy(BTC_PRICE_8DEC);
 
-    return { token, usdc, usdt, wbtc, ethFeed, btcFeed, admin, investor1, investor2 };
+    return { token, usdc, usdt, wbtc, ethFeed, btcFeed, admin, investor1, investor2, treasury };
   }
 
   async function deployRound(env, flat, bonusBps, cap = GENESIS_CAP) {
@@ -57,7 +57,8 @@ describe("PreSaleRound — flat bonus mode (Genesis)", function () {
       cap,
       SRX_PRICE_8DEC,
       flat,
-      bonusBps
+      bonusBps,
+      env.treasury.address // vaultRevokeRecipient (internal audit M2)
     );
     // Identity checked and agreement accepted — the only wallets that may buy.
     await approveBuyers(round, env.admin, [env.investor1, env.investor2]);

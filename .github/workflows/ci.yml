@@ -2,6 +2,10 @@ name: CI — SRX Token
 
 # Runs on every PR and on every push to main / develop.
 # All jobs must pass before a PR can be merged (branch protection enforces this).
+#
+# Every job runs on Syrax's own runner (CI-02, Security ruling 15 Oct 2026). Every action is pinned to an
+# exact commit; Node, Foundry, uv and TruffleHog are pinned downloads whose sha256 is checked BEFORE anything is
+# extracted; npm installs use `npm ci --ignore-scripts`; Slither installs from a hash-locked requirements file.
 
 on:
   pull_request:
@@ -9,7 +13,7 @@ on:
   push:
     branches: [main, develop]
 
-# Cancel in-progress runs when a PR receives a new push — saves CI minutes
+# Cancel in-progress runs when a PR receives a new push — a superseded commit needs no result
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -25,19 +29,23 @@ jobs:
   # ── Hardhat unit tests ──────────────────────────────────────────────────────
   hardhat:
     name: Hardhat tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Setup Node 20.19.3 (pinned download, sha256 checked)
+        # nodejs.org/dist/v20.19.3/SHASUMS256.txt: 76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o node.tar.gz https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz
+          echo "76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3  node.tar.gz" | sha256sum -c -
+          tar -xzf node.tar.gz
+          echo "$RUNNER_TEMP/node-v20.19.3-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Compile contracts
         run: npx hardhat compile
@@ -48,27 +56,37 @@ jobs:
   # ── Foundry tests (invariants + property fuzz) ─────────────────────────────
   foundry:
     name: Foundry tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Setup Node 20.19.3 (pinned download, sha256 checked)
+        # nodejs.org/dist/v20.19.3/SHASUMS256.txt: 76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o node.tar.gz https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz
+          echo "76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3  node.tar.gz" | sha256sum -c -
+          tar -xzf node.tar.gz
+          echo "$RUNNER_TEMP/node-v20.19.3-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Install Node deps (for OZ + LZ remappings)
-        run: npm ci
+        run: npm ci --ignore-scripts
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
-        with:
-          version: stable
+      - name: Install Foundry v1.8.5 (pinned download, sha256 checked)
+        # pinned 8 Oct 2026 (board 656063d0): the version run locally; bump deliberately with a re-run.
+        # github.com/foundry-rs/foundry/releases/download/v1.8.5/foundry_v1.8.5_linux_amd64.sha256 (upstream's own checksum file)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/foundry" && cd "$RUNNER_TEMP/foundry"
+          curl -fsSL -o foundry.tar.gz https://github.com/foundry-rs/foundry/releases/download/v1.8.5/foundry_v1.8.5_linux_amd64.tar.gz
+          echo "6c66ffcc55fa4249197721baa3098bc208014ea1d8aa04b2ed50ac6bccffb226  foundry.tar.gz" | sha256sum -c -
+          tar -xzf foundry.tar.gz
+          echo "$RUNNER_TEMP/foundry" >> "$GITHUB_PATH"
 
       - name: Install forge-std
-        run: mkdir -p lib && git clone https://github.com/foundry-rs/forge-std lib/forge-std
+        run: mkdir -p lib && git clone --depth 1 --branch v1.16.1 https://github.com/foundry-rs/forge-std lib/forge-std   # pinned tag (was HEAD, so two runs of one commit could differ)
 
       - name: Verify build
         run: forge build
@@ -79,75 +97,160 @@ jobs:
   # ── Slither static analysis ────────────────────────────────────────────────
   slither:
     name: Slither static analysis
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Setup Node 20.19.3 (pinned download, sha256 checked)
+        # nodejs.org/dist/v20.19.3/SHASUMS256.txt: 76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o node.tar.gz https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz
+          echo "76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3  node.tar.gz" | sha256sum -c -
+          tar -xzf node.tar.gz
+          echo "$RUNNER_TEMP/node-v20.19.3-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Install Node deps
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      # ⛔ crytic/slither-action@v0.4.0 runs Python < 3.10 inside its container, which cannot
+      #    install Slither 0.11.6 (needs >= 3.10): pinning the version there failed the job
+      #    on 7 Oct 2026. Install it directly instead, the same way it is run locally.
+      #    The runner image has Python 3.12 but no pip, so uv (a pinned download) installs it into a venv.
+      - name: Setup uv 0.12.21 (pinned download, sha256 checked)
+        # github.com/astral-sh/uv/releases/download/0.12.21/uv-x86_64-unknown-linux-gnu.tar.gz.sha256 (upstream's own checksum file)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o uv.tar.gz https://github.com/astral-sh/uv/releases/download/0.12.21/uv-x86_64-unknown-linux-gnu.tar.gz
+          echo "23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0  uv.tar.gz" | sha256sum -c -
+          tar -xzf uv.tar.gz
+          echo "$RUNNER_TEMP/uv-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+
+      - name: Install Slither
+        # slither-analyzer==0.11.6: the version run locally on 7 Oct 2026 (0 High, 0 Medium).
+        # Every package is pinned with hashes in scripts/ci/requirements-slither.txt; wheels only (the image has no compiler).
+        env:
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          set -euo pipefail
+          uv venv --python "$(command -v python3)" "$RUNNER_TEMP/slither-venv"
+          uv pip install --python "$RUNNER_TEMP/slither-venv/bin/python" --require-hashes --no-build -r scripts/ci/requirements-slither.txt
+          echo "$RUNNER_TEMP/slither-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/slither-venv/bin/slither" --version
+
+      - name: Compile (Hardhat)
+        run: npx hardhat compile
 
       - name: Run Slither
-        uses: crytic/slither-action@f197989dea5b53e986d0f88c60a034ddd77ec9a8 # v0.4.0
-        with:
-          slither-config: slither.config.json
-          fail-on: high
+        # Hardhat is forced: foundry.toml would otherwise be picked, and lib/ is absent here.
+        # --fail-medium: raised from high on 7 Oct 2026 (0 Medium at 0.11.6).
+        run: >
+          slither . --config-file slither.config.json
+          --compile-force-framework hardhat --hardhat-ignore-compile
+          --fail-medium
 
   # ── Solhint linting ────────────────────────────────────────────────────────
   solhint:
     name: Solhint lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Setup Node 20.19.3 (pinned download, sha256 checked)
+        # nodejs.org/dist/v20.19.3/SHASUMS256.txt: 76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o node.tar.gz https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz
+          echo "76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3  node.tar.gz" | sha256sum -c -
+          tar -xzf node.tar.gz
+          echo "$RUNNER_TEMP/node-v20.19.3-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Install Node deps
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Run solhint
         run: npm run lint
 
   # ── Secret scanning ────────────────────────────────────────────────────────
+  # TruffleHog's own action is replaced by its release binary: a guard must not depend on a marketplace action.
+  # Same scan as before (--only-verified: a finding is a credential the provider confirms is live). It still reads
+  # the full history, now fetched with plain git and the job's own token sent as a one-off header, never stored.
   secrets:
     name: Secret scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: [self-hosted, syrax-ephemeral]
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout with history (plain git, token never stored)
+        run: |
+          set -euo pipefail
+          mkdir repo && cd repo
+          git init --quiet
+          AUTH="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)"
+          echo "::add-mask::${AUTH}"   # Actions masks the token itself, not its base64 form (Security, 15 Oct)
+          git -c http.extraHeader="AUTHORIZATION: basic ${AUTH}" fetch --quiet --no-tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" "+refs/heads/*:refs/remotes/origin/*" "${GITHUB_SHA}"
+          git checkout --quiet --detach "${GITHUB_SHA}"
+          rm -f .git/FETCH_HEAD
+          echo "scanning at $(git rev-parse --short HEAD)"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: TruffleHog 3.99.2 (pinned download, sha256 checked)
+        # Same release the action was pinned to (v3.99.2).
+        # github.com/trufflesecurity/trufflehog/releases/download/v3.99.2/trufflehog_3.99.2_checksums.txt (upstream's own checksum file)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trufflehog" && cd "$RUNNER_TEMP/trufflehog"
+          curl -fsSL -o trufflehog.tar.gz https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.2/trufflehog_3.99.2_linux_amd64.tar.gz
+          echo "3c7b0d1dc4278294269bfdd7594bca8bb28c78da0a4a06ad202ded37b48deca4  trufflehog.tar.gz" | sha256sum -c -
+          tar -xzf trufflehog.tar.gz trufflehog
+          echo "$RUNNER_TEMP/trufflehog" >> "$GITHUB_PATH"
 
       - name: TruffleHog scan
-        uses: trufflesecurity/trufflehog@e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9 # v3.99.2 (was @main)
-        with:
-          path: ./
-          extra_args: --only-verified
+        working-directory: repo
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          trufflehog --version
+          since=""
+          if [ -n "${BASE:-}" ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            since="${BASE}"
+          elif [ -n "${BEFORE:-}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            since="${BEFORE}"
+          fi
+          if [ -n "$since" ]; then
+            echo "scanning from ${since} to HEAD"
+            trufflehog git file://. --since-commit "$since" --branch HEAD --fail --no-update --only-verified
+          else
+            echo "first run here, a new branch or an unknown base: scanning the whole history"
+            trufflehog git file://. --fail --no-update --only-verified
+          fi
 
   # ── Dependency audit ───────────────────────────────────────────────────────
   npm-audit:
     name: npm dependency audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Setup Node 20.19.3 (pinned download, sha256 checked)
+        # nodejs.org/dist/v20.19.3/SHASUMS256.txt: 76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o node.tar.gz https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz
+          echo "76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3  node.tar.gz" | sha256sum -c -
+          tar -xzf node.tar.gz
+          echo "$RUNNER_TEMP/node-v20.19.3-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Audit
         run: npm audit --audit-level=high
@@ -155,10 +258,21 @@ jobs:
 
   doc-refs:
     name: Documentation references resolve
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral]
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout by SHA (plain git, token never stored)
+        run: |
+          set -euo pipefail
+          mkdir repo && cd repo
+          git init --quiet
+          AUTH="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)"
+          git -c http.extraHeader="AUTHORIZATION: basic ${AUTH}" \
+            fetch --depth 1 --quiet "https://github.com/${GITHUB_REPOSITORY}.git" "${GITHUB_SHA}"
+          git checkout --quiet FETCH_HEAD
+          rm -f .git/FETCH_HEAD
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       # ⭐ The first thing an auditor does with a security package is open the
       #    documents it cites. On 10 Sep 2026 this repo referenced ~20 documents
@@ -167,12 +281,14 @@ jobs:
       #    by reading, so a machine does it. Known gaps live in an allow-list
       #    WITH REASONS, so a gap is a decision on record rather than a silence.
       - name: Check every referenced file exists
+        working-directory: repo
         run: python3 scripts/ci/check-doc-refs.py
 
   # ── Gate job — fails if any required job failed ────────────────────────────
   all-checks:
     name: All required checks passed
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral]
+    timeout-minutes: 5
     needs: [hardhat, foundry, slither, solhint, secrets, doc-refs]
     if: always()
     steps:

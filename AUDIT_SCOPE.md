@@ -3,12 +3,16 @@
 Prepared so that an external audit can begin quickly once an engagement is agreed.
 This document gives an auditor everything needed to (a) quote accurately and (b) start fast.
 
-⚠️ **Internal audits are complete. An independent external audit is next, ahead of any mainnet
-deployment. No external audit report exists yet**, and no outside firm has reviewed this code.
+⚠️ **The internal audits are done, and a few items from the latest one are still open for design
+decisions (§6 and §7). An independent external audit is next, ahead of any mainnet deployment.
+It is upcoming and has not been engaged. No external audit report exists**, and no outside firm
+has reviewed this code.
 
-**Package refreshed 23 September 2026** after a full pre-external-audit sweep. The
-findings and fixes from that sweep are in `REMEDIATION.md` (top section); read
-it first, because it also lists what is still open.
+**Package refreshed 16 October 2026** after our own internal audit of every contract (§6),
+which followed twelve outside reports since 30 September. The previous refresh was 7 October,
+after three external reports and a claims-against-tests review of every security statement in
+the code and documents. The findings and fixes are in `REMEDIATION.md` (top section, then
+12 Oct, 7 Oct, 1 Oct and 23 Sep); read it first, because it also lists what is still open.
 
 ---
 
@@ -34,30 +38,35 @@ Merkle airdrop and a burn-to-migrate path for a future app-chain.
 ## 3. Scope
 
 **In scope — 15 production contracts under `contracts/` (excluding `mocks/`, `test/`,
-`echidna/`): 7,194 lines, 3,338 nSLOC** (non-blank, non-comment; measured 25 Sep 2026).
+`echidna/`): 8,034 lines, 3,616 nSLOC** (non-blank, non-comment lines; measured 16 Oct 2026 on
+the internal-audit commits. The earlier figures, 7,194 lines and 3,338 nSLOC on 25 Sep, used
+a different counter and predate REG-50, REG-53, REG-54 and the 16 Oct fixes).
 
 | Contract | Lines | nSLOC | Notes |
 |---|---|---|---|
-| `presale/PreSaleRound.sol` | 1,380 | 714 | ETH/BNB, USDC, USDT, WBTC purchases; approved buyers only, each capped at an agreed USD amount; Chainlink pricing; flat or tiered bonus; refunds; creates a VestingVault per investor |
-| `staking/SRXStaking.sol` | 1,174 | 498 | UUPS. Fee-tier locks, SRX and bonus Synthetix reward streams |
-| `stabilisation/StabilisationFund.sol` | 970 | 414 | UUPS. Three-tier deployment, contributor rewards |
-| `guardian/GuardianModule.sol` | 667 | 412 | Non-upgradeable. Per-module pause, circuit breaker, immutable sunset |
-| `staking/FeeController.sol` | 430 | 213 | UUPS. Fee calculator and fee-destination table |
-| `token/SRXToken.sol` | 454 | 180 | OFT hub + Permit + Votes + launch protection + per-chain outflow accounting |
-| `vesting/VestingVault.sol` | 356 | 153 | Single-beneficiary linear vesting, revoke, declared grant |
-| `buyback/BuybackBurner.sol` | 326 | 145 | Capped swap-and-burn and direct burn |
-| `governance/SRXGovernor.sol` | 207 | 125 | OZ Governor (timestamp clock; quorum on the fixed global cap) |
-| `treasury/SRXTreasury.sol` | 259 | 121 | UUPS. Timelock-only spend, buy-and-burn |
-| `migration/ZkSyncMigrator.sol` | 294 | 105 | Burn-to-migrate, chain-separated request ids |
-| `bridge/SRXOFTNative.sol` | 226 | 97 | Spoke OFT: talks to the Ethereum hub only |
-| `airdrop/SRXAirdrop.sol` | 213 | 80 | Chain-bound double-hash Merkle airdrop |
-| `token/TGEDistributor.sol` | 187 | 69 | One-shot genesis distribution |
-| `governance/SRXTimelock.sol` | 51 | 12 | OZ TimelockController, 48h on mainnet |
+| `presale/PreSaleRound.sol` | 1,411 | 719 | ETH/BNB, USDC, USDT, WBTC purchases; approved buyers only, each capped at an agreed USD amount; Chainlink pricing; flat or tiered bonus; refunds; creates a VestingVault per investor |
+| `staking/SRXStaking.sol` | 1,184 | 463 | Plain contract (REG-53). Fee-tier locks, one SRX reward stream from a fixed allocation (REG-50), irreversible wind-down |
+| `stabilisation/StabilisationFund.sol` | 1,259 | 517 | Plain contract (REG-53). Three-tier deployment, depositor rewards from a fixed allocation (REG-50), irreversible wind-down |
+| `guardian/GuardianModule.sol` | 951 | 556 | Non-upgradeable. Per-module pause, bridge-only circuit breaker, bounded guardian token pause, sunset at most 180 days |
+| `staking/FeeController.sol` | 408 | 184 | Plain contract (REG-53). Fee calculator with a fixed 0.15% floor and 5% ceiling (REG-54), fee-destination table |
+| `token/SRXToken.sol` | 617 | 248 | OFT hub + Permit + Votes + launch protection + per-chain outflow accounting + bridge-only stop + wind-down exits |
+| `vesting/VestingVault.sol` | 360 | 153 | Single-beneficiary linear vesting, revoke, declared grant |
+| `buyback/BuybackBurner.sol` | 326 | 141 | Capped swap-and-burn and direct burn |
+| `governance/SRXGovernor.sol` | 208 | 124 | OZ Governor (timestamp clock; quorum on the fixed global cap) |
+| `treasury/SRXTreasury.sol` | 232 | 105 | Plain contract (REG-53). Timelock-only spend, buy-and-burn |
+| `migration/ZkSyncMigrator.sol` | 300 | 105 | Burn-to-migrate, chain-separated request ids |
+| `bridge/SRXOFTNative.sol` | 294 | 125 | Spoke OFT: talks to the Ethereum hub only; refuses plain transfers to its own address; owner-only `rescueTokens` |
+| `airdrop/SRXAirdrop.sol` | 221 | 82 | Chain-bound double-hash Merkle airdrop |
+| `token/TGEDistributor.sol` | 192 | 74 | One-shot genesis distribution |
+| `governance/SRXTimelock.sol` | 71 | 20 | OZ TimelockController, 48h on mainnet |
+
+Also in scope but not counted above: `token/ITGEAllocationSource.sol` (10 lines), the interface a
+reward pool reads its launch allocation through (a `TGEDistributor`, or a wound-down predecessor).
 
 **Out of scope by default:** `contracts/mocks/`, `contracts/test/`, `contracts/echidna/`,
 `test/`, OpenZeppelin and LayerZero library code.
 
-**Out of scope, available on request:** `contracts/genesis/GenesisAgreementRegistry.sol` (48 lines).
+**Out of scope, available on request:** `contracts/genesis/GenesisAgreementRegistry.sol` (50 lines).
 It records, on the Syrax Chain, that a wallet accepted a Genesis purchase agreement: one
 function, no admin, no funds, no upgrade path. Its commitment is the `agreementRef` that
 `PreSaleRound.setBuyerApprovals` stores, so it is quoted separately rather than left out silently.
@@ -67,7 +76,7 @@ function, no admin, no funds, no upgrade path. Its commitment is the `agreementR
 after launch and move the full 10B supply. Two defects of that kind were found in this sweep
 (DEP-01, DEP-02). We would value them in scope.
 
-**Complexity flags for quoting:** 4 UUPS-upgradeable contracts; LayerZero V2 OFT in a
+**Complexity flags for quoting:** no upgradeable contracts (REG-53); LayerZero V2 OFT in a
 hub-and-spoke topology with hub-side outflow accounting; Chainlink integration with
 per-feed staleness and bounds; two Synthetix-pattern reward systems with liability tracking;
 Governor + Timelock with a two-phase role hand-over.
@@ -81,33 +90,74 @@ Governor + Timelock with a two-phase role hand-over.
   | Package | Version |
   |---|---|
   | `@openzeppelin/contracts` | 5.6.1 |
-  | `@openzeppelin/contracts-upgradeable` | 5.6.1 |
+  | `@openzeppelin/contracts-upgradeable` | 5.6.1 (still installed, but no contract imports it since REG-53; only the verify gate's `hardhat-upgrades` check needs it) |
   | `@layerzerolabs/oft-evm` | 4.0.1 |
   | `@layerzerolabs/oapp-evm` | 0.4.1 |
   | `@layerzerolabs/lz-evm-protocol-v2` | 3.0.168 |
 
 - Build: `npm ci` (the repo's `.npmrc` sets `legacy-peer-deps=true` for a LayerZero transitive
   peer conflict), then `npx hardhat compile`. Foundry: `forge build` with `forge-std` in `lib/`.
-- `PreSaleRound` deploys `VestingVault` inline; its runtime is 23,902 bytes against the 24,576
-  limit. Any change to either contract should re-check it.
+- `PreSaleRound` deploys `VestingVault` inline; its runtime was 23,902 bytes against the 24,576
+  limit when last measured, which was before the 16 Oct change to `recoverSRX` (L6). Any change
+  to either contract should re-check it (`npx hardhat size-contracts`).
 
 ## 5. Tests and static analysis
 
-- **Hardhat:** 863 passing, 1 pending, 0 failing (`npx hardhat test`, 29 Sep 2026).
-- **Line coverage** (`npx hardhat coverage`, the 15 in-scope contracts only): 95.5% of
-  statements, 74.9% of branches, 93.3% of functions. Lowest statement coverage: SRXGovernor
-  80.0%, PreSaleRound 93.3%, FeeController 93.3%. Lowest branch coverage: PreSaleRound 70.7%,
-  GuardianModule 71.2%, BuybackBurner 71.6%.
+- **Hardhat:** over 1,200 passing (1,204 at the last full run, 16 Oct 2026), 0 failing (`npx hardhat test`). The regression tests for the 16 Oct internal audit are in `test/internal-audit/`; each was red on the old code. The bridge integration suite (`test/Bridge.test.js`) was skipped until 8 Oct while REMEDIATION.md cited it; it now runs on real relayed messages.
+- **Line coverage** (`npx hardhat coverage`, the 15 in-scope contracts only, 7 Oct 2026):
+  98.1% of statements, 83.9% of branches, 97.3% of functions (29 Sep: 95.5%, 74.9%, 93.3%).
+  Lowest statement coverage: SRXGovernor 80.0% (two OpenZeppelin pass-through overrides),
+  FeeController 93.5%, StabilisationFund 93.8%. Lowest branch coverage: StabilisationFund 76.8%,
+  GuardianModule 77.8%, SRXTreasury 81.5%. (These figures predate REG-50, 11–12 Oct, which removed
+  `StabilisationFund.receiveFees` and `recoverLiquidity` and the staking bonus stream, REG-53, and
+  the 16 Oct fixes. Re-run before tagging.)
+- **Claims against tests (7 Oct 2026):** every "never / cannot / only / at most" statement in
+  the natspec and the security documents was mapped to a test. 143 tests were added where none
+  existed (`test/Gaps.*.test.js`); where the code was wrong it was fixed (REMEDIATION.md R7-01
+  to R7-12), and where a comment promised more than the code does, the comment was corrected
+  (R7-13).
+- **Cross-chain conservation** (`test/BridgeConservation.property.test.js`): seeded random
+  sequences of honest bridging, forged spoke mints, retried returns, limit changes and freezes.
+  After every step: exact accounting on Ethereum and across both chains, the inbound limit
+  equals a model draining bucket exactly, and what Ethereum credits stays within the limit
+  times (1 + elapsed days). Replay one seed with `SRX_PROP_SEED`.
   `test/audit-poc/` holds the proof tests for every internal finding — each one was red on the
   code as found. Start there.
-- **Foundry:** 7 token invariants (supply equation, balance sum, voting power ≤ supply, burned
-  ≤ max, burned monotonic, genesis once, no holder above supply) at 256 runs × depth 50, and 4
-  PreSaleRound property fuzz tests at 1,000 runs. The nightly CI profile raises these to
-  1,024 × 100 and 10,000.
+- **Foundry, cross-chain (8 Oct 2026):** 4 bridge invariants over a hub and a spoke driven by random
+  honest bridging, forged spoke mints, refused and retried returns, limit changes and freezes
+  (`test/foundry/invariant/BridgeConservationInvariant.t.sol`): Ethereum's accounting is exact,
+  only forged SRX is unbacked, a forger gets at most the limit times (1 + elapsed days), and the
+  supply cap holds. Green at 1,024 runs x 100 calls; removing the hub's limit fails it.
+- **Foundry:** 16 invariants in all: 7 token invariants (supply equation, balance sum, voting
+  power ≤ supply, burned ≤ max, burned monotonic, genesis once, no holder above supply), the 4
+  bridge invariants above, and 5 reward-pool invariants (REG-50,
+  `test/foundry/invariant/RewardPoolsInvariant.t.sol`: rewards backed only by the launch
+  allocation, the fund never releases reserved SRX, fees never become rewards, rewards never
+  released to a wallet). They run at 256 runs × depth 50 locally. 4 PreSaleRound property fuzz
+  tests and 1 GenesisAgreementRegistry fuzz test run at 1,000 runs. The nightly CI profile
+  raises these to 1,024 × 100 and 10,000; the last full nightly pass on record was 7 Oct 2026
+  (Foundry 1.8.5), before REG-50 and the 16 Oct fixes.
+- **Testnet proof, Sepolia ↔ BNB Chain testnet (7–8 Oct 2026, test tokens only)**, with the
+  suite redeployed from `0deaa30` (addresses: `docs/ADDRESSES.md`; that deployment predates
+  REG-50, REG-53, REG-54 and the 16 Oct fixes, and will be redeployed):
+  - transfers both ways, each verified by two DVNs (LayerZero Labs and Nethermind);
+  - a return above the hub's daily limit refused (`InboundLimitExceeded`), then delivered in full
+    once the limit was raised;
+  - the guardian froze BNB testnet's returns through `GuardianModule.freezeBridgeInbound`; a return
+    was refused (`InboundChainFrozen`) and delivered after governance lifted the freeze;
+  - the spoke handed to its own Timelock; `verify_spoke.js` passed (owner and delegate, hub-only peer,
+    two DVNs each way, delivery gas);
+  - accounting exact at the end: spoke supply 74,000 SRX = the hub's `outstandingByEid`, and hub
+    supply + outstanding = 10B.
+  The proof is repeatable with `scripts/ops/bridge_proof.js`.
 - **Role hand-over rehearsal:** `scripts/ops/rehearse_role_migration.js` runs the real migration
   and gate against a local chain (instructions in the file).
-- **Slither** runs on every push with `fail-on: high`; excluded detectors and the reason for each
-  are in `slither.config.json`. **Solhint**, `npm audit`, a secret scan and a documentation
+- **Slither 0.11.6** (latest at 7 Oct 2026) runs on every push with `fail-on: medium`: 0 High,
+  0 Medium, including on the 16 Oct internal-audit commits. Each reviewed exception is a dated `slither-disable-next-line` comment with its
+  reason, next to the code. Since 8 Oct no detector that can report High is excluded
+  repo-wide (`arbitrary-send-erc20`, `arbitrary-send-eth` and `reentrancy-no-eth` were); the
+  remaining exclusions and their reasons are in `slither.config.json`. Foundry is pinned (forge
+  v1.8.5, forge-std v1.16.1). **Solhint**, `npm audit`, a secret scan and a documentation
   reference check also gate every push.
 - ⚠️ Echidna (`contracts/echidna/`) is a local harness, not a CI control. Its original
   properties could not fail; it was rewritten, but reinstating it in CI needs a pinned image and
@@ -115,15 +165,64 @@ Governor + Timelock with a two-phase role hand-over.
 
 ## 6. Prior internal review
 
-Two remediation passes, both proven by tests — see `REMEDIATION.md`:
+Three remediation passes, all proven by tests — see `REMEDIATION.md`:
 
 | Pass | Outcome |
 |---|---|
 | 10 Sep 2026 | 31 proven findings, every one dispositioned (one of them, F6, was later found not fixed — corrected 23 Sep) |
 | 23 Sep 2026 | 1 Critical, 4 High (one deployment), 11 Medium, plus Low and Info — fixed with proofs, or listed as open |
+| 16 Oct 2026 | Internal audit (board 3af6f2d5): 0 Critical, 0 High, 12 Medium, 17 Low, about 30 Info. Fixed: 6 Medium, 15 Low and the gate half of M11. Waiting for a design decision: M2, M3, M4, M8, M9, L7, L8, L9 and the design half of M11 (below) |
 
 Earlier review rounds (R1–R6) are summarised in `docs/audits/README.md`. The consolidated report
 and the per-round reports are available to an external auditor on request.
+
+### Internal audit, 16 October 2026
+
+**Why it was done.** Twelve outside reports reached us between 30 September and 16 October.
+Most had one shape: a fix or limit present in one function was missing from its twin. So every
+contract was reviewed again, on commit `7bc32fa` (`main` plus PR 20 and PR 21), by six
+independent groups: staking, money paths, token and bridge, distribution, control, and a claims
+group. This is an internal audit and **not** the external audit.
+
+**Method.** Each group applied all of these to its own contracts, following cross-contract calls:
+1. a twin and sibling sweep (a parity table for every pair of functions that do the same job);
+2. every state-changing function: caller, worst case for a compromised key or a typo, and what
+   stops it;
+3. accounting invariants on the rare paths (pause, wind-down, rescue, early exit, bridge,
+   shortfall, rounding);
+4. entry-point hooks: which update hooks each entry point runs (a skipped hook is a finding);
+5. funds with no exit, and rescues or sweeps that could take what users are owed;
+6. docs against code: every "never / cannot / only / at most" statement, checked against the
+   code and a test;
+7. Slither 0.11.6 (0 High, 0 Medium) and mutation / fail-first tests: every fix's test was shown
+   to fail on the old code. Every finding at Low or above had a passing proof test.
+
+**Counts.** 0 Critical, 0 High, **12 Medium**, **17 Low**, about 30 Info, and about 30 stale
+facts in the documents (corrected). The claims group found 15 documented guarantees that did
+not hold at the review commit, and 7 that were only weakly tested. Where a fix makes a claim
+true, the wording now matches the new behaviour exactly; where the claim is tied to an open
+item below it is kept as the build target and marked "Open: internal audit ..." in the
+document.
+
+**Fixed in the code** (full table with tests in `REMEDIATION.md`): M1, M5, M6, M7, M10, M12;
+L1 to L6, L10 to L13 and L15; the spoke rescue (board 585533e0); L17 (wording). Regression tests
+are in `test/internal-audit/`.
+
+**Also fixed:** L14 (the circuit-breaker monitor also counts returns), L16 (the launch gate
+checks the guardian's module registry and breaker settings), and the gate half of M11 (the gate
+fails on Timelock operations still pending from before the hand-over).
+
+**Open, for the external auditor's attention.** These are awaiting a design decision by
+Security and Jared. Please review them as open, not as accepted:
+- **M3** A paying Genesis buyer can be removed after their vault exists, with no refund; and
+  **L7**, only the Safe can start a Genesis vault's clock.
+- **M4** and **L9** The Safe keeps `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE` and `BURN_ROLE` on every
+  spoke. The spoke pause has none of the hub's limits, and a spoke's burns are invisible to the
+  hub, so "10B − `totalBurned`" is false after a spoke burn.
+- **M8** The Safe's Timelock veto can cancel the operation that would remove it.
+- **M9** The fixed 400M quorum is about 89% of the votable launch float.
+- **M11** (design half) The temporary Timelock proposer window before the hand-over.
+- **L8** WBTC is priced at BTC/USD with no depeg feed.
 
 ## 7. Trust model, known issues, and where we want scrutiny
 
@@ -134,23 +233,85 @@ veto. The operational contracts the Safe does administer are listed there with w
 administrator can reach.
 
 **Known and open — please do not spend time re-finding these** (details in `REMEDIATION.md`):
-PSR-03 (presale chain and funding decision), SPOKE-01 (spoke owner actions not delayed, bounded
-by hub accounting), PSR-09 (vault/launch-limit ordering), STK-L1 (fresh proxies required),
-SSF-L1 (sole-contributor stream, accepted), F2 (lazy weight decay, mitigated), and the
-launch-protection scope notes B/T2/D.
+PSR-09
+(vault/launch-limit ordering), F2 (lazy weight decay,
+mitigated), the launch-protection scope notes B/T2/D, and the internal-audit items listed under
+"Open, for the external auditor's attention" in §6 (M3, M4, M8, M9, M11, L7, L8, L9; M2 was fixed on 22 Oct). STK-L1
+(fresh proxies required) is moot since REG-53: there are no proxies.
+
+**Settled since the last revision** (in scope; please review the fixes): the 16 Oct internal
+audit fixes (§6, `REMEDIATION.md`), notably: a successor's reward backing is re-read until
+wind-down (M1); a top-up always serves a full term (M5, M6); the guardian's token-pause run is
+at most 14 days across breaks under 7 days (M7); quorum is read at the proposal's snapshot
+(M10); a pause governance holds or adopts can be lifted only by governance (M12); there is no
+stranded-pool rescue, so the only exit for an unused reward pool is the release to a successor
+(L1); pauses under 7 days apart are one run and only time actually paused counts towards the 30-day wind-down clock (L2); the fund's
+withdrawal lock is per deposit and at most 90 days (L3); `recoverSRX` takes only the surplus
+above what Genesis buyers are owed (L6); and anyone may lift a guardian pause after the sunset
+(L15). Also REG-53 (12 Oct): no SRX
+contract is upgradeable (SRXStaking, FeeController, StabilisationFund and SRXTreasury are plain
+contracts); SRXStaking and StabilisationFund have an irreversible wind-down (exit-only, exact
+principal, works while paused) and a Timelock-only release of unused reward allocation to an
+opt-in successor (see `docs/MIGRATION.md` and the REG-53 section of `REMEDIATION.md`). REG-54 and
+the token-pause ruling (12 Oct): FeeController's floor and ceiling are constants; the circuit
+breaker stops the bridge only; a token pause never blocks an exit-only withdrawal; guardian token
+pauses lapse after 14 days and total at most 30; the guardian's sunset is capped at 180 days in its
+constructor (see the first section of `REMEDIATION.md`). REG-50 (12 Oct):
+staking and fund rewards come only from fixed SRX allocations, backed only by what the launch
+`TGEDistributor` delivered; the staking bonus ("real yield") stream, `receiveFees` and
+`recoverLiquidity` (R7-16) are removed; no caller can deploy the fund's depositor principal or
+reward SRX (see the REG-50 section of `REMEDIATION.md`). Also SPOKE-01
+(spoke owner actions had no delay), closed on 7 October 2026: each spoke's owner and
+LayerZero delegate is that chain's own 48-hour Timelock (see the 7 October section of
+`REMEDIATION.md`). Also PSR-03, where
+the Genesis round runs on Ethereum only and is funded from the seed allocation
+(`scripts/deploy/lib/genesis_seed.js`, `06b_genesis_vaults.js`). Also SSF-L1, the
+StabilisationFund minimum position, and SC-TRUST-001, where upgrade and spending rights
+now administer themselves. See the 1 October section of `REMEDIATION.md`.
 
 **Where we most want an independent view:**
-1. **Bridge conservation** — hub-and-spoke outflow accounting (`outstandingByEid`), the spoke
-   `hubEid` restriction, the supply cap in `_update`, and the DVN configuration we require
-   (≥ 2 DVNs; set manually, see `scripts/deploy/07_deploy_bridge.js`).
+1. **Bridge conservation** — hub-and-spoke outflow accounting (`outstandingByEid`), the hub's
+   per-chain inbound limit (a draining bucket; a chain with no limit returns nothing) and the
+   guardian's per-chain freeze, the spoke `hubEid` restriction and its locked hub peer (`HubPeer`:
+   `setPeer` accepts only the hub or zero), the supply cap in `_update`, and the DVN configuration
+   we require (≥ 2 DVNs; set manually, see `scripts/deploy/07_deploy_bridge.js`). The exact
+   containment bound for a compromised spoke is **the chain's inbound limit, plus one more
+   limit for each day of reaction time before the guardian freezes it** (not "the limit"); the
+   property test uses limit × (1 + elapsed days). Open here: the Safe's powers on a spoke and
+   the spoke's unbounded pause (M4), and spoke burns that the hub cannot see (L9).
 2. **Role topology and the hand-over** — the gate, the two-phase migration, and anything that
    would leave undelayed power after it.
 3. **PreSaleRound money paths** — oracle math, decimals handling, the refund ring-fence, the
    tier inversion, and the approved-buyer cap (`setBuyerApprovals`, `_requireApproved`): no
    wallet may be credited, on chain or by the admin, beyond its agreed amount.
 4. **Reward accounting** — liability tracking and emission scheduling in Staking and the
-   StabilisationFund.
+   StabilisationFund, and the REG-50 property that no SRX other than the delivered launch
+   allocation can ever back or extend a reward pool (`syncAllocation`, `rewardBacking`,
+   `_reservedSRX`).
 5. **Deployment** — see §3.
+6. **Wind-down and migration (REG-53)** — that `exitAfterWindDown` can never return more or less
+   than a holder's principal, cannot be blocked by the contract's own pause, the token's, or the
+   launch wallet cap (which no longer applies to SRX leaving a listed wind-down exit; L10, 16 Oct),
+   and that `releaseRewardAllocation` can never reach principal or owed rewards. Since
+   16 Oct there is no stranded-pool rescue (L1): `releaseRewardAllocation` to a named successor,
+   after wind-down, is the only way an unused reward pool can leave. Please also test that
+   anyone may wind a paused contract down only once it has been paused for a total of 30 days
+   within one run of pauses (pauses less than 7 days apart, `PAUSE_BREAK`, are one run; time
+   between them never counts; L2, SWEEP-03), and that a successor's reward backing, re-read until
+   wind-down, only ever rises (M1).
+7. **The pause and its limits (12 Oct 2026, tightened 16 Oct)** — that the token's wind-down
+   exemption in `_update` (a listed contract reporting `windDown()`) cannot be used to move
+   anything but a wound-down pool's own payments (these include governance's `deployLiquidity`
+   of the fund's free SRX, which is bound by the free-balance check); that no sequence of guardian
+   calls (`pauseModule`, `pauseAll`, `unpauseModule`, `lapseTokenPause`) keeps the token paused
+   beyond 14 days at a time (pauses less than 7 days apart count as one run of at most 14 days
+   of paused time, M7) or 30 in total; that a token pause governance holds, or an outside pause
+   a `pauseAll` adopted, can be lifted only by governance (M12); that after the sunset anyone may
+   lift a guardian pause but not a governance-only one (`releaseAfterSunset`, L15); and that the
+   circuit breaker can no longer reach `SRXToken.pause()`. Not bounded in time except by the
+   sunset: a pause on any module other than the token, a bridge stop through `MODULE_BRIDGE`,
+   and a per-chain freeze, until governance acts. `pauseAll` ignores the per-module cooldown on
+   purpose (30 minutes between uses of `pauseAll` itself).
 
 ## 8. What We Can Provide
 
@@ -160,5 +321,4 @@ launch-protection scope notes B/T2/D.
 
 ## 9. Contact
 
-- Technical: **[FILL — name, email]**
-- Security: **security@syrax.global**
+- Technical and security: **security@syrax.global**

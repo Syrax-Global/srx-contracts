@@ -57,7 +57,8 @@ contract PreSaleRoundFuzz is Test {
             HARD_CAP,
             SRX_PRICE,
             false,                     // flatBonusEnabled: these properties test the tier ladder
-            0                          // flatBonusBps
+            0,                         // flatBonusBps
+            address(0x7EA5)            // vaultRevokeRecipient (the Treasury; internal audit M2)
         );
 
         // Fund presale

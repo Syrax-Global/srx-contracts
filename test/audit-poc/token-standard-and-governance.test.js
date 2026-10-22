@@ -147,6 +147,7 @@ describe("ZZ token-standard lens", function () {
     // just a peered remote chain.
     const peer = b32(admin.address);
     await token.connect(admin).setPeer(REMOTE_EID, peer);
+    await token.connect(admin).setInboundLimit(REMOTE_EID, ethers.parseUnits("6000000000", 18)); // disclosure A
     await token.connect(epSigner).lzReceive(
       { srcEid: REMOTE_EID, sender: peer, nonce: 1 },
       ethers.ZeroHash,
