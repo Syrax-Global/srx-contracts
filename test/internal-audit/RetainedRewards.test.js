@@ -1,4 +1,4 @@
-// Yuma's differential case (external report; Security work order A3, 22 Oct 2026), pinned as a
+// A reported differential case (external report, 22 Oct 2026, credit on request; Security work order A3, 22 Oct 2026), pinned as a
 // regression test. Rewards are owed (retained pending) while nobody is staked any more; the
 // only way reward SRX can leave (a release to a successor after wind-down; the stranded-pool
 // rescue is gone, internal audit L1) must leave that liability backed, and an exited staker
@@ -19,7 +19,7 @@ async function token() {
   return srx;
 }
 
-describe("Yuma: retained rewards with no stakers stay backed and claimable", function () {
+describe("Retained rewards (reported 22 Oct): retained rewards with no stakers stay backed and claimable", function () {
   it("staking: after wind-down and every exit, a full release leaves what is owed; each staker claims it", async function () {
     const [admin, alice, bob] = await ethers.getSigners();
     const srx = await token();

@@ -14,7 +14,7 @@ in `docs/audits/STATIC_ANALYSIS_TRIAGE.md`.
 |---|---|---|---|---|
 | A1 (external report, 22 Oct) | Low | `FeeController.calculateFee` and `feeBreakdown` carried `whenNotPaused`, so a paused FeeController made every fee read revert, including the SRX case, which is always 0. | The reads answer while paused. `paused()` stays the stop signal the gateway reads before accepting a payment. | `FeeController` "calculateFee and feeBreakdown still answer while paused" |
 | M2 / A2 (external report, 15 Oct, #4) | Medium | `VestingVault.revoke(recipient)` took the recipient from the caller, so a revoke could name the beneficiary and make a whole locked grant liquid (a Genesis vault instantly, by the Safe). | The recipient is fixed at deployment (`revokeRecipient`, the Treasury) and can never be the beneficiary; `revoke()` takes no argument. `PreSaleRound` passes its own fixed `vaultRevokeRecipient`. | `test/internal-audit/M2.FixedRevokeRecipient.test.js` |
-| A3 (Yuma) | — | Pinned: rewards owed while nobody is staked stay backed through a release, and an exited staker claims them without staking again. | Already true; now a test (mutation-checked). | `test/internal-audit/Yuma.RetainedRewards.test.js` |
+| A3 (reported 22 Oct) | — | Pinned: rewards owed while nobody is staked stay backed through a release, and an exited staker claims them without staking again. | Already true; now a test (mutation-checked). | `test/internal-audit/RetainedRewards.test.js` |
 | A4 (Antoni) | — | Pinned: the bridge target paused directly, then the breaker threshold crossed: the trip latches, is counted, keeps the volume, and does not revert. | Already true; now a test, on the real token and the strict stub. | `GuardianPauseDesync` "breaker trip on a target already paused directly" |
 | SWEEP-01 | Medium | After wind-down a release lowers `rewardBacking`, and the fund's SRX `deployLiquidity` re-read the record and raised it back, so the same allocation could be released twice, paid from free or fee SRX (REG-50). A gap in M1's fix. | `_syncAllocation` does nothing once wound down (both contracts). | `test/internal-audit/Sweep22Oct.test.js` |
 | SWEEP-02 | Low | For the bridge, `setBridgePaused(true)` never fails, so (a) a trip on a stale module flag left the bridge open, and (b) a stop made outside the module was taken over as the guardian's own (M12 bypassed). | A trip always stops the bridge; `pauseModule` refuses a target already paused; `pauseAll` reads first and adopts an outside pause as governance's. | same file |
@@ -40,16 +40,16 @@ development, which is why several had already been fixed there.
 | Reported | Credit | Report | Verdict | Status |
 |---|---|---|---|---|
 | 14 Oct | iblitzc0de | SRX at a spoke contract's own address could never leave | Valid, Low | Fixed: transfers to the spoke refused, Timelock-only rescue (`test/EXT1014.SpokeRescue.test.js`) |
-| 15 Oct | Saurav | Spoke `buyAndBurn` stops while paused | By design, as on the hub (burns stop during a pause) | Documented |
-| 15 Oct | Saurav | Spoke `totalBurned` ignores bridge-out burns | The counter is correct (a bridge-out is not destroyed); the real gap is that a spoke burn is invisible to the hub | Open: internal audit L9 |
-| 15 Oct | Saurav | `TGEDistributor.setAllocations` can be replaced before `distribute()` | Info: only the Safe can call it, and the deploy steps rely on it | No change |
-| 15 Oct | Saurav | `VestingVault.revoke` takes an unvalidated recipient | Valid; the larger form is internal audit M2 | Fixed 22 Oct: the recipient is fixed at deployment, never the beneficiary |
-| 15 Oct | Saurav | A revoke during the cliff gives the beneficiary nothing | By design for launch vaults; for a paying Genesis buyer it is internal audit M3 | Open: M3 |
-| 16 Oct | Saurav | `claimRewards` skipped the expired-weight decay | Valid on the public copy | Fixed by REG-50 (one update hook on every entry point; `test/internal-audit/` entry-point checks) |
-| 16 Oct | Saurav | `rescueStrandedPool` took rewards still owed | Valid on the public copy | Fixed 7 Oct (R7-07); the rescue was then removed entirely (internal audit L1) |
+| 15 Oct | Saurav krrish | Spoke `buyAndBurn` stops while paused | By design, as on the hub (burns stop during a pause) | Documented |
+| 15 Oct | Saurav krrish | Spoke `totalBurned` ignores bridge-out burns | The counter is correct (a bridge-out is not destroyed); the real gap is that a spoke burn is invisible to the hub | Open: internal audit L9 |
+| 15 Oct | Saurav krrish | `TGEDistributor.setAllocations` can be replaced before `distribute()` | Info: only the Safe can call it, and the deploy steps rely on it | No change |
+| 15 Oct | Saurav krrish | `VestingVault.revoke` takes an unvalidated recipient | Valid; the larger form is internal audit M2 | Fixed 22 Oct: the recipient is fixed at deployment, never the beneficiary |
+| 15 Oct | Saurav krrish | A revoke during the cliff gives the beneficiary nothing | By design for launch vaults; for a paying Genesis buyer it is internal audit M3 | Open: M3 |
+| 16 Oct | Saurav krrish | `claimRewards` skipped the expired-weight decay | Valid on the public copy | Fixed by REG-50 (one update hook on every entry point; `test/internal-audit/` entry-point checks) |
+| 16 Oct | Saurav krrish | `rescueStrandedPool` took rewards still owed | Valid on the public copy | Fixed 7 Oct (R7-07); the rescue was then removed entirely (internal audit L1) |
 | 16 Oct | kharqa | `claimBonusRewards` decayed the weight before banking SRX rewards | Valid on the public copy | Fixed by REG-50; pinned by `test/internal-audit/Kharqa.ClaimBanksAtOldWeight.test.js` |
-| 22 Oct | Saurav | `FeeController` fee reads revert while paused | Valid, Low | Fixed 22 Oct (A1) |
-| 22 Oct | Yuma | Retained rewards with no stakers, then a rescue | Already true on development code | Pinned (A3, `test/internal-audit/Yuma.RetainedRewards.test.js`) |
+| 22 Oct | Saurav krrish | `FeeController` fee reads revert while paused | Valid, Low | Fixed 22 Oct (A1) |
+| 22 Oct | An independent researcher (credit on request) | Retained rewards with no stakers, then a rescue | Already true on development code | Pinned (A3, `test/internal-audit/RetainedRewards.test.js`) |
 | Oct | Antoni | A breaker trip on a bridge already stopped directly | Holds: the trip latches, is counted, keeps its volume, does not revert | Pinned (A4, `test/GuardianPauseDesync.test.js`) |
 
 The class sweep's tables (pause on views, twin functions, privileged outflows against what is
