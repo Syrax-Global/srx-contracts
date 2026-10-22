@@ -27,7 +27,13 @@
  *
  * Bridge module note:
  *  The "bridge" in GuardianModule terms is SRXToken itself (OFT send() is on the token).
- *  MODULE_BRIDGE's target is SRXToken — pausing the token blocks bridge sends.
+ *  MODULE_BRIDGE's target is SRXToken, and GuardianModule drives the token's BRIDGE-ONLY
+ *  stop for it (setBridgePaused), never pause(): a circuit-breaker trip stops bridge sends
+ *  and returns and leaves ordinary transfers running (Security ruling, 12 Oct 2026).
+ *
+ * Wind-down exits (Security ruling, 12 Oct 2026):
+ *  Step 4 also lists SRXStaking and StabilisationFund on the token as wind-down exits, so a
+ *  token pause never blocks an exit-only withdrawal. verify_roles.js checks both.
  *  For remote chains, after running 07_deploy_bridge.js, repeat steps 2–5 on each
  *  remote chain's SRXOFTNative using the guardian address on that chain.
  *
@@ -40,14 +46,15 @@
  *  STABILISATION_FUND_<NETWORK> — from Step 5b  ← NEW
  *  GUARDIAN_MULTISIG            — Gnosis Safe holding GUARDIAN_ROLE
  *  CIRCUIT_BREAKER_ADDRESS      — Off-chain monitor wallet or contract
- *  GUARDIAN_SUNSET_DAYS         — (optional) defaults to 180 days
+ *  GUARDIAN_SUNSET_DAYS         — (optional) defaults to 180 days, the most the contract
+ *                                 accepts (MAX_SUNSET_DURATION)
  *
  * Run: npx hardhat run scripts/deploy/08_deploy_guardian.js --network sepolia
  */
 
 const { ethers, network } = require("hardhat");
 const readline             = require("readline");
-const { WALLETS }          = require("./00_config");
+const { WALLETS, BRIDGE, TESTNET_CHAINS } = require("./00_config");
 const { createAdminBatch } = require("./lib/adminTx");
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -92,6 +99,8 @@ async function main() {
 
   const sunsetDays    = parseInt(process.env.GUARDIAN_SUNSET_DAYS || "180", 10);
   const sunsetSeconds = sunsetDays * 86400;
+  // The constructor refuses more than 180 days (SunsetTooLong); fail here, before the prompt.
+  if (!(sunsetDays > 0 && sunsetDays <= 180)) throw new Error(`GUARDIAN_SUNSET_DAYS must be 1-180, got ${sunsetDays}`);
 
   console.log("Addresses:");
   console.log(`  SRXToken:             ${srxTokenAddr}`);
@@ -187,15 +196,35 @@ async function main() {
   const MODULE_SSF      = ethers.keccak256(ethers.toUtf8Bytes("STABILISATION_FUND"));
 
   // MODULE_TOKEN and MODULE_BRIDGE both target SRXToken:
-  //   - TOKEN pauses ERC-20 transfers
-  //   - BRIDGE is semantically "bridge sends" — pausing the token blocks OFT send()
-  //   Both use srxTokenAddr as the pausable target.
+  //   - TOKEN pauses every transfer (pause()); guardian pauses of it are time-limited
+  //   - BRIDGE stops bridge sends and returns only (setBridgePaused), never pause()
   await batch.send(guardian, "registerModule", [MODULE_TOKEN,    srxTokenAddr],     "MODULE_TOKEN    → SRXToken");
-  await batch.send(guardian, "registerModule", [MODULE_BRIDGE,   srxTokenAddr],     "MODULE_BRIDGE   → SRXToken (pausing token blocks OFT sends)");
+  await batch.send(guardian, "registerModule", [MODULE_BRIDGE,   srxTokenAddr],     "MODULE_BRIDGE   → SRXToken (bridge-only stop)");
   await batch.send(guardian, "registerModule", [MODULE_STAKING,  stakingAddr],      "MODULE_STAKING  → SRXStaking");
   await batch.send(guardian, "registerModule", [MODULE_FEE,      feeControllerAddr],"MODULE_FEE      → FeeController");
   await batch.send(guardian, "registerModule", [MODULE_TREASURY, treasuryAddr],     "MODULE_TREASURY → SRXTreasury");
   await batch.send(guardian, "registerModule", [MODULE_SSF,      ssfAddr],          "MODULE_SSF      → StabilisationFund");
+
+  // Wind-down exits: the token's GOVERNANCE_ROLE is still the admin Safe's here (the Timelock
+  // takes it at the hand-over, migrate_roles.js), so this goes in the same Safe batch.
+  for (const [name, addr] of [["SRXStaking", stakingAddr], ["StabilisationFund", ssfAddr]]) {
+    if (!(await srxToken.isWindDownExit(addr))) {
+      await batch.send(srxToken, "addWindDownExit", [addr], `SRXToken.addWindDownExit(${name}) (add-only: can never be removed)`);
+    }
+  }
+
+  // The bridge circuit breaker, in the same batch (internal audit CONTROL-10, 16 Oct 2026).
+  const cbConfig = BRIDGE.circuitBreaker[TESTNET_CHAINS.has(network.name) ? "testnet" : "mainnet"];
+  if (!cbConfig) {
+    console.warn(`⚠️  No circuit-breaker setting for ${network.name} (BRIDGE.circuitBreaker in 00_config.js). verify_roles.js`);
+    console.warn(`    will refuse the launch until it is configured. The figure is a decision for Jared.`);
+  } else {
+    const cb = await guardian.circuitBreakers(MODULE_BRIDGE);
+    if (cb.volumeThreshold === 0n) {
+      await batch.send(guardian, "configureCircuitBreaker", [MODULE_BRIDGE, cbConfig.threshold, cbConfig.windowSeconds],
+        `MODULE_BRIDGE circuit breaker: ${ethers.formatUnits(cbConfig.threshold, 18)} SRX per ${cbConfig.windowSeconds} s`);
+    }
+  }
 
   // Revoke the temporary GOVERNANCE_ROLE from the admin Safe, last in the batch.
   if (!adminHasGov) {
@@ -251,8 +280,8 @@ async function main() {
   console.log(`  [ ] Verify GuardianModule on explorer`);
   console.log(`  [ ] Confirm MAXIMUM_SUNSET in block explorer storage`);
   console.log(`  [ ] Test pause/unpause on Sepolia before mainnet`);
-  console.log(`  [ ] Configure circuit breaker via governance proposal:`);
-  console.log(`        guardian.configureCircuitBreaker(MODULE_BRIDGE, threshold, windowDuration)`);
+  console.log(`  [ ] Keeper: call guardian.lapseTokenPause() when tokenPauseEndsAt passes (anyone may)`);
+  console.log(`  [ ] Circuit breaker configured above (or, with no setting yet, decided and configured before launch)`);
   console.log(`  [ ] For remote chains (BSC, zkSync): grant GuardianModule PAUSER_ROLE`);
   console.log(`      on each SRXOFTNative deployment after running 07_deploy_bridge.js`);
   console.log(`  [ ] If a safe_batch file was written above, the admin Safe executes it before step 9`);

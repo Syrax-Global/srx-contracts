@@ -32,7 +32,8 @@ describe("VestingVault", function () {
       admin.address,
       BigInt(cliffDays) * DAY,
       BigInt(vestingDays) * DAY,
-      BigInt(tgeUnlockBps)
+      BigInt(tgeUnlockBps),
+      treasury.address // revokeRecipient (internal audit M2): fixed at deployment
     );
     await vault.waitForDeployment();
 
@@ -209,7 +210,7 @@ describe("VestingVault", function () {
       const expectedBeneficiary = vestedSoFar; // releasable
       const expectedTreasury    = vaultBal - vestedSoFar; // unvested
 
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
 
       expect(await token.balanceOf(beneficiary.address)).to.be.closeTo(
         expectedBeneficiary, ethers.parseUnits("100", 18)
@@ -219,17 +220,31 @@ describe("VestingVault", function () {
       );
     });
 
+    it("cannot be pointed anywhere: no recipient argument, and the fixed recipient is never the beneficiary (internal audit M2)", async function () {
+      const { vault, admin, beneficiary, treasury, token } = await deployStandardVault(0, 365, 0);
+      expect(await vault.revokeRecipient()).to.equal(treasury.address);
+      expect(await vault.revokeRecipient()).to.not.equal(beneficiary.address);
+      await vault.connect(admin).triggerTGE();
+      // a destination can no longer be named: the call is rejected before it is even sent
+      await expect(vault.connect(admin).revoke(beneficiary.address)).to.be.rejected;
+      await time.increase(180 * 86400);
+      await vault.connect(admin).revoke();
+      // the unvested part reached the fixed recipient, and the beneficiary got only what had vested
+      expect(await token.balanceOf(treasury.address)).to.be.gt(0n);
+      expect(await token.balanceOf(beneficiary.address)).to.be.lt(TOTAL * 51n / 100n);
+    });
+
     it("sets revoked = true", async function () {
       const { vault, admin, treasury } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
       expect(await vault.revoked()).to.be.true;
     });
 
     it("blocks release after revocation", async function () {
       const { vault, admin, beneficiary, treasury } = await deployStandardVault(0, 365, 2500);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
 
       await expect(vault.connect(beneficiary).release())
         .to.be.revertedWithCustomError(vault, "VaultRevoked");
@@ -239,7 +254,7 @@ describe("VestingVault", function () {
       const { vault, admin, beneficiary, treasury } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
 
-      await expect(vault.connect(beneficiary).revoke(treasury.address))
+      await expect(vault.connect(beneficiary).revoke())
         .to.be.revertedWithCustomError(vault, "OnlyAdmin");
     });
 
@@ -249,16 +264,16 @@ describe("VestingVault", function () {
       // permanently with no admin recovery path.
       const { vault, admin, treasury } = await deployStandardVault(0, 365, 0);
       // Do NOT call triggerTGE — vault is funded but TGE clock not started
-      await expect(vault.connect(admin).revoke(treasury.address))
+      await expect(vault.connect(admin).revoke())
         .to.be.revertedWithCustomError(vault, "TGENotTriggered");
     });
 
     it("reverts if already revoked", async function () {
       const { vault, admin, treasury } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
 
-      await expect(vault.connect(admin).revoke(treasury.address))
+      await expect(vault.connect(admin).revoke())
         .to.be.revertedWithCustomError(vault, "AlreadyRevoked");
     });
 
@@ -280,7 +295,7 @@ describe("VestingVault", function () {
       const expectedUnvested = initialAlloc - releasableNow;
 
       const treasuryBefore = await token.balanceOf(treasury.address);
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
       const treasuryAfter  = await token.balanceOf(treasury.address);
 
       // Extra tokens should NOT be swept to treasury
@@ -304,7 +319,7 @@ describe("VestingVault", function () {
     it("reverts if called by non-admin", async function () {
       const { vault, admin, beneficiary, treasury } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
       await expect(vault.connect(beneficiary).rescueDonatedTokens(treasury.address))
         .to.be.revertedWithCustomError(vault, "OnlyAdmin");
     });
@@ -312,7 +327,7 @@ describe("VestingVault", function () {
     it("reverts if zero-address recipient", async function () {
       const { vault, admin, treasury } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
       await expect(vault.connect(admin).rescueDonatedTokens(ethers.ZeroAddress))
         .to.be.revertedWithCustomError(vault, "ZeroAddress");
     });
@@ -320,7 +335,7 @@ describe("VestingVault", function () {
     it("reverts if no donated tokens are present after revoke", async function () {
       const { vault, admin, treasury } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
       // After revoke, vault balance should be 0 (all swept)
       await expect(vault.connect(admin).rescueDonatedTokens(treasury.address))
         .to.be.revertedWithCustomError(vault, "NoDonatedTokens");
@@ -329,7 +344,7 @@ describe("VestingVault", function () {
     it("rescues tokens accidentally sent to a revoked vault", async function () {
       const { vault, token, admin, treasury, other } = await deployStandardVault(0, 365, 0);
       await vault.connect(admin).triggerTGE();
-      await vault.connect(admin).revoke(treasury.address);
+      await vault.connect(admin).revoke();
 
       // Accidentally send tokens to the revoked vault
       const donated = ethers.parseUnits("500", 18);

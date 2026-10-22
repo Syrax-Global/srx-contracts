@@ -27,7 +27,7 @@
  */
 const { ethers, upgrades, network } = require("hardhat");
 require("dotenv").config();
-const { WALLETS, ALLOCATIONS, VESTING, SSF, LZ_ENDPOINTS, LZ_EIDS, TGE_PLAN } = require("../deploy/00_config");
+const { WALLETS, ALLOCATIONS, VESTING, SSF, ssfRewardAllocation, LZ_ENDPOINTS, LZ_EIDS, TGE_PLAN } = require("../deploy/00_config");
 
 const TESTNET_TIMELOCK_DELAY = 60; // 60 seconds for testnet
 
@@ -97,7 +97,8 @@ async function main() {
     const cfg = VESTING[row.schedule];
     const v = await VestingVault.deploy(
       addrs.token, WALLETS[row.beneficiary], admin,
-      cfg.cliffDuration, cfg.vestingDuration, cfg.tgeUnlockBps
+      cfg.cliffDuration, cfg.vestingDuration, cfg.tgeUnlockBps,
+      WALLETS.treasury // revokeRecipient, fixed at deployment (internal audit M2)
     );
     await v.waitForDeployment();
     addrs.vaults[row.label] = await v.getAddress();
@@ -117,18 +118,14 @@ async function main() {
 
   // SRXStaking
   const SRXStakingF  = await ethers.getContractFactory("SRXStaking");
-  const stakingProxy = await upgrades.deployProxy(
-    SRXStakingF, [addrs.token, admin], { initializer: "initialize", kind: "uups" }
-  );
+  const stakingProxy = await SRXStakingF.deploy(...[addrs.token, admin, addrs.tge]);
   await stakingProxy.waitForDeployment();
   addrs.staking = await stakingProxy.getAddress();
   console.log(`  SRXStaking proxy:    ${addrs.staking}`);
 
   // FeeController
   const FeeControllerF = await ethers.getContractFactory("FeeController");
-  const feeProxy       = await upgrades.deployProxy(
-    FeeControllerF, [addrs.staking, admin], { initializer: "initialize", kind: "uups" }
-  );
+  const feeProxy       = await FeeControllerF.deploy(...[addrs.staking, admin]);
   await feeProxy.waitForDeployment();
   addrs.feeController = await feeProxy.getAddress();
   console.log(`  FeeController proxy: ${addrs.feeController}`);
@@ -142,9 +139,7 @@ async function main() {
   // ── 7. SRXTreasury ───────────────────────────────────────────────────────────
   console.log("\n[7/9] Deploying SRXTreasury (UUPS proxy)...");
   const SRXTreasuryF  = await ethers.getContractFactory("SRXTreasury");
-  const treasuryProxy = await upgrades.deployProxy(
-    SRXTreasuryF, [addrs.token, admin, addrs.timelock], { initializer: "initialize", kind: "uups" }
-  );
+  const treasuryProxy = await SRXTreasuryF.deploy(...[addrs.token, admin, addrs.timelock]);
   await treasuryProxy.waitForDeployment();
   addrs.treasury = await treasuryProxy.getAddress();
   console.log(`  SRXTreasury proxy: ${addrs.treasury}`);
@@ -158,11 +153,7 @@ async function main() {
   // ── 8. StabilisationFund ─────────────────────────────────────────────────────
   console.log("\n[8/9] Deploying StabilisationFund (UUPS proxy)...");
   const SSFF     = await ethers.getContractFactory("StabilisationFund");
-  const ssfProxy = await upgrades.deployProxy(
-    SSFF,
-    [addrs.token, admin, SSF.MAX_DEPLOYER_BPS, SSF.MAX_GUARDIAN_BPS, SSF.WITHDRAW_LOCK_DURATION],
-    { initializer: "initialize", kind: "uups" }
-  );
+  const ssfProxy = await SSFF.deploy(...[addrs.token, admin, SSF.MAX_DEPLOYER_BPS, SSF.MAX_GUARDIAN_BPS, SSF.WITHDRAW_LOCK_DURATION, ssfRewardAllocation(network.name), addrs.tge]);
   await ssfProxy.waitForDeployment();
   addrs.ssf = await ssfProxy.getAddress();
   console.log(`  StabilisationFund proxy: ${addrs.ssf}`);

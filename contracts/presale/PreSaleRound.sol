@@ -50,11 +50,14 @@ import { VestingVault } from "../vesting/VestingVault.sol";
  *
  *   ETH / WBTC amounts are converted to USD in real-time via Chainlink feeds, then
  *   divided by srxPriceUsd8Dec to produce the exact SRX allocation.
- *   USDC / USDT are treated as $1 each (6-decimal stablecoins).
+ *   USDC / USDT are treated as $1 per whole token, scaled from each token's own
+ *   decimals (read from the token at deployment, PSR-01), and never credited above
+ *   par (PSR-12). An optional feed can only lower that.
  *
  *   USD tracking (all in 8-decimal format, consistent with Chainlink):
  *     ETH:       usdValue = ethWei × ethUsdPrice8dec / 1e18
- *     USDC/USDT: usdValue = stableAmount × 100
+ *     USDC/USDT: usdValue = stableAmount scaled from the token's decimals to 8
+ *                (for a 6-decimal token, stableAmount × 100)
  *     WBTC:      usdValue = wbtcAmount × btcUsdPrice8dec / 1e8
  *
  *   SRX with bonus: totalSRX = cumulativeUsd × 1e18 × (10000 + bonusBps) / srxPrice / 10000
@@ -80,7 +83,10 @@ import { VestingVault } from "../vesting/VestingVault.sol";
  *   makes exactly what they paid claimable by them through claimRefund(). It
  *   refuses unless the contract holds enough to pay every outstanding refund, so
  *   a refund on the books is always payable. An investor who has paid on-chain
- *   cannot be removed or have their allocation changed any other way. Off-chain
+ *   cannot be removed, or have their allocation set or reduced, any other way
+ *   (removeInvestor and updateAllocation refuse). Their allocation can still
+ *   grow through addInvestor when they also pay by wire, within their approval
+ *   cap (corrected 7 Oct 2026, test/Gaps.Presale.test.js P11). Off-chain
  *   (SAFT / wire) amounts are refunded off-chain, as they were received.
  *
  * Launch ordering (PSR-09): deploy every vault BEFORE SRXToken's maxWalletBalance
@@ -166,6 +172,9 @@ contract PreSaleRound is ReentrancyGuard {
     uint8   public immutable usdtDecimals;
     uint8   public immutable wbtcDecimals;
     address public immutable admin;
+    /// @notice Where a revoked buyer vault's unvested SRX goes: fixed at deployment (the
+    ///         Treasury), passed to every vault this round creates (internal audit M2).
+    address public immutable vaultRevokeRecipient;
 
     bool    public immutable flatBonusEnabled; // true = one rate for everyone (see header)
     uint256 public immutable flatBonusBps;     // that rate; 0 in ladder mode
@@ -271,8 +280,11 @@ contract PreSaleRound is ReentrancyGuard {
     ///         checks and accepted a purchase agreement. Nothing is credited, on
     ///         chain or off, beyond `capUsd8Dec` of cumulative USD, and a wallet
     ///         never approved has a cap of 0, so it cannot buy at all.
-    /// @dev    `agreementRef` is the agreement's on-chain commitment, a salted hash
-    ///         held off-chain; it carries no personal data. A cap of 0 revokes.
+    /// @dev    `agreementRef` is the agreement's commitment (the one recorded in
+    ///         GenesisAgreementRegistry), a salted hash whose document is held off-chain;
+    ///         it carries no personal data. This contract only requires it to be non-zero:
+    ///         it does not read the registry, so the link to the registry is checked
+    ///         off-chain. A cap of 0 revokes.
     struct BuyerApproval {
         uint256 capUsd8Dec;
         bytes32 agreementRef;
@@ -323,6 +335,8 @@ contract PreSaleRound is ReentrancyGuard {
     error RoundFinalized();
     error HardCapExceeded();
     error ZeroAmount();
+    /// @notice More ETH was asked for than may leave (refunds owed stay).
+    error ExceedsWithdrawable(uint256 requested, uint256 available);
     error ZeroAddress();
     error NoAllocation();
     error VaultAlreadyDeployed();
@@ -392,10 +406,12 @@ contract PreSaleRound is ReentrancyGuard {
         uint256 _hardCapSRX,
         uint256 _srxPriceUsd8Dec,
         bool    _flatBonusEnabled,
-        uint256 _flatBonusBps
+        uint256 _flatBonusBps,
+        address _vaultRevokeRecipient
     ) {
         if (_srxToken == address(0)) revert ZeroAddress();
         if (_admin    == address(0)) revert ZeroAddress();
+        if (_vaultRevokeRecipient == address(0) || _vaultRevokeRecipient == address(this)) revert ZeroAddress();
         if (_hardCapSRX == 0)        revert ZeroAmount();
         if (_srxPriceUsd8Dec == 0)   revert ZeroAmount();
         if (_flatBonusEnabled ? _flatBonusBps > MAX_FLAT_BONUS_BPS : _flatBonusBps != 0)
@@ -418,6 +434,7 @@ contract PreSaleRound is ReentrancyGuard {
         maxStaleness    = DEFAULT_MAX_STALENESS;
         flatBonusEnabled = _flatBonusEnabled;
         flatBonusBps     = _flatBonusBps;
+        vaultRevokeRecipient = _vaultRevokeRecipient;
     }
 
     // ── Off-chain investor management ──────────────────────────────────────────
@@ -620,6 +637,7 @@ contract PreSaleRound is ReentrancyGuard {
 
     /// @dev Pull a payment token and return what actually arrived (PSR-12: a
     ///      fee-on-transfer switch on USDT must not be credited at face value).
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function _pull(IERC20 token, uint256 amount) private returns (uint256 received) {
         uint256 before = token.balanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), amount);
@@ -707,6 +725,7 @@ contract PreSaleRound is ReentrancyGuard {
      *         Crossing a tier boundary retroactively upgrades the full allocation.
      *         Reverts if the investor's vault has already been deployed (allocation locked).
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function investWithWBTC(uint256 wbtcAmount) external notFinalized whenNotPaused nonReentrant {
         if (address(wbtc) == address(0) || address(btcUsdFeed) == address(0)) revert CurrencyDisabled();
         if (wbtcAmount == 0) revert ZeroAmount();
@@ -737,7 +756,8 @@ contract PreSaleRound is ReentrancyGuard {
             address(this),
             CLIFF_DURATION,
             VESTING_DURATION,
-            TGE_UNLOCK_BPS
+            TGE_UNLOCK_BPS,
+            vaultRevokeRecipient
         );
         vault     = address(v);
         inv.vault = vault;
@@ -758,6 +778,7 @@ contract PreSaleRound is ReentrancyGuard {
      * @param startIndex Inclusive start index in investorList.
      * @param endIndex   Exclusive end index in investorList.
      */
+    // slither-disable-next-line reentrancy-balance,reentrancy-no-eth -- reviewed 7 Oct 2026 (reentrancy-no-eth 8 Oct): inv.vault is set before any external call; the only external calls go to a vault this function has just created from our own code and to SRXToken; neither calls back. Admin-only
     function batchDeployVaults(uint256 startIndex, uint256 endIndex) external onlyAdmin {
         uint256 len = investorList.length;
         if (endIndex > len) endIndex = len;
@@ -776,7 +797,8 @@ contract PreSaleRound is ReentrancyGuard {
                 address(this),
                 CLIFF_DURATION,
                 VESTING_DURATION,
-                TGE_UNLOCK_BPS
+                TGE_UNLOCK_BPS,
+                vaultRevokeRecipient
             );
             inv.vault = address(v);
             srxToken.safeTransfer(address(v), amount);
@@ -811,10 +833,12 @@ contract PreSaleRound is ReentrancyGuard {
         emit TGETriggeredForAll(count);
     }
 
-    function revokeVault(address investor, address revokeRecipient) external onlyAdmin {
+    /// @dev The unvested SRX goes to vaultRevokeRecipient, fixed at deployment; it is no
+    ///      longer an argument (internal audit M2).
+    function revokeVault(address investor) external onlyAdmin {
         address vaultAddr = investors[investor].vault;
         if (vaultAddr == address(0)) revert NoAllocation();
-        VestingVault(vaultAddr).revoke(revokeRecipient);
+        VestingVault(vaultAddr).revoke();
     }
 
     /// @notice Recover tokens sent to an investor's vault by mistake (PSR-08). This
@@ -851,8 +875,10 @@ contract PreSaleRound is ReentrancyGuard {
      *         change mid-round therefore IS retroactive:
      *           price ↑ → newTotalSRX < oldSRX → srxDelta underflows → top-up reverts
      *           price ↓ → the whole prior position is repriced cheaper → value leak
-     *         Locking the price once any investor exists removes both failure modes.
-     *         To change price after that, finalize this round and deploy a new one.
+     *         Locking the price while any investor exists removes both failure modes.
+     *         The lock follows the live investor list, so if every investor is refunded
+     *         or removed the price can be set again. To change price with investors
+     *         present, finalize this round and deploy a new one.
      */
     function setSRXPrice(uint256 _srxPriceUsd8Dec) external onlyAdmin notFinalized {
         if (_srxPriceUsd8Dec == 0) revert ZeroAmount();
@@ -970,6 +996,7 @@ contract PreSaleRound is ReentrancyGuard {
 
     // ── Fund withdrawal ────────────────────────────────────────────────────────
 
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function withdrawETH(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = _withdrawable(address(0));
@@ -990,12 +1017,16 @@ contract PreSaleRound is ReentrancyGuard {
      */
     function withdrawETHAmount(address to, uint256 amount) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        if (amount == 0 || amount > _withdrawable(address(0))) revert ZeroAmount();
+        if (amount == 0) revert ZeroAmount();
+        uint256 available = _withdrawable(address(0));
+        // Branch tests, 22 Oct (Info): asking for more than may leave reverted "ZeroAmount".
+        if (amount > available) revert ExceedsWithdrawable(amount, available);
         (bool ok,) = to.call{ value: amount }("");
         if (!ok) revert ETHTransferFailed();
         emit ETHWithdrawn(to, amount);
     }
 
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function withdrawUSDC(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = _withdrawable(address(usdc));
@@ -1004,6 +1035,7 @@ contract PreSaleRound is ReentrancyGuard {
         emit USDCWithdrawn(to, bal);
     }
 
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function withdrawUSDT(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = _withdrawable(address(usdt));
@@ -1012,6 +1044,7 @@ contract PreSaleRound is ReentrancyGuard {
         emit USDTWithdrawn(to, bal);
     }
 
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function withdrawWBTC(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = _withdrawable(address(wbtc));
@@ -1020,9 +1053,16 @@ contract PreSaleRound is ReentrancyGuard {
         emit WBTCWithdrawn(to, bal);
     }
 
+    /// @dev ⛔ Internal audit L6 (DIST-03, 16 Oct 2026): this took the WHOLE balance, including
+    ///      the SRX owed to buyers whose vaults did not exist yet, while its withdraw* twins
+    ///      keep what is owed. A 1-wei donation then forced the operator through it. It now
+    ///      recovers only what no buyer is owed: the balance above pendingDeployment().
+    // slither-disable-next-line incorrect-equality -- reviewed 16 Oct 2026: a `== 0` nothing-to-do guard on our own surplus; a donation can only make the admin recover it, never reach buyers' SRX
     function recoverSRX(address to) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        uint256 bal = srxToken.balanceOf(address(this));
+        uint256 held = srxToken.balanceOf(address(this));
+        uint256 owed = _pendingDeployment();
+        uint256 bal = held > owed ? held - owed : 0;
         if (bal == 0) revert ZeroAmount();
         srxToken.safeTransfer(to, bal);
         emit SRXRecovered(to, bal);
@@ -1113,7 +1153,11 @@ contract PreSaleRound is ReentrancyGuard {
         }
     }
 
-    function pendingDeployment() external view returns (uint256 total) {
+    function pendingDeployment() external view returns (uint256) {
+        return _pendingDeployment();
+    }
+
+    function _pendingDeployment() private view returns (uint256 total) {
         uint256 len = investorList.length;
         for (uint256 i = 0; i < len; i++) {
             Investor storage inv = investors[investorList[i]];
@@ -1134,6 +1178,7 @@ contract PreSaleRound is ReentrancyGuard {
      * @param usdValue8Dec Incremental USD value of this investment in 8-decimal format.
      * @param offChain     True for admin-added investors, false for on-chain payments.
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function _processInvestment(
         address investor,
         uint256 usdValue8Dec,
@@ -1291,6 +1336,7 @@ contract PreSaleRound is ReentrancyGuard {
      *      PSR-12: an updatedAt in the future used to panic on the subtraction; it
      *      is now reported as a bad feed.
      */
+    // slither-disable-next-line unused-return -- reviewed 7 Oct 2026: startedAt is deliberately unused; roundId, answer, updatedAt and answeredInRound are all checked below
     function _readFeed(IAggregatorV3 feed, uint256 staleOverride, uint256 minP, uint256 maxP)
         internal
         view

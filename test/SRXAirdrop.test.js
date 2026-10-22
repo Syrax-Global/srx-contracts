@@ -179,12 +179,50 @@ describe("SRXAirdrop", function () {
         .to.be.revertedWithCustomError(airdrop, "AccessControlUnauthorizedAccount");
     });
 
-    it("can replace active airdrop with a new root", async function () {
+    // ⛔ This test asserted that a LIVE round's root could be replaced — which let the
+    //    admin publish a one-leaf tree for the whole balance and drain the round,
+    //    contradicting "recoverable only after its deadline" (MULTISIG_SPEC; internal
+    //    review 7 Oct 2026, reproduced on the contract). Replacing a live root is refused.
+    it("cannot replace a live round's root: the self-listing drain is refused", async function () {
+      const { airdrop, admin, deadline, TOTAL_AIRDROP } = await loadFixture(activeAirdropFixture);
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const drain = buildMerkleTree([{ address: admin.address, amount: TOTAL_AIRDROP }], chainId);
+      await expect(airdrop.connect(admin).setMerkleRoot(drain.root, deadline + 86400))
+        .to.be.revertedWithCustomError(airdrop, "RoundStillOpen");
+      await expect(airdrop.connect(admin).claim(TOTAL_AIRDROP, [])).to.be.revertedWithCustomError(airdrop, "InvalidProof");
+    });
+
+    it("a live round's deadline can still move later, with the same root", async function () {
       const { airdrop, admin, tree, deadline } = await loadFixture(activeAirdropFixture);
-      const newRoot     = ethers.randomBytes(32);
-      const newDeadline = deadline + 86400;
-      await airdrop.connect(admin).setMerkleRoot(ethers.hexlify(newRoot), newDeadline);
-      expect(await airdrop.merkleRoot()).to.equal(ethers.hexlify(newRoot));
+      await airdrop.connect(admin).setMerkleRoot(tree.root, deadline + 86400);
+      expect(await airdrop.claimDeadline()).to.equal(BigInt(deadline + 86400));
+    });
+
+    it("after the deadline a new round may start with a new root (control)", async function () {
+      const { airdrop, admin, deadline } = await loadFixture(activeAirdropFixture);
+      await time.increaseTo(deadline + 1);
+      const newRoot = ethers.hexlify(ethers.randomBytes(32));
+      await airdrop.connect(admin).setMerkleRoot(newRoot, (await time.latest()) + 14 * 86400);
+      expect(await airdrop.merkleRoot()).to.equal(newRoot);
+    });
+
+    it("an address that claimed in one round cannot claim again in a later round", async function () {
+      const { airdrop, admin, recipient1, tree, deadline, AMOUNT_1 } = await loadFixture(activeAirdropFixture);
+      await airdrop.connect(recipient1).claim(AMOUNT_1, tree.getProof(0));
+      await time.increaseTo(deadline + 1);
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const round2 = buildMerkleTree([{ address: recipient1.address, amount: AMOUNT_1 }], chainId);
+      await airdrop.connect(admin).setMerkleRoot(round2.root, (await time.latest()) + 14 * 86400);
+      await expect(airdrop.connect(recipient1).claim(AMOUNT_1, [])).to.be.revertedWithCustomError(airdrop, "AlreadyClaimed");
+    });
+
+    it("a proof built for another chain is rejected (SC-AD-002)", async function () {
+      const { airdrop, admin, recipient1, entries, deadline, AMOUNT_1 } = await loadFixture(deployFixture);
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const foreign = buildMerkleTree(entries, chainId + 1n);
+      await airdrop.connect(admin).setMerkleRoot(foreign.root, deadline);
+      await expect(airdrop.connect(recipient1).claim(AMOUNT_1, foreign.getProof(0)))
+        .to.be.revertedWithCustomError(airdrop, "InvalidProof");
     });
   });
 

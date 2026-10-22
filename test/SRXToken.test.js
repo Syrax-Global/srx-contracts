@@ -4,7 +4,7 @@ const { loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helper
 
 // ── Mock LayerZero endpoint for testing ────────────────────────────────────────
 // In tests we use a zero-address endpoint since we don't test bridge messaging here.
-// Cross-chain tests are in Bridge.test.js using LayerZero's test helpers.
+// Cross-chain tests are in Bridge.test.js (real messages relayed between two MockLZEndpoints).
 const MOCK_LZ_ENDPOINT = ethers.ZeroAddress;
 
 describe("SRXToken", function () {

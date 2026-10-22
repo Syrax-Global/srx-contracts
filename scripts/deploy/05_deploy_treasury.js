@@ -33,11 +33,7 @@ async function main() {
 
   console.log("\nDeploying SRXTreasury (UUPS proxy)...");
   const SRXTreasury = await ethers.getContractFactory("SRXTreasury");
-  const treasuryProxy = await upgrades.deployProxy(
-    SRXTreasury,
-    [srxToken, admin, timelock],
-    { initializer: "initialize", kind: "uups" }
-  );
+  const treasuryProxy = await SRXTreasury.deploy(...[srxToken, admin, timelock]);
   await treasuryProxy.waitForDeployment();
   const treasuryAddress = await treasuryProxy.getAddress();
   console.log(`SRXTreasury proxy: ${treasuryAddress}`);

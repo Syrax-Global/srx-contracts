@@ -7,11 +7,7 @@ import { ReentrancyGuard }  from "@openzeppelin/contracts/utils/ReentrancyGuard.
 import { IERC20 }           from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 }        from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-interface ISRXToken {
-    function buyAndBurn(uint256 amount) external;
-    function balanceOf(address account) external view returns (uint256);
-    function approve(address spender, uint256 amount) external returns (bool);
-}
+import { ISRXBurnable } from "../token/ISRXBurnable.sol";
 
 /**
  * @title BuybackBurner
@@ -33,7 +29,7 @@ interface ISRXToken {
  *     with Uniswap V3, PancakeSwap, 1inch, or any router that accepts ERC-20 approval.
  *
  * Role model:
- *   DEFAULT_ADMIN_ROLE — grants/revokes roles, updates router + slippage, rescues tokens.
+ *   DEFAULT_ADMIN_ROLE — grants/revokes roles, updates router + swap caps, rescues tokens.
  *   EXECUTOR_ROLE      — calls burnHeld() and buyAndBurnWithToken(). Intended for the
  *                        Treasury multisig or a Chainlink Automation upkeep.
  *
@@ -46,13 +42,21 @@ interface ISRXToken {
  *   The executor supplies the swap calldata, and nothing on-chain can price SRX
  *   before a pool exists, so minSrxOut alone cannot stop a compromised executor
  *   from routing the output elsewhere and burning 1 wei. What bounds the damage:
- *     - a per-swap and a rolling 24-hour cap PER TOKEN, set by the admin; a token
- *       with no caps cannot be swapped at all (fail closed);
+ *     - a per-swap cap and a daily cap PER TOKEN, set by the admin; a token with no
+ *       caps cannot be swapped at all (fail closed). The daily cap is a draining
+ *       bucket: at most dailySwapLimit is in flight at once, draining linearly over
+ *       24 hours, so no burst can exceed it (over any 24 hours, at most twice it).
+ *       ⛔ It was a fixed 24-hour window that reset at once, so a full cap just
+ *       before a reset and another just after swapped twice the cap within seconds
+ *       (internal review, 7 Oct 2026);
  *     - the router is approved for exactly amountIn and reset to zero after the
  *       call, and the swap may not spend more than amountIn;
  *     - the router address is set by the admin only.
- *   maxSlippageBps is guidance for the executor's off-chain quote; the contract
- *   does not read it, because it has no price to apply it to.
+ *   There is deliberately no slippage setting (132c0422, 1 Oct 2026). One existed,
+ *   maxSlippageBps, but nothing read it: before a pool exists the contract has no
+ *   price to apply it to. A setting that looks like a protection and is not one was
+ *   removed rather than kept. An on-chain price bound, from the official pool's
+ *   time-weighted average once that pool exists, is its own design item.
  *
  * ⚠ BURN_ROLE prerequisite:
  *   This contract must be granted BURN_ROLE on SRXToken before burnHeld() can succeed.
@@ -65,34 +69,27 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
 
     bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
 
-    // ── Constants ──────────────────────────────────────────────────────────────
-
-    uint256 public constant MAX_SLIPPAGE_CAP = 5_000; // 50% absolute max — safety guard
-
     // ── Immutables ─────────────────────────────────────────────────────────────
 
     /// @notice The SRXToken contract. All burns go through buyAndBurn() on this address.
-    ISRXToken public immutable srxToken;
+    ISRXBurnable public immutable srxToken;
 
     // ── State ──────────────────────────────────────────────────────────────────
 
     /// @notice DEX router address used for swap-and-burn. Zero = swap mode disabled.
     address public swapRouter;
 
-    /// @notice Maximum acceptable slippage for swaps in basis points. Default 200 (2%).
-    uint256 public maxSlippageBps;
-
     /// @notice Running total of SRX burned by this contract across all time.
     uint256 public totalBurned;
 
     /// @notice Largest single swap per input token. 0 = the token cannot be swapped.
     mapping(address => uint256) public maxAmountPerSwap;
-    /// @notice Most of an input token that may be swapped in any rolling 24 hours.
+    /// @notice Most of an input token in flight at once; drains at this much per 24 hours.
     mapping(address => uint256) public dailySwapLimit;
-    /// @notice Start of the current 24-hour window, per input token.
-    mapping(address => uint256) public swapWindowStart;
-    /// @notice Amount swapped in the current window, per input token.
-    mapping(address => uint256) public swappedInWindow;
+    /// @notice Amount swapped and still counted against the daily cap, as of swapUpdatedAt.
+    mapping(address => uint256) public swapInFlight;
+    /// @notice When swapInFlight was last updated, per input token.
+    mapping(address => uint256) public swapUpdatedAt;
 
     // ── Events ─────────────────────────────────────────────────────────────────
 
@@ -100,7 +97,6 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
     event SwapAndBurnExecuted(address indexed tokenIn, uint256 amountIn, uint256 srxBurned);
     event SwapRouterUpdated(address indexed newRouter);
     event SwapLimitsSet(address indexed token, uint256 perSwap, uint256 perDay);
-    event MaxSlippageUpdated(uint256 newBps);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event ETHRescued(address indexed to, uint256 amount);
 
@@ -108,7 +104,6 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
 
     error NothingToBurn();
     error SwapRouterNotSet();
-    error SlippageExceedsCap(uint256 requested, uint256 cap);
     error ZeroAddress();
     error ZeroAmount();
     error CannotRescueSRX();
@@ -116,6 +111,8 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
     error ETHTransferFailed();
     error InsufficientETH();
     error SwapLimitExceeded(address token, uint256 amount, uint256 available);
+    /// @notice A daily limit above 2^128 would overflow the draining bucket (internal audit MONEY-06).
+    error LimitTooHigh(uint256 perDay, uint256 cap);
     error SwapOverspent(uint256 spent, uint256 amountIn);
 
     // ── Constructor ────────────────────────────────────────────────────────────
@@ -128,8 +125,7 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
         if (_srxToken == address(0)) revert ZeroAddress();
         if (_admin   == address(0)) revert ZeroAddress();
 
-        srxToken      = ISRXToken(_srxToken);
-        maxSlippageBps = 200; // 2% default
+        srxToken = ISRXBurnable(_srxToken);
 
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(EXECUTOR_ROLE,      _admin);
@@ -146,6 +142,7 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
      *
      * @dev Emits BurnExecuted.
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function burnHeld() external onlyRole(EXECUTOR_ROLE) whenNotPaused nonReentrant {
         uint256 balance = srxToken.balanceOf(address(this));
         if (balance == 0) revert NothingToBurn();
@@ -172,10 +169,11 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
      * @param tokenIn       ERC-20 to sell (e.g. USDC address).
      * @param amountIn      Amount of tokenIn to sell (in tokenIn decimals).
      * @param minSrxOut     Minimum SRX to receive. Revert if swap underperforms.
-     *                      Compute as: DEX quote × (1 - maxSlippageBps / 10000).
-     *                      NEVER pass 0 — this disables slippage protection.
+     *                      Compute from the executor's off-chain DEX quote, less the
+     *                      slippage the executor accepts. 0 is refused.
      * @param swapCalldata  ABI-encoded call to the swap router.
      */
+    // slither-disable-next-line reentrancy-balance -- reviewed 7 Oct 2026: every state-changing entry point is nonReentrant or admin-only; a call-back is refused (test: BuybackBurner "re-entry during a swap")
     function buyAndBurnWithToken(
         address tokenIn,
         uint256 amountIn,
@@ -234,40 +232,38 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Update maximum acceptable slippage for swap-and-burn operations.
-     *         Cannot exceed MAX_SLIPPAGE_CAP (50%).
-     * @param bps New slippage tolerance in basis points (e.g. 200 = 2%).
-     */
-    /**
      * @notice Set the swap caps for one input token. Both 0 disables that token.
      * @param perSwap Largest single swap, in the token's own decimals.
-     * @param perDay  Most that may be swapped in any rolling 24 hours.
+     * @param perDay  Most in flight at once, draining at this much per 24 hours (a draining
+     *                bucket, not a fixed or rolling window).
      */
+    /// @dev ⛔ Internal audit MONEY-06 (16 Oct 2026): perDay = type(uint256).max overflowed
+    ///      _drainedSwap the next block, which bricked swaps of that token and this setter.
     function setSwapLimits(address token, uint256 perSwap, uint256 perDay) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (token == address(0)) revert ZeroAddress();
+        if (perDay > type(uint128).max) revert LimitTooHigh(perDay, type(uint128).max);
+        swapInFlight[token]     = _drainedSwap(token); // drain at the old rate up to now
+        swapUpdatedAt[token]    = block.timestamp;
         maxAmountPerSwap[token] = perSwap;
         dailySwapLimit[token]   = perDay;
         emit SwapLimitsSet(token, perSwap, perDay);
     }
 
+    function _drainedSwap(address token) internal view returns (uint256) {
+        uint256 inFlight = swapInFlight[token];
+        uint256 drained = ((block.timestamp - swapUpdatedAt[token]) * dailySwapLimit[token]) / 1 days;
+        return inFlight > drained ? inFlight - drained : 0;
+    }
+
     function _consumeSwapLimit(address token, uint256 amount) internal {
         uint256 perSwap = maxAmountPerSwap[token];
         if (amount > perSwap) revert SwapLimitExceeded(token, amount, perSwap);
-        if (block.timestamp >= swapWindowStart[token] + 1 days) {
-            swapWindowStart[token] = block.timestamp;
-            swappedInWindow[token] = 0;
-        }
-        uint256 used  = swappedInWindow[token];
+        uint256 inFlight = _drainedSwap(token);
         uint256 limit = dailySwapLimit[token];
-        uint256 available = limit > used ? limit - used : 0;
+        uint256 available = limit > inFlight ? limit - inFlight : 0;
         if (amount > available) revert SwapLimitExceeded(token, amount, available);
-        swappedInWindow[token] = used + amount;
-    }
-
-    function setMaxSlippageBps(uint256 bps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (bps > MAX_SLIPPAGE_CAP) revert SlippageExceedsCap(bps, MAX_SLIPPAGE_CAP);
-        maxSlippageBps = bps;
-        emit MaxSlippageUpdated(bps);
+        swapInFlight[token]  = inFlight + amount;
+        swapUpdatedAt[token] = block.timestamp;
     }
 
     // ── Emergency Controls ─────────────────────────────────────────────────────
@@ -305,6 +301,7 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
      * @param to     Recipient address.
      * @param amount Amount of ETH (wei) to transfer.
      */
+    // slither-disable-next-line arbitrary-send-eth -- reviewed 8 Oct 2026: DEFAULT_ADMIN_ROLE only (the Safe, disclosed in MULTISIG_SPEC as Safe-administered); nonReentrant; the contract holds only stray or pre-swap ETH
     function rescueETH(address payable to, uint256 amount)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)

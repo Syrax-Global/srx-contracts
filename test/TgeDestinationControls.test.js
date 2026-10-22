@@ -72,6 +72,15 @@ describe("TGE destination controls", function () {
       expect(walletFor("liquidity", "sepolia", {})).to.equal(TESTNET_WALLET_DEFAULTS.liquidity);
     });
 
+    it("refuses the testnet deployer as any mainnet wallet (Security ruling, 12 Oct 2026); a testnet may use it", function () {
+      const deployer = "0x049fea6abBbc88487Ca14A7910d37E1feCdb9236";
+      for (const key of ["admin", "liquidity", "treasury"]) {
+        const envName = { admin: "ADMIN_ADDRESS", liquidity: "WALLET_LIQUIDITY", treasury: "WALLET_TREASURY" }[key];
+        expect(() => walletFor(key, "ethereum", { [envName]: deployer })).to.throw(/TESTNET DEPLOYER/);
+      }
+      expect(walletFor("admin", "sepolia", { ADMIN_ADDRESS: deployer })).to.equal(deployer);
+    });
+
     it("refuses to fall back on a real network", function () {
       expect(() => walletFor("liquidity", "ethereum", {}))
         .to.throw(/WALLET_LIQUIDITY is not set.*not a testnet/);
@@ -249,22 +258,26 @@ describe("TGE destination controls", function () {
       const schedules = Object.fromEntries(
         TGE_PLAN.filter((r) => r.kind === "vault").map((r) => [r.label, VESTING[r.schedule]]),
       );
+      const treasuryAddr = addr(); // revokeRecipient (internal audit M2)
       const beneficiaries = {};
       const destinations = {};
       for (const [label, s] of Object.entries(schedules)) {
         beneficiaries[label] = addr();
         const v = await Vault.deploy(await token.getAddress(), beneficiaries[label], admin.address,
-          s.cliffDuration, s.vestingDuration, s.tgeUnlockBps);
+          s.cliffDuration, s.vestingDuration, s.tgeUnlockBps, treasuryAddr);
         destinations[label] = await v.getAddress();
       }
-      // Contract rows, and the wallet rows as stand-ins for multi-signature wallets
-      // (anything with code): on a real network a launch-float wallet must have code.
+      // Contract rows get any contract; wallet rows get a 2-of-3 Safe stand-in, because
+      // on a real network a launch-float wallet must answer as a multi-signature wallet.
+      const Safe = await ethers.getContractFactory("MockSafe");
       for (const row of TGE_PLAN.filter((r) => r.kind !== "vault")) {
-        const m = await Mock.deploy("x", "x", 18);
+        const m = row.kind === "wallet"
+          ? await Safe.deploy([addr(), addr(), addr()], 2)
+          : await Mock.deploy("x", "x", 18);
         destinations[row.label] = await m.getAddress();
       }
 
-      return { token, other, Vault, admin, beneficiaries, destinations };
+      return { token, other, Vault, admin, beneficiaries, destinations, treasuryAddr };
     }
 
     function build(f, overrides = {}) {
@@ -303,6 +316,17 @@ describe("TGE destination controls", function () {
       }
     });
 
+    it("refuses a contract that is not a multi-signature wallet, and a Safe needing one signature", async function () {
+      // ⛔ "Must be a multi-signature wallet" was checked as "has code" (internal review, 7 Oct 2026).
+      const f = await loadFixture(chainFixture);
+      const notSafe = await (await ethers.getContractFactory("MockERC20")).deploy("x", "x", 18);
+      let { allocations, manifest } = build(f, { LiquidityPool: await notSafe.getAddress() });
+      expect((await run(f, allocations, manifest)).join("\n")).to.match(/LiquidityPool: .* is not a multi-signature wallet/);
+      const oneOfOne = await (await ethers.getContractFactory("MockSafe")).deploy([addr()], 1);
+      ({ allocations, manifest } = build(f, { MarketMaker: await oneOfOne.getAddress() }));
+      expect((await run(f, allocations, manifest)).join("\n")).to.match(/MarketMaker: .* needs only 1 signature/);
+    });
+
     it("still allows a plain wallet for those rows on a testnet", async function () {
       const f = await loadFixture(chainFixture);
       const { allocations, manifest } = build(f, { LiquidityPool: addr(), MarketMaker: addr(), PresaleLaunch: addr() });
@@ -332,7 +356,7 @@ describe("TGE destination controls", function () {
       const f = await loadFixture(chainFixture);
       const s = VESTING.founders;
       const wrong = await f.Vault.deploy(await f.token.getAddress(), f.beneficiaries.Founders, f.admin.address,
-        s.cliffDuration - DAY, s.vestingDuration, s.tgeUnlockBps);
+        s.cliffDuration - DAY, s.vestingDuration, s.tgeUnlockBps, f.treasuryAddr);
       const { allocations, manifest } = build(f, { Founders: await wrong.getAddress() });
       expect((await run(f, allocations, manifest)).join("\n")).to.match(/Founders: vault cliff/);
     });
@@ -393,6 +417,16 @@ describe("TGE destination controls", function () {
   describe("script wiring", function () {
     const read = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
 
+    it("03_deploy_vesting.js makes the Timelock every launch vault's admin and only SCHEDULES the setup (Jared, 30 Sep 2026)", function () {
+      const src = read("scripts/deploy/03_deploy_vesting.js");
+      // A vault's admin can revoke() it and send the unvested remainder anywhere, so
+      // it must be the Timelock (48-hour delay), never the admin Safe or the deployer.
+      expect(src).to.include("srxToken, WALLETS[row.beneficiary], timelockAddr,");
+      expect(src, "vault admin must not be the Safe").to.not.include("WALLETS[row.beneficiary], admin,");
+      expect(src).to.include('batch.send(timelock, "scheduleBatch"');
+      expect(src, "declare is scheduled, never called directly").to.not.include('"declareExpectedAllocation", [amount]');
+    });
+
     it("06_execute_tge.js runs the gate before any transaction and sends the list it checked", function () {
       const src = read("scripts/deploy/06_execute_tge.js");
       const gateAt = src.indexOf("await runTgeTargetChecks(");
@@ -401,7 +435,7 @@ describe("TGE destination controls", function () {
       // when the signer is the admin, queued for the Safe otherwise. Match the real
       // calls, and require that none is still sent directly from the deployer.
       for (const tx of ['batch.send(tge, "setAllocations", [finalAllocations]', 'batch.send(token, "genesis", [tgeAddr]',
-                        'batch.send(tge, "distribute"', 'batch.send(vault, "triggerTGE"',
+                        'batch.send(tge, "distribute"', 'batch.send(timelock, "executeBatch", op.args',
                         'batch.send(staking, "notifyRewardAmount"']) {
         const at = src.indexOf(tx);
         expect(at, tx).to.be.greaterThan(gateAt);
@@ -413,6 +447,20 @@ describe("TGE destination controls", function () {
       expect(src).to.match(/if \(gate\.failures\.length > 0\) \{[\s\S]{0,200}throw new Error/);
       expect(src).to.match(/const finalAllocations = gate\.allocations;/);
       expect(src, "no second allocation list").to.not.match(/WALLETS\./);
+    });
+
+    it("06_execute_tge.js checks the scheduled vault setup is ready BEFORE step 0 sends anything", function () {
+      // ⛔ Internal review, 7 Oct 2026: the readiness check sat in step 3, so with an admin
+      //    signer genesis and distribute were already mined when an unready Timelock
+      //    operation stopped the run. Every readiness check must come before any send.
+      const src = read("scripts/deploy/06_execute_tge.js");
+      const firstSend = src.indexOf("await batch.send(");
+      for (const check of ["timelock.isOperation(op.id)", "timelock.isOperationReady(op.id)"]) {
+        const at = src.indexOf(check);
+        expect(at, check).to.be.greaterThan(-1);
+        expect(at, `${check} must come before the first send`).to.be.lessThan(firstSend);
+        expect(src.indexOf(check, at + 1), `${check} appears only once, before the sends`).to.equal(-1);
+      }
     });
 
     it("verify_tge_targets.js uses the same gate and exits non-zero on failure", function () {

@@ -1,0 +1,6 @@
+# Slither for CI (job "slither" in .github/workflows/ci.yml). One pinned tool; the .txt next to this file pins every
+# package it needs, with hashes. Regenerate after a deliberate bump (uv 0.13.1; wheels only, as the CI image has no compiler):
+#   uv pip compile scripts/ci/requirements-slither.in --generate-hashes --python-platform x86_64-unknown-linux-gnu \
+#     --python-version 3.12 --only-binary :all: --no-header -o scripts/ci/requirements-slither.txt
+# slither-analyzer 0.11.6 is the version run locally on 7 Oct 2026 (0 High, 0 Medium).
+slither-analyzer==0.11.6

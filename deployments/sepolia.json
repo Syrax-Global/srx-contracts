@@ -1,0 +1,34 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "deployedAt": "2026-10-07T15:43:40.984Z",
+  "fromBlock": 11863887,
+  "deployer": "0x049fea6abBbc88487Ca14A7910d37E1feCdb9236",
+  "commit": "0deaa30",
+  "contracts": {
+    "SRXToken": "0x479FE29ee015b9D3b9b83A7e5c1447E94917B1D6",
+    "TGEDistributor": "0xa9beE25c5Bcb869101490497575466b2Fc7a5A9E",
+    "SRXTimelock": "0x183fCd029bDF41f701A1A52ABAFfC1068D1a9F18",
+    "SRXGovernor": "0xD20FA2207186E23b17e6b86951A237313733382C",
+    "SRXStaking": "0xECe696cd67645cc1AF302e40905154fE2be43496",
+    "FeeController": "0x9F1e2e24CC9271c255bF12881265204fb8673425",
+    "SRXTreasury": "0x45D0f2322Cecf30e4d710996d10EE18b5188AB98",
+    "StabilisationFund": "0xC244F8be37eFE008F43064d9A8f8b7185C78E122",
+    "GuardianModule": "0xF942c9df5A004882B8db401dcF7CFc392E282eA3",
+    "ZkSyncMigrator": "0x598D059eB3eDB85c166e64D907d1E98718CEa3A7",
+    "PreSaleRound": "0x1690C5299EAeEf6476B45FFe7Be0726D5CFfA1Ae"
+  },
+  "vaults": {
+    "Founders": "0x60B1320Df44a89c72Cdccb83D0220b2EbBA2A4Aa",
+    "CoreTeam": "0x20e62844Cd00f9C83a61a2dFA5ddD70a7E586d5e",
+    "SeedInvestors": "0x8d193a9AF53f53f6bcD2F5c84E3BbBb567e66601",
+    "Presale": "0x59f209026545242498d6990e70eA88410F08878C",
+    "EcosystemDAO": "0x80766616E4d36605fa8c246c3E7Ab6C477Af76cb",
+    "LiquidityReserve": "0x320CfAd3a11d4Dc8e0d74Fbb7A814E31f9EdEd0B"
+  },
+  "wallets": {
+    "PresaleLaunch": "0x15D4410F91705DBe3110Bb95aA6eaC565a3De409",
+    "LiquidityPool": "0x214f5719Ca2c406bbd4b221cEB4E58F3E7f17b1B",
+    "MarketMaker": "0x308E8e31140F65BeC1706A36127107D99bb0209b"
+  }
+}

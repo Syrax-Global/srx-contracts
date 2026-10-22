@@ -43,3 +43,8 @@ frame.sh
 # Planned: the external audit report, filed here when an external audit exists.
 # None has been commissioned. Deliberately a neutral name - no firm is named.
 audits/external-audit-report.pdf
+
+# ── In the Syrax-Workspace repo, not this one (12 Oct 2026). The mainnet provisioning plan
+#    is a workspace document (Security ruling on the testnet deployer, DEPLOYMENT_SECURITY.md
+#    D2-2); it cannot be a path in srx-token.
+Blockchain/MAINNET_PROVISIONING_PLAN.md

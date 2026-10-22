@@ -15,26 +15,17 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
  *  4. Call TGEDistributor.distribute() — sends each allocation to its
  *     destination and verifies the total matches MAX_SUPPLY. This function
  *     does NOT trigger TGE on vesting vaults.
- *  5. Call VestingVault.triggerTGE() on each vault (done atomically in
- *     the deploy script step 06 immediately after distribute()).
+ *  5. Start each vault's clock with VestingVault.triggerTGE(). The launch vaults'
+ *     admin is the SRXTimelock, so this is a scheduled Timelock operation
+ *     (scripts/deploy/lib/vaultOps.js, prepared by steps 03 and 06), not something
+ *     this contract or the deploy script's signer can do directly.
  *  6. distribute() is one-shot — after the first successful call, the `distributed`
  *     flag is permanently set, blocking any re-entry or re-distribution (A5-I-01).
  *
- * Allocation breakdown (Phase 1, 10,000,000,000 SRX):
- *  ┌──────────────────────────────┬─────┬──────────────────┐
- *  │ Category                     │  %  │ Tokens (SRX)     │
- *  ├──────────────────────────────┼─────┼──────────────────┤
- *  │ Founders VestingVault        │ 10% │  1,000,000,000   │
- *  │ Core Team VestingVault       │  6% │    600,000,000   │
- *  │ Seed Investors VestingVault  │  4% │    400,000,000   │
- *  │ Presale VestingVault         │ 14% │  1,400,000,000   │
- *  │ Ecosystem VestingVault       │ 13% │  1,300,000,000   │
- *  │ Liquidity wallet (direct)    │ 12% │  1,200,000,000   │
- *  │ Staking contract (direct)    │ 17% │  1,700,000,000   │
- *  │ Treasury contract (direct)   │  9% │    900,000,000   │
- *  │ Strategic wallet (direct)    │ 15% │  1,500,000,000   │
- *  └──────────────────────────────┴─────┴──────────────────┘
- *  Total: 100% = 10,000,000,000 SRX
+ * Allocation breakdown: the amounts, destinations and vesting schedules live in
+ * scripts/deploy/00_config.js (ALLOCATIONS, VESTING and TGE_PLAN: six vesting
+ * vaults, direct contract and wallet rows) and are published, generated from that
+ * file, in docs/TOKENOMICS.md. They always sum to MAX_SUPPLY (10,000,000,000 SRX).
  */
 contract TGEDistributor {
     using SafeERC20 for IERC20;
@@ -44,7 +35,7 @@ contract TGEDistributor {
     struct Allocation {
         address destination;
         uint256 amount;
-        bool    isVestingVault; // reserved for off-chain tracking; triggerTGE() called separately by admin
+        bool    isVestingVault; // reserved for off-chain tracking; triggerTGE() is a separate Timelock operation
         string  label;
     }
 
@@ -67,6 +58,8 @@ contract TGEDistributor {
     event AllocationSent(string indexed label, address indexed destination, uint256 amount);
     event DistributionComplete(uint256 totalDistributed, uint256 timestamp);
     event AllocationsSet(uint256 count, uint256 totalAmount, uint256 timestamp);
+    /// @notice Tokens left here after distribution were recovered (sweep 22 Oct, Info).
+    event TokenRecovered(address indexed token, address indexed recipient, uint256 amount);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -100,7 +93,7 @@ contract TGEDistributor {
 
         delete allocations;
 
-        uint256 total;
+        uint256 total = 0;
         for (uint256 i; i < _allocations.length; ++i) {
             if (_allocations[i].destination == address(0)) revert ZeroAddress();
             allocations.push(_allocations[i]);
@@ -129,9 +122,10 @@ contract TGEDistributor {
      *  - This contract holds zero SRX.
      *  - distributed flag is set — no re-entry possible.
      *
-     * ⚠️  This function does NOT call triggerTGE() on vesting vaults.
-     *     The deploy script (06_execute_tge.js) calls triggerTGE() on each
-     *     vault atomically in the step immediately following this call (M-03).
+     * ⚠️  This function does NOT call triggerTGE() on vesting vaults. Their admin is
+     *     the SRXTimelock, so starting each clock is a scheduled Timelock operation
+     *     (vaultOps.js), which 06_execute_tge.js checks is ready before it sends
+     *     anything (M-03).
      */
     function distribute() external {
         if (msg.sender != admin) revert OnlyAdmin();
@@ -152,7 +146,7 @@ contract TGEDistributor {
 
         distributed = true;
 
-        uint256 totalSent;
+        uint256 totalSent = 0;
         for (uint256 i; i < allocations.length; ++i) {
             Allocation memory alloc = allocations[i];
 
@@ -172,6 +166,20 @@ contract TGEDistributor {
     }
 
     /**
+     * @notice Total SRX the allocation set routes to `destination` (sent, once
+     *         `distributed` is true).
+     * @dev REG-50: SRXStaking and StabilisationFund read this, after distribution, to
+     *      learn exactly how much of their SRX came from the launch allocation. That,
+     *      and nothing that arrives later (fee revenue, buy-back proceeds, a plain
+     *      transfer), is all their reward pools can ever be backed by.
+     */
+    function allocatedTo(address destination) external view returns (uint256 total) {
+        for (uint256 i; i < allocations.length; ++i) {
+            if (allocations[i].destination == destination) total += allocations[i].amount;
+        }
+    }
+
+    /**
      * @notice Emergency recovery of any tokens accidentally sent to this contract
      *         after distribution is complete.
      */
@@ -180,7 +188,10 @@ contract TGEDistributor {
         if (!distributed)             revert NotDistributed(); // only callable after distribution
         if (recipient == address(0))  revert ZeroAddress();
         uint256 bal = IERC20(_token).balanceOf(address(this));
-        if (bal > 0) IERC20(_token).safeTransfer(recipient, bal);
+        if (bal > 0) {
+            IERC20(_token).safeTransfer(recipient, bal);
+            emit TokenRecovered(_token, recipient, bal);
+        }
     }
 }
 

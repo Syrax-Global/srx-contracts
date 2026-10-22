@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
+const { allocationSource } = require("./helpers/allocationSource");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("SRXStaking + FeeController", function () {
@@ -30,20 +31,12 @@ describe("SRXStaking + FeeController", function () {
 
     // ── Deploy Staking (UUPS) ─────────────────────────────────────────────────
     const SRXStaking = await ethers.getContractFactory("SRXStaking");
-    const staking = await upgrades.deployProxy(
-      SRXStaking,
-      [await token.getAddress(), admin.address],
-      { kind: "uups" }
-    );
+    const staking = await SRXStaking.deploy(...[await token.getAddress(), admin.address, await allocationSource(token)]);
     await staking.waitForDeployment();
 
     // ── Deploy FeeController (UUPS) ───────────────────────────────────────────
     const FeeController = await ethers.getContractFactory("FeeController");
-    const feeCtrl = await upgrades.deployProxy(
-      FeeController,
-      [await staking.getAddress(), admin.address],
-      { kind: "uups" }
-    );
+    const feeCtrl = await FeeController.deploy(...[await staking.getAddress(), admin.address]);
     await feeCtrl.waitForDeployment();
 
     // Approve staking contract for all users
@@ -612,11 +605,13 @@ describe("SRXStaking + FeeController", function () {
       ).to.be.revertedWithCustomError(staking, "PoolAmountExceedsAvailable");
     });
 
-    it("claimRewards reverts if no position", async function () {
+    it("claimRewards with no position and nothing owed reverts NothingToClaim", async function () {
+      // Pending rewards are claimable without a live position (internal review, 7 Oct 2026),
+      // so the refusal for someone who never staked is "nothing to claim".
       const { staking, user1 } = await loadFixture(deployRewardsFixture);
       await expect(
         staking.connect(user1).claimRewards()
-      ).to.be.revertedWithCustomError(staking, "NoPosition");
+      ).to.be.revertedWithCustomError(staking, "NothingToClaim");
     });
 
     it("claimRewards reverts if nothing earned yet", async function () {
@@ -630,266 +625,23 @@ describe("SRXStaking + FeeController", function () {
     });
   });
 
-  // ── Bonus reward token (real yield / USDC) ─────────────────────────────────
+  // ── Bonus reward token: REMOVED (REG-50 option C, 11 Oct 2026) ────────────
   //
-  // Tests the secondary reward accumulator that runs in parallel with SRX
-  // incentives. This is the expansion port for real yield from gateway fees.
+  // The second "real yield" reward stream was deleted from SRXStaking. Its absence
+  // (no function, no event, no storage) and the fixed SRX allocation that replaced
+  // it are proved in test/REG50.FixedRewardPools.test.js.
 
-  describe("Bonus reward token (real yield)", function () {
+  // ── No stranded-pool rescue (internal audit L1, 16 Oct 2026) ───────────────
+  //    rescueStrandedPool(recipient) (R5-01) is REMOVED: it could send the whole
+  //    unaccrued reward pool to any wallet. A pool with no stakers is not stranded
+  //    (accrual resumes when stakers return); after wind-down the only way reward
+  //    SRX leaves is releaseRewardAllocation(), and only to a successor contract.
 
-    const BONUS_RATE   = ethers.parseUnits("1", 6);       // 1 USDC per second
-    const BONUS_POOL   = ethers.parseUnits("1000000", 6); // 1M USDC pool
-    const STAKE_AMOUNT = ethers.parseUnits("100000", 18); // 100K SRX stake
-    const LOCK_7D      = 7 * 86400;
-    const LOCK_180D    = 180 * 86400;
-
-    async function deployBonusFixture() {
-      const base = await loadFixture(deployFixture);
-      const { token, staking, admin } = base;
-      const stakingAddr = await staking.getAddress();
-
-      // Deploy mock USDC (6 decimals)
-      const MockERC20 = await ethers.getContractFactory("MockERC20");
-      const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
-      await usdc.waitForDeployment();
-
-      // Configure bonus reward token
-      await staking.connect(admin).setBonusRewardToken(await usdc.getAddress());
-
-      // Fund staking contract with USDC and register pool
-      await usdc.mint(stakingAddr, BONUS_POOL);
-      await staking.connect(admin).notifyBonusRewardAmount(BONUS_POOL);
-
-      // Turn on bonus emissions
-      await staking.connect(admin).setBonusRewardRate(BONUS_RATE);
-
-      // Fund test users with SRX
-      await token.connect(admin).transfer(base.user1.address, STAKE_AMOUNT * 2n);
-      await token.connect(admin).transfer(base.user2.address, STAKE_AMOUNT * 2n);
-      await token.connect(base.user1).approve(stakingAddr, ethers.MaxUint256);
-      await token.connect(base.user2).approve(stakingAddr, ethers.MaxUint256);
-
-      return { ...base, usdc, stakingAddr };
-    }
-
-    it("setBonusRewardToken sets the token and emits event", async function () {
-      const { staking, admin } = await loadFixture(deployFixture);
-      const MockERC20 = await ethers.getContractFactory("MockERC20");
-      const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
-      await usdc.waitForDeployment();
-
-      await expect(staking.connect(admin).setBonusRewardToken(await usdc.getAddress()))
-        .to.emit(staking, "BonusRewardTokenSet")
-        .withArgs(await usdc.getAddress());
-
-      expect(await staking.bonusRewardToken()).to.equal(await usdc.getAddress());
-    });
-
-    it("setBonusRewardToken reverts if called a second time", async function () {
-      const { staking } = await loadFixture(deployBonusFixture);
-      const MockERC20 = await ethers.getContractFactory("MockERC20");
-      const usdc2 = await MockERC20.deploy("USD Coin 2", "USDC2", 6);
-      await usdc2.waitForDeployment();
-
-      await expect(
-        staking.connect((await ethers.getSigners())[0]).setBonusRewardToken(await usdc2.getAddress())
-      ).to.be.revertedWithCustomError(staking, "BonusTokenAlreadySet");
-    });
-
-    it("setBonusRewardToken reverts with zero address", async function () {
-      const { staking, admin } = await loadFixture(deployFixture);
-      await expect(
-        staking.connect(admin).setBonusRewardToken(ethers.ZeroAddress)
-      ).to.be.revertedWithCustomError(staking, "ZeroAddress");
-    });
-
-    it("notifyBonusRewardAmount registers pool and emits event", async function () {
-      const { staking } = await loadFixture(deployBonusFixture);
-      expect(await staking.bonusRewardPool()).to.equal(BONUS_POOL);
-    });
-
-    it("notifyBonusRewardAmount reverts if bonus token not set", async function () {
-      const { staking, admin } = await loadFixture(deployFixture);
-      await expect(
-        staking.connect(admin).notifyBonusRewardAmount(1_000_000n)
-      ).to.be.revertedWithCustomError(staking, "BonusTokenNotSet");
-    });
-
-    it("setBonusRewardRate sets rate and emits event", async function () {
-      const { staking } = await loadFixture(deployBonusFixture);
-      expect(await staking.bonusRewardRate()).to.equal(BONUS_RATE);
-    });
-
-    it("setBonusRewardRate reverts if bonus token not set", async function () {
-      const { staking, admin } = await loadFixture(deployFixture);
-      await expect(
-        staking.connect(admin).setBonusRewardRate(1_000n)
-      ).to.be.revertedWithCustomError(staking, "BonusTokenNotSet");
-    });
-
-    it("single staker earns full bonus emission over time", async function () {
-      const { staking, user1 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-      await time.increase(100); // 100 seconds at 1 USDC/sec = 100 USDC
-
-      const expected  = 100n * BONUS_RATE;
-      const tolerance = BONUS_RATE * 3n; // 3 seconds timing tolerance
-      expect(await staking.earnedBonus(user1.address)).to.be.closeTo(expected, tolerance);
-    });
-
-    it("two stakers split bonus rewards proportionally to weighted stake", async function () {
-      const { staking, user1, user2 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);   // 1× weight
-      await staking.connect(user2).lock(STAKE_AMOUNT, LOCK_180D); // 2× weight
-
-      await time.increase(300); // 300 USDC total
-
-      // user1: 1/3 = 100 USDC, user2: 2/3 = 200 USDC
-      const earned1 = await staking.earnedBonus(user1.address);
-      const earned2 = await staking.earnedBonus(user2.address);
-
-      const tolerance = BONUS_RATE * 5n;
-      expect(earned1).to.be.closeTo(100n * BONUS_RATE, tolerance);
-      expect(earned2).to.be.closeTo(200n * BONUS_RATE, tolerance);
-    });
-
-    it("claimBonusRewards transfers USDC and resets earnedBonus to zero", async function () {
-      const { staking, usdc, user1 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-      await time.increase(100);
-
-      const balBefore  = await usdc.balanceOf(user1.address);
-      const earnedAmt  = await staking.earnedBonus(user1.address);
-      await staking.connect(user1).claimBonusRewards();
-
-      expect(await staking.earnedBonus(user1.address)).to.equal(0n);
-      expect(await usdc.balanceOf(user1.address)).to.be.closeTo(
-        balBefore + earnedAmt,
-        BONUS_RATE * 3n
-      );
-    });
-
-    it("bonus rewards auto-paid on normal unlock", async function () {
-      const { staking, usdc, user1 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-      await time.increase(LOCK_7D + 1);
-      await staking.connect(user1).unlock();
-
-      // USDC balance should be > 0 — rewards were paid out
-      expect(await usdc.balanceOf(user1.address)).to.be.gt(0n);
-    });
-
-    it("bonus rewards auto-paid on earlyWithdraw", async function () {
-      const { staking, usdc, user1 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-      await time.increase(1000);
-      await staking.connect(user1).earlyWithdraw();
-
-      expect(await usdc.balanceOf(user1.address)).to.be.gt(0n);
-    });
-
-    it("bonusRewardPool decrements as bonus rewards are claimed", async function () {
-      const { staking, user1 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-      await time.increase(100);
-
-      const poolBefore = await staking.bonusRewardPool();
-      await staking.connect(user1).claimBonusRewards();
-      expect(await staking.bonusRewardPool()).to.be.lt(poolBefore);
-    });
-
-    it("claimBonusRewards reverts if bonus token not set", async function () {
-      const { staking, user1, admin } = await loadFixture(deployFixture);
-      const stakingAddr = await staking.getAddress();
-      const tok = await ethers.getContractFactory("SRXToken");
-
-      // Lock some SRX using the base fixture token
-      const MockLZ = await ethers.getContractFactory("MockLZEndpoint");
-      const ep = await MockLZ.deploy(40161);
-      const SRXToken = await ethers.getContractFactory("SRXToken");
-      const t = await SRXToken.deploy(await ep.getAddress(), admin.address);
-      await t.connect(admin).genesis(admin.address);
-      await t.connect(admin).transfer(user1.address, ethers.parseUnits("100000", 18));
-      await t.connect(user1).approve(stakingAddr, ethers.MaxUint256);
-
-      await expect(
-        staking.connect(user1).claimBonusRewards()
-      ).to.be.revertedWithCustomError(staking, "BonusTokenNotSet");
-    });
-
-    it("claimBonusRewards reverts with NoPosition if user has no stake", async function () {
-      const { staking, user1 } = await loadFixture(deployBonusFixture);
-      await expect(
-        staking.connect(user1).claimBonusRewards()
-      ).to.be.revertedWithCustomError(staking, "NoPosition");
-    });
-
-    it("claimBonusRewards reverts with NothingToClaim when rate is zero", async function () {
-      const { staking, admin, user1 } = await loadFixture(deployBonusFixture);
-
-      await staking.connect(admin).setBonusRewardRate(0n);
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-
-      await expect(
-        staking.connect(user1).claimBonusRewards()
-      ).to.be.revertedWithCustomError(staking, "NothingToClaim");
-    });
-
-    it("earnedBonus is zero before any stake or rate is configured", async function () {
-      const { staking, user1 } = await loadFixture(deployBonusFixture);
-      expect(await staking.earnedBonus(user1.address)).to.equal(0n);
-    });
-
-    it("SRX incentives and bonus rewards accrue independently", async function () {
-      const { token, staking, usdc, admin, user1, stakingAddr } = await loadFixture(deployBonusFixture);
-
-      // Also fund SRX reward pool
-      const SRX_POOL = ethers.parseUnits("1000000", 18);
-      const SRX_RATE = ethers.parseUnits("10", 18); // 10 SRX/sec
-      await token.connect(admin).transfer(stakingAddr, SRX_POOL);
-      await staking.connect(admin).notifyRewardAmount(SRX_POOL);
-      await staking.connect(admin).setRewardRate(SRX_RATE);
-
-      await staking.connect(user1).lock(STAKE_AMOUNT, LOCK_7D);
-      await time.increase(100);
-
-      const srxEarned   = await staking.earned(user1.address);
-      const bonusEarned = await staking.earnedBonus(user1.address);
-
-      // Both should be > 0 and independent
-      expect(srxEarned).to.be.gt(0n);
-      expect(bonusEarned).to.be.gt(0n);
-
-      // SRX earned ≈ 10 SRX/s × 100s = 1000 SRX
-      expect(srxEarned).to.be.closeTo(
-        ethers.parseUnits("1000", 18),
-        ethers.parseUnits("20", 18)
-      );
-
-      // USDC earned ≈ 1 USDC/s × 100s = 100 USDC
-      expect(bonusEarned).to.be.closeTo(
-        100n * BONUS_RATE,
-        BONUS_RATE * 5n
-      );
-    });
-  });
-
-  // ── Round 5: stranded pool rescue (R5-01) ─────────────────────────────────
-  //    Parity with StabilisationFund.rescueStrandedPool (A5-M-02). When all
-  //    stakers exit, the accumulator freezes and the remaining pool would be
-  //    permanently stranded without these functions.
-
-  describe("Stranded pool rescue (R5-01)", function () {
+  describe("No stranded-pool rescue (internal audit L1)", function () {
     const POOL  = ethers.parseUnits("1000000", 18); // 1M SRX
     const RATE  = ethers.parseUnits("1", 18);       // 1 SRX/s → 7d emission = 604,800 SRX
 
-    it("governance rescues SRX stranded after all stakers exit", async function () {
+    it("nothing can send the reward pool to a wallet: rescueStrandedPool is gone and release only goes to a successor", async function () {
       const { staking, token, admin, user1 } = await loadFixture(deployFixture);
       const stakingAddr = await staking.getAddress();
 
@@ -898,75 +650,56 @@ describe("SRXStaking + FeeController", function () {
       await staking.connect(admin).notifyRewardAmount(POOL);
       await staking.connect(admin).setRewardRate(RATE);
 
-      // Lock expires → sole staker exits (their accrued share auto-claims on unlock)
+      // Lock expires → sole staker exits: the pool is left with nobody staked
       await time.increase(LOCK_7D + 1);
       await staking.connect(user1).unlock();
       expect(await staking.totalWeightedStake()).to.equal(0n);
+      expect(await staking.rewardPool()).to.be.gt(0n); // 1M funded > ~604.8K emitted
 
-      const stranded = await staking.rewardPool();
-      expect(stranded).to.be.gt(0n); // 1M funded > ~604.8K emitted
+      // The rescue function, its event and its error no longer exist
+      expect(staking.interface.fragments.filter(f => f.name === "rescueStrandedPool")).to.have.length(0);
+      expect(staking.interface.fragments.filter(f => ["RewardPoolReset", "NoStrandedPool"].includes(f.name))).to.have.length(0);
+      expect(staking.rescueStrandedPool).to.equal(undefined);
 
+      // Before wind-down nothing at all can leave
+      await expect(staking.connect(admin).releaseRewardAllocation(admin.address, 1n))
+        .to.be.revertedWithCustomError(staking, "NotASuccessor").withArgs(admin.address);
+
+      // After wind-down a wallet is still refused, even for governance
+      await staking.connect(admin).startWindDown();
       const before = await token.balanceOf(admin.address);
-      await expect(staking.connect(admin).rescueStrandedPool(admin.address))
-        .to.emit(staking, "RewardPoolReset")
-        .withArgs(admin.address, stranded);
-
-      expect(await token.balanceOf(admin.address)).to.equal(before + stranded);
-      expect(await staking.rewardPool()).to.equal(0n);
-      expect(await staking.rewardRate()).to.equal(0n);
+      await expect(staking.connect(admin).releaseRewardAllocation(admin.address, 1n))
+        .to.be.revertedWithCustomError(staking, "NotASuccessor").withArgs(admin.address);
+      expect(await token.balanceOf(admin.address)).to.equal(before);
     });
 
-    it("rescues stranded bonus pool after all stakers exit", async function () {
+    it("after wind-down the unaccrued pool goes only to a successor that names this contract as its source", async function () {
       const { staking, token, admin, user1 } = await loadFixture(deployFixture);
       const stakingAddr = await staking.getAddress();
 
-      // Configure bonus token (mock USDC) + fund + emit
-      const MockERC20 = await ethers.getContractFactory("MockERC20");
-      const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
-      await usdc.waitForDeployment();
-      const BONUS_POOL = 1_000_000_000n; // 1,000 USDC (6-dec)
-      await staking.connect(admin).setBonusRewardToken(await usdc.getAddress());
-      await usdc.mint(stakingAddr, BONUS_POOL);
-      await staking.connect(admin).notifyBonusRewardAmount(BONUS_POOL);
-      await staking.connect(admin).setBonusRewardRate(1_000n); // slow drip
-
       await staking.connect(user1).lock(BRONZE_THRESHOLD, LOCK_7D);
+      await token.connect(admin).transfer(stakingAddr, POOL);
+      await staking.connect(admin).notifyRewardAmount(POOL);
+      await staking.connect(admin).setRewardRate(RATE);
       await time.increase(LOCK_7D + 1);
       await staking.connect(user1).unlock();
-      expect(await staking.totalWeightedStake()).to.equal(0n);
 
-      const stranded = await staking.bonusRewardPool();
-      expect(stranded).to.be.gt(0n);
+      await staking.connect(admin).startWindDown();
+      const releasable = await staking.releasableRewardAllocation();
+      expect(releasable).to.be.gt(0n);
 
-      await expect(staking.connect(admin).rescueStrandedBonusPool(admin.address))
-        .to.emit(staking, "BonusRewardPoolReset")
-        .withArgs(admin.address, stranded);
-
-      expect(await usdc.balanceOf(admin.address)).to.equal(stranded);
-      expect(await staking.bonusRewardPool()).to.equal(0n);
-      expect(await staking.bonusRewardRate()).to.equal(0n);
+      const SRXStaking = await ethers.getContractFactory("SRXStaking");
+      const v2 = await SRXStaking.deploy(await token.getAddress(), admin.address, stakingAddr);
+      await expect(staking.connect(admin).releaseRewardAllocation(await v2.getAddress(), releasable))
+        .to.emit(staking, "RewardAllocationReleased").withArgs(await v2.getAddress(), releasable);
+      expect(await token.balanceOf(await v2.getAddress())).to.equal(releasable);
+      expect(await staking.releasableRewardAllocation()).to.equal(0n);
     });
 
-    it("reverts NoStrandedPool while a staker is still active", async function () {
-      const { staking, token, admin, user1 } = await loadFixture(deployFixture);
-      await staking.connect(user1).lock(BRONZE_THRESHOLD, LOCK_7D);
-      await token.connect(admin).transfer(await staking.getAddress(), POOL);
-      await staking.connect(admin).notifyRewardAmount(POOL);
-
-      await expect(staking.connect(admin).rescueStrandedPool(admin.address))
-        .to.be.revertedWithCustomError(staking, "NoStrandedPool");
-    });
-
-    it("reverts NoStrandedPool when the pool is empty", async function () {
-      const { staking, admin } = await loadFixture(deployFixture);
-      await expect(staking.connect(admin).rescueStrandedPool(admin.address))
-        .to.be.revertedWithCustomError(staking, "NoStrandedPool");
-    });
-
-    it("reverts for non-governance caller", async function () {
+    it("a non-governance caller cannot release reward allocation", async function () {
       const { staking, user1 } = await loadFixture(deployFixture);
-      await expect(staking.connect(user1).rescueStrandedPool(user1.address))
-        .to.be.reverted; // AccessControl: missing GOVERNANCE_ROLE
+      await expect(staking.connect(user1).releaseRewardAllocation(user1.address, 1n))
+        .to.be.revertedWithCustomError(staking, "AccessControlUnauthorizedAccount");
     });
   });
 });

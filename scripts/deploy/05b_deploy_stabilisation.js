@@ -3,8 +3,9 @@
  *
  * The Syrax Stabilisation Fund (SSF) replaces the raw "strategic wallet"
  * as the destination for the 1,500,000,000 SRX Strategic Reserve (15% of
- * total supply). It implements the three-tier emergency response architecture
- * described in the Syrax Liquidity Resilience Whitepaper.
+ * total supply). It implements a three-tier emergency response architecture
+ * (see the contract). REG-50: depositor rewards are capped for good at
+ * SSF.REWARD_ALLOCATION, fixed here at deployment; mainnet refuses to run until set.
  *
  * This script must run AFTER Step 5 (Treasury) so the Timelock address is
  * known, and BEFORE Step 6 (Execute TGE) so that 06_execute_tge.js can
@@ -34,7 +35,7 @@
  * Run: npx hardhat run scripts/deploy/05b_deploy_stabilisation.js --network sepolia
  */
 const { ethers, upgrades, network } = require("hardhat");
-const { WALLETS, SSF }              = require("./00_config");
+const { WALLETS, SSF, ssfRewardAllocation } = require("./00_config");
 const { createAdminBatch }          = require("./lib/adminTx");
 
 async function main() {
@@ -54,6 +55,10 @@ async function main() {
 
   if (!srxToken) throw new Error(`SRX_TOKEN_${NET} not set in .env`);
   if (!timelock) throw new Error(`TIMELOCK_${NET} not set in .env — run Step 2 first`);
+  // REG-50: rewards can only be backed by what the launch distributor (step 03) records
+  // delivering here, so its address is fixed into the contract now.
+  const tgeDistributor = process.env[`TGE_DISTRIBUTOR_${network.name.toUpperCase()}`];
+  if (!tgeDistributor) throw new Error(`TGE_DISTRIBUTOR_${network.name.toUpperCase()} not set in .env — run Step 3 first (05b)`);
 
   console.log(`SRX Token:  ${srxToken}`);
   console.log(`Timelock:   ${timelock}`);
@@ -61,17 +66,15 @@ async function main() {
   console.log(`\nSSF parameters:`);
   console.log(`  maxDeployerBps:       ${SSF.MAX_DEPLOYER_BPS} bps (${SSF.MAX_DEPLOYER_BPS / 100}% Tier 1 cap)`);
   console.log(`  maxGuardianBps:       ${SSF.MAX_GUARDIAN_BPS} bps (${SSF.MAX_GUARDIAN_BPS / 100}% Tier 2 combined cap)`);
-  console.log(`  withdrawLockDuration: ${SSF.WITHDRAW_LOCK_DURATION}s (${SSF.WITHDRAW_LOCK_DURATION / 86400} days)\n`);
+  console.log(`  withdrawLockDuration: ${SSF.WITHDRAW_LOCK_DURATION}s (${SSF.WITHDRAW_LOCK_DURATION / 86400} days)`);
+  const rewardAllocation = ssfRewardAllocation(network.name); // throws on mainnet until decided
+  console.log(`  rewardAllocation:     ${ethers.formatUnits(rewardAllocation, 18)} SRX (fixed for good, REG-50)\n`);
 
   // ── Deploy StabilisationFund (UUPS proxy) ───────────────────────────────
 
   console.log("[1/2] Deploying StabilisationFund (UUPS proxy)...");
   const StabilisationFund = await ethers.getContractFactory("StabilisationFund");
-  const ssf = await upgrades.deployProxy(
-    StabilisationFund,
-    [srxToken, admin, SSF.MAX_DEPLOYER_BPS, SSF.MAX_GUARDIAN_BPS, SSF.WITHDRAW_LOCK_DURATION],
-    { initializer: "initialize", kind: "uups" }
-  );
+  const ssf = await StabilisationFund.deploy(...[srxToken, admin, SSF.MAX_DEPLOYER_BPS, SSF.MAX_GUARDIAN_BPS, SSF.WITHDRAW_LOCK_DURATION, rewardAllocation, tgeDistributor]);
   await ssf.waitForDeployment();
   const proxyAddr = await ssf.getAddress();
   console.log(`  Proxy: ${proxyAddr}`);

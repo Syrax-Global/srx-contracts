@@ -9,7 +9,8 @@
     "governor": "0x0000000000000000000000000000000000000000",
     "guardianModule": "0x0000000000000000000000000000000000000000",
     "guardianMultisig": "0x0000000000000000000000000000000000000000",
-    "deployerMultisig": "0x0000000000000000000000000000000000000000"
+    "deployerMultisig": "0x0000000000000000000000000000000000000000",
+    "deployer": "0x0000000000000000000000000000000000000000"
   },
   "tgeAllocations": {
     "_note": "Destinations MUST match 06_execute_tge.js finalAllocations exactly. Vaults are deployed contracts; PresaleLaunch, LiquidityPool and MarketMaker are MULTI-SIGNATURE wallets (a single-key wallet is refused on a real network) and Staking, Treasury and StabilisationFund are contracts; together PresaleLaunch + LiquidityPool + MarketMaker are the 5% launch float. For each vesting vault, beneficiary is the address the vault pays out to; it is compared with the deployed vault's beneficiary() and is REQUIRED on a real network.",

@@ -6,7 +6,12 @@
  *
  *  1. SRXToken.genesis(tgeDistributor)  — mints 10 billion SRX to the distributor.
  *  2. TGEDistributor.distribute()       — sends each allocation to its destination.
- *  3. VestingVault.triggerTGE()         — starts the vesting clock on each vault.
+ *  3. Timelock executeBatch (x2)        — runs the two operations step 03 scheduled:
+ *                                         declare each vault's grant, then start each
+ *                                         vault's vesting clock (the Timelock is the
+ *                                         vaults' admin; execution is open to anyone).
+ *                                         Their readiness is checked BEFORE step 1, so
+ *                                         if they are not ready nothing is sent.
  *  4. SRXStaking.notifyRewardAmount()   — registers the 1.7B staking allocation
  *                                         as the ecosystem participation incentive pool.
  *
@@ -35,17 +40,17 @@
  *    checked. Allocation sum, destinations, manifest match, role holders, and each
  *    vault's token, beneficiary and schedule are all covered there.
  *
- * ⛔ SC-TRUST-002 (finding DEP-01): setAllocations(), genesis(), distribute() and
- *    triggerTGE() are all gated by an admin field that is the configured admin
- *    address (00_config.js) — the admin Gnosis Safe on mainnet, never the deployer
- *    EOA. They now route through scripts/deploy/lib/adminTx.js. When the loaded
- *    signer IS the admin (testnets)
+ * ⛔ SC-TRUST-002 (finding DEP-01): setAllocations(), genesis() and distribute() are
+ *    gated by an admin field that is the configured admin address (00_config.js) —
+ *    the admin Gnosis Safe on mainnet, never the deployer EOA. They, and the Timelock
+ *    executeBatch calls for the vault setup, route through scripts/deploy/lib/adminTx.js.
+ *    When the loaded signer IS the admin (testnets)
  *    every step still executes immediately, in order, exactly as before. When it
- *    is NOT (mainnet), those four groups of calls are queued into ONE Safe batch —
+ *    is NOT (mainnet), those groups of calls are queued into ONE Safe batch —
  *    safe, because none of their calldata depends on a read that only becomes
- *    correct after an earlier call in the batch executes (triggerTGE() takes no
- *    args and reads its own balance on-chain at execution time; a Safe batch runs
- *    atomically and in order). The script then flushes and STOPS: it does not
+ *    correct after an earlier call in the batch executes (the vault operations'
+ *    calldata is fixed in advance, and each vault reads its own balance on-chain
+ *    at execution time; a Safe batch runs atomically and in order). The script then flushes and STOPS: it does not
  *    attempt step 4 (registering the staking incentive pool) in that same run,
  *    because notifyRewardAmount(amount) needs the ACTUAL post-distribution staking
  *    balance as an argument, and that balance does not exist yet — it is what the
@@ -60,6 +65,8 @@ const readline = require("readline");
 const { ALLOCATIONS } = require("./00_config");
 const { runTgeTargetChecks } = require("./lib/tge_targets");
 const { createAdminBatch } = require("./lib/adminTx");
+const { vaultOps } = require("./lib/vaultOps");
+const { launchPlan } = require("./lib/genesis_seed");
 
 // Only the getters the destination controls read. Kept inline so the check does
 // not depend on compiled artifacts matching the deployed vault.
@@ -126,6 +133,9 @@ async function main() {
     throw new Error(`${gate.failures.length} destination check(s) failed — TGE NOT executed. Nothing was sent.`);
   }
   const finalAllocations = gate.allocations;
+  // The amounts behind finalAllocations, by allocation key — the seed vault's grant
+  // is the seed allocation minus what the Genesis round sold (lib/genesis_seed.js).
+  const amounts = launchPlan(gate.genesisSold).allocations;
   for (const a of finalAllocations) {
     console.log(`✅ ${a.label.padEnd(18)} ${a.destination}  ${ethers.formatUnits(a.amount, 18)} SRX`);
   }
@@ -189,6 +199,29 @@ async function main() {
   const batch = createAdminBatch("06_tge");
   const adminExecuting = await batch.isAdmin();
 
+  // ⛔ CHECK THE SCHEDULED VAULT SETUP BEFORE ANYTHING IS SENT (internal review, 7 Oct
+  //    2026). This check used to sit in step 3, after genesis and distribute. With an
+  //    admin signer (testnets) those two were already MINED when an unready or
+  //    mismatched Timelock operation stopped the run, leaving 10B minted and
+  //    distributed with every vault's clock unset, while the message said "nothing
+  //    was sent". Now an unready operation stops the run before step 0.
+  const vaultSteps = [];
+  if (!phaseADone && !allVaultsTriggered) {
+    const timelock = await ethers.getContractAt("SRXTimelock", env(`TIMELOCK_${NET}`));
+    const ops = vaultOps(vaultAddresses, amounts);
+    for (const [name, op] of [["declare every grant", ops.declare], ["start every vesting clock", ops.trigger]]) {
+      if (await timelock.isOperationDone(op.id)) { console.log(`  ✓ (already done) ${name}`); continue; }
+      if (!(await timelock.isOperation(op.id))) {
+        throw new Error(`The Timelock has no scheduled operation to ${name} for these vaults (or the amounts changed since Step 3). Re-run Step 3 — nothing was sent.`);
+      }
+      if (!(await timelock.isOperationReady(op.id))) {
+        const at = Number(await timelock.getTimestamp(op.id));
+        throw new Error(`The operation to ${name} is scheduled but not ready until ${new Date(at * 1000).toISOString()} (the Timelock delay). Run this step after that — nothing was sent.`);
+      }
+      vaultSteps.push({ name, op, timelock });
+    }
+  }
+
   if (!phaseADone) {
     // ── Step 0: setAllocations() — route strategic reserve to SSF ──────────
     //
@@ -238,27 +271,26 @@ async function main() {
 
     // ── Step 3: triggerTGE() on each vesting vault ──────────────────────
 
-    console.log(`\n[3/4] Triggering TGE on all vesting vaults...`);
+    // ⭐ The vaults' admin is the Timelock (30 Sep 2026; see lib/vaultOps.js), so
+    //    declaring each grant and starting each clock are the two Timelock
+    //    operations 03_deploy_vesting SCHEDULED. Here they are EXECUTED — open to
+    //    anyone once ready — in the same batch, right after distribute().
+    console.log(`\n[3/4] Executing the scheduled vault setup (declare grants, start clocks)...`);
 
-    for (const [label, addr] of Object.entries(vaultAddresses)) {
-      if (vaultTriggered[label]) {
-        console.log(`  ✓ ${label} — already triggered`);
-        continue;
+    if (!allVaultsTriggered) {
+      // Checked before step 0 (above); here they are only executed.
+      for (const { name, op, timelock } of vaultSteps) {
+        await batch.send(timelock, "executeBatch", op.args, `Timelock: execute — ${name} (${op.targets.length} vaults)`);
       }
-      const vault = await ethers.getContractAt("VestingVault", addr);
-
       if (adminExecuting) {
-        const bal = await token.balanceOf(addr);
-        console.log(`  ${label}: balance=${ethers.formatUnits(bal, 18)} SRX`);
-        if (bal === 0n) console.warn(`  ⚠️  ${label} vault has 0 balance — check allocations`);
+        for (const [label, addr] of Object.entries(vaultAddresses)) {
+          const vault = await ethers.getContractAt("VestingVault", addr);
+          const ts = await vault.tgeTimestamp();
+          console.log(`  ✅ ${label} clock started — ${new Date(Number(ts) * 1000).toISOString()}`);
+        }
       }
-
-      await batch.send(vault, "triggerTGE", [], `VestingVault(${label}).triggerTGE()`);
-
-      if (adminExecuting) {
-        const ts = await vault.tgeTimestamp();
-        console.log(`  ✅ ${label} TGE triggered — timestamp ${new Date(Number(ts) * 1000).toISOString()}`);
-      }
+    } else {
+      console.log(`  ✓ (already done) every vault's clock is running`);
     }
 
     const wrote = await batch.flush();
@@ -326,6 +358,10 @@ async function main() {
   console.log(`    [ ] Verify each vault's tgeTimestamp matches expected TGE date`);
   console.log(`    [ ] Set incentive emission rate via governance:`);
   console.log(`          staking.setRewardRate(13_500_000_000_000_000_000)  // ~4yr distribution`);
+  if (gate.genesisSold > 0n) {
+    console.log(`    [ ] NOW: npx hardhat run scripts/deploy/06b_genesis_vaults.js --network ${network.name}`);
+    console.log(`          creates each Genesis buyer's vault and starts its clock (before maxWalletBalance is switched on)`);
+  }
   console.log(`    [ ] Announce TGE to community with vault addresses for transparency`);
   console.log(`    [ ] Verify StabilisationFund received 1,500,000,000 SRX:`);
   console.log(`          npx hardhat console --network ${network.name}`);

@@ -94,13 +94,14 @@ describe("Launch float — the 5% design", function () {
       const next = () => signers[i++].address;
       const vaults = {};
       const allocations = [];
+      const revokeRecipient = next(); // the Treasury stand-in every vault returns revoked SRX to (internal audit M2)
       for (const row of TGE_PLAN) {
         let destination;
         if (row.kind === "vault") {
           const v = VESTING[row.schedule];
           who[row.label] = next(); // beneficiary
           const vault = await Vault.deploy(await token.getAddress(), who[row.label], admin.address,
-            v.cliffDuration, v.vestingDuration, v.tgeUnlockBps);
+            v.cliffDuration, v.vestingDuration, v.tgeUnlockBps, revokeRecipient);
           vaults[row.label] = vault;
           destination = await vault.getAddress();
         } else {

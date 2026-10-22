@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
 
-import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
+import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title FeeController
@@ -17,6 +15,13 @@ import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/I
  * Fee logic:
  *  effectiveFee = baseFee * (BPS_DENOMINATOR - discountBps) / BPS_DENOMINATOR
  *
+ * The result is clamped to [MIN_FEE_BPS, MAX_FEE_BPS]: a 0.15% floor that applies even at
+ * a 100% discount (Obsidian pays the floor, not zero), and a 5% ceiling. ⛔ REG-54 (Jared,
+ * 12 Oct 2026): both are constants. They were governance-adjustable (the floor down to 0,
+ * the ceiling up to 100%), which contradicted the whitepaper's "a discount never takes a
+ * fee below 0.15%". Governance still sets the base rate and the crypto multiplier, but
+ * only between them.
+ *
  * Payment type multipliers:
  *  - Fiat payments:     100% of base fee (standard)
  *  - Non-SRX crypto:    75% of base fee (reduced, rounded down)
@@ -25,23 +30,26 @@ import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/I
  * Staking tier discounts apply on top of the payment-type multiplier for
  * non-SRX crypto payments. SRX payments are always zero-fee.
  *
- * All fee parameters are governance-adjustable via the timelock.
+ * The base rate, crypto multiplier, tiers and routing are governance-adjustable via the
+ * timelock; the floor and ceiling are not.
  *
- * UUPS upgradeable to allow fee model evolution without re-integrating the
- * gateway backend (the contract address stays constant).
+ * ⛔ NOT UPGRADEABLE (REG-53, Jared, 12 Oct 2026). A plain contract: its code can never
+ *    change and no role can replace it. The pause (PAUSER_ROLE, held by GuardianModule)
+ *    stays. A fix ships as a new contract that holders choose to move to
+ *    (docs/MIGRATION.md), never as a forced or in-place change.
+ *    Fee parameters remain governance-adjustable through the Timelock; only the code
+ *    is fixed.
  */
-contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgradeable, UUPSUpgradeable {
+contract FeeController is AccessControl, Pausable {
 
     // ── Roles ──────────────────────────────────────────────────────────────────
 
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
-    bytes32 public constant GATEWAY_ROLE    = keccak256("GATEWAY_ROLE"); // Syrax backend address
+    // GATEWAY_ROLE is defined but gates no function today: calculateFee() is a public
+    // view, so the backend needs no role. Reserved for a future write path; verify_roles.js
+    // only checks that the deployer key does not hold it.
+    bytes32 public constant GATEWAY_ROLE    = keccak256("GATEWAY_ROLE");
     bytes32 public constant PAUSER_ROLE     = keccak256("PAUSER_ROLE");  // GuardianModule
-    /// @notice Authorises UUPS upgrades. SEPARATED from GOVERNANCE_ROLE (SC-TRUST-001 fix)
-    ///         so upgrade authority can be homed exclusively on the SRXTimelock. MUST be
-    ///         migrated to the Timelock and revoked from the admin EOA before mainnet
-    ///         (enforced by verify_roles.js).
-    bytes32 public constant UPGRADER_ROLE   = keccak256("UPGRADER_ROLE");
 
     // ── Payment type enum ──────────────────────────────────────────────────────
 
@@ -59,18 +67,23 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     uint256 public cryptoFeeMultiplierBps; // Default: 7500 = 75% of base fee
     // SRX payment fee is always 0 — not a configurable parameter.
 
-    uint256 public minFeeBps;              // Minimum floor fee (prevents 0 on tiny discounts)
-    uint256 public maxFeeBps;             // Safety cap (never charge more than this)
+    /// @notice The fee floor, 0.15%. Fixed in code (REG-54): no role can change it.
+    uint256 public constant MIN_FEE_BPS = 15;
+    /// @notice The fee ceiling, 5%. Fixed in code (REG-54): no role can change it.
+    uint256 public constant MAX_FEE_BPS = 500;
 
     // ── Fee distribution routing table ─────────────────────────────────────────
     //
     // Governance configures how collected platform fee revenue should be split
-    // across destinations (e.g. Treasury, RealYield pool, AutoBurn contract).
+    // across destinations (e.g. Treasury, AutoBurn contract).
     // This table is read by the gateway backend (eth_call) and by any future
     // on-chain FeeRouter contract. No money moves through FeeController itself —
-    // it is a pure calculator. The routing table is the expansion port that allows
-    // new revenue streams (real yield, auto-burn) to be wired without a contract
-    // upgrade.
+    // it is a pure calculator. The routing table lets new destinations (for example
+    // auto-burn) be wired without deploying a new contract.
+    // ⛔ REG-50 (11 Oct 2026): fee revenue never funds SRX holder rewards. Staking and
+    //    StabilisationFund rewards can only be backed by their launch allocations, so a
+    //    destination pointed at either contract cannot become rewards; it would only
+    //    strand the fees there. Route fees to the Treasury or the buy-back.
     //
     // Invariant enforced by governance: when active destinations are summed they
     // must equal BPS_DENOMINATOR (10,000). validateFeeDistribution() checks this.
@@ -87,18 +100,6 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     mapping(uint256 => FeeDestination) public feeDestinations;
     uint256 public feeDestinationCount;
 
-    /// @dev Storage gap for future upgrades (R7-1 + SC-UUPS-001 fix).
-    ///
-    ///      DISCIPLINE: Every upgrade that adds N new state variables MUST shrink this
-    ///      gap by exactly N (e.g., 50 → 48 for two new variables). Append the new state
-    ///      variables ABOVE this gap, then update the size literal. Wrong shrinkage
-    ///      causes storage slot collision on subsequent upgrades.
-    ///
-    ///      VERIFICATION: Every upgrade PR must run the OpenZeppelin storage layout
-    ///      check (`hardhat-upgrades` validateUpgrade) and the upgrade runbook must
-    ///      include a "Storage Layout Diff" section.
-    // solhint-disable-next-line var-name-mixedcase
-    uint256[50] private __gap;
 
     // ── Events ─────────────────────────────────────────────────────────────────
 
@@ -107,7 +108,6 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     event StakingContractUpdated(address oldAddr, address newAddr);
     event FeeDestinationUpdated(uint256 indexed index, address recipient, uint256 shareBps, bool active, bytes32 label);
     event FeeDistributionCommitted(uint256 totalBps, uint256 timestamp);
-    event FeeLimitsUpdated(uint256 oldMinBps, uint256 oldMaxBps, uint256 newMinBps, uint256 newMaxBps);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -117,23 +117,17 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     error TooManyDestinations();
     error FeeDistributionInvalid(uint256 totalBps);
 
-    // ── Initializer ────────────────────────────────────────────────────────────
+    // ── Constructor ────────────────────────────────────────────────────────────
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
 
-    function initialize(
+    constructor(
         address _stakingContract,
         address _admin
-    ) external initializer {
+    ) {
         if (_stakingContract == address(0) || _admin == address(0)) revert ZeroAddress();
 
-        __AccessControl_init();
-        __Pausable_init();
 
-        // SC-UUPS-002 fix: set state BEFORE granting roles (defensive ordering).
+        // Set state BEFORE granting roles (defensive ordering, SC-UUPS-002).
         stakingContract      = _stakingContract;
         baseFeeRateBps       = 150;   // 1.50%
         cryptoFeeMultiplierBps = 7_500; // 75% of base fee
@@ -142,22 +136,19 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
         // of the discounted crypto base), i.e. a ~90% discount, not "free
         // forever." Without this floor, platform fee revenue trends to zero
         // as adoption grows and more holders reach Obsidian -- the opposite of
-        // what a fee model should do. Governance-adjustable via setFeeLimits().
-        minFeeBps            = 15;    // 0.15% floor -- applies even at 100% discount
-        maxFeeBps            = 500;   // 5.00% hard cap
+        // what a fee model should do. The floor and ceiling are constants (REG-54).
 
         // Grant roles LAST — after state is fully consistent
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(GOVERNANCE_ROLE,    _admin);
         _grantRole(PAUSER_ROLE,        _admin);
-        // SC-TRUST-001 fix: upgrade authority granted to admin for deployment bootstrap.
-        // MUST be migrated to the SRXTimelock and revoked from admin pre-mainnet
-        // (verify_roles.js enforces this end state).
-        _grantRole(UPGRADER_ROLE,      _admin);
     }
 
     // ── Pause ──────────────────────────────────────────────────────────────────
 
+    /// @notice paused() is the stop signal the payment gateway reads before it accepts a
+    ///         payment. Since 22 Oct 2026 the fee reads keep answering while paused (a read
+    ///         changes nothing), so the gateway can still show what a fee would be.
     function pause()   external onlyRole(PAUSER_ROLE) { _pause(); }
     function unpause() external onlyRole(PAUSER_ROLE) { _unpause(); }
 
@@ -170,34 +161,26 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
      * @return feeBps     Effective fee in basis points.
      *
      * This is a pure view — the gateway calls it via eth_call at no gas cost.
+     *
+     * ⛔ External report, 22 Oct 2026 (Low): this and feeBreakdown carried whenNotPaused,
+     *    so a paused FeeController made every fee READ revert, including the SRX case,
+     *    which is always 0. A pause stops state changes; a read changes nothing, and a
+     *    gateway that cannot read the fee cannot even show it. Pause no longer applies.
      */
     function calculateFee(address payer, PaymentType paymentType)
         external
         view
-        whenNotPaused
         returns (uint256 feeBps)
     {
         // SRX payments are always zero-fee — this is a core utility promise.
         if (paymentType == PaymentType.SRX) return 0;
 
-        uint256 base;
+        // Crypto base reduction and staking tier discount, rounded once (see _effectiveBps).
+        uint256 effective = _effectiveBps(paymentType, _getDiscount(payer));
 
-        if (paymentType == PaymentType.Fiat) {
-            base = baseFeeRateBps;
-        } else {
-            // Crypto payments get a base reduction
-            base = (baseFeeRateBps * cryptoFeeMultiplierBps) / BPS_DENOMINATOR;
-        }
-
-        // Apply staking tier discount
-        uint256 discountBps = _getDiscount(payer);
-        uint256 effective = discountBps >= BPS_DENOMINATOR
-            ? 0
-            : (base * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
-
-        // Clamp to [minFeeBps, maxFeeBps] — applies even for Obsidian tier (0 fee clamped to floor)
-        if (effective < minFeeBps) return minFeeBps;
-        if (effective > maxFeeBps) return maxFeeBps;
+        // Clamp to [MIN_FEE_BPS, MAX_FEE_BPS] — applies even for Obsidian tier (0 fee clamped to floor)
+        if (effective < MIN_FEE_BPS) return MIN_FEE_BPS;
+        if (effective > MAX_FEE_BPS) return MAX_FEE_BPS;
 
         return effective;
     }
@@ -209,7 +192,6 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     function feeBreakdown(address payer, PaymentType paymentType)
         external
         view
-        whenNotPaused
         returns (
             uint256 baseBps,
             uint256 discountBps,
@@ -226,38 +208,45 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
             : (baseFeeRateBps * cryptoFeeMultiplierBps) / BPS_DENOMINATOR;
 
         discountBps = _getDiscount(payer);
-        effectiveBps = discountBps >= BPS_DENOMINATOR
-            ? 0
-            : (baseBps * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
+        effectiveBps = _effectiveBps(paymentType, discountBps); // the same figure calculateFee charges
 
         // Clamp
-        if (effectiveBps < minFeeBps) effectiveBps = minFeeBps;
-        if (effectiveBps > maxFeeBps) effectiveBps = maxFeeBps;
+        if (effectiveBps < MIN_FEE_BPS) effectiveBps = MIN_FEE_BPS;
+        if (effectiveBps > MAX_FEE_BPS) effectiveBps = MAX_FEE_BPS;
 
         tierName = _tierName(payer);
     }
 
+    /**
+     * @dev The fee before clamping, in basis points: base rate x crypto multiplier x
+     *      (1 - discount). ⛔ This divided twice (multiplier, then discount), rounding down
+     *      after each step and losing up to 1 bp against the exact figure (Slither
+     *      divide-before-multiply, 7 Oct 2026). Now every multiplication comes first and
+     *      the result is rounded down once. calculateFee and feeBreakdown both use it, so
+     *      the breakdown a user sees is the fee they are charged.
+     */
+    function _effectiveBps(PaymentType paymentType, uint256 discountBps) internal view returns (uint256) {
+        if (discountBps >= BPS_DENOMINATOR) return 0;
+        uint256 multiplier = paymentType == PaymentType.Fiat ? BPS_DENOMINATOR : cryptoFeeMultiplierBps;
+        return (baseFeeRateBps * multiplier * (BPS_DENOMINATOR - discountBps)) / (BPS_DENOMINATOR * BPS_DENOMINATOR);
+    }
+
     // ── Governance ─────────────────────────────────────────────────────────────
 
-    // ── R7-03: keep minFeeBps at or below the LOWEST achievable base fee ───────────
+    // ── R7-03: keep the base fee at or above the floor, from every direction ───────
     //
-    // The floor clamps upward. If minFeeBps ever exceeds the base fee, every tier —
-    // including undiscounted Tier.None — pays minFeeBps, the tier discounts collapse to
+    // The floor clamps upward. If MIN_FEE_BPS ever exceeds the base fee, every tier —
+    // including undiscounted Tier.None — pays MIN_FEE_BPS, the tier discounts collapse to
     // a single identical fee, and a "discount" becomes a fee INCREASE. The lowest base
     // is the crypto one (crypto multiplier <= 100%), so that is the binding constraint.
     //
-    // Latent while minFeeBps defaulted to 0; live now that it defaults to 15 bps. All
-    // three setters below enforce the invariant so it cannot be broken from any direction.
-
-    /// @dev Lowest base fee any payment type can be charged before discounts/clamps.
-    function _lowestBaseFeeBps() internal view returns (uint256) {
-        return (baseFeeRateBps * cryptoFeeMultiplierBps) / BPS_DENOMINATOR;
-    }
+    // The floor is a constant now (REG-54), so only the base rate and the crypto
+    // multiplier can move toward it; both setters below refuse to cross it.
 
     function setBaseFeeRate(uint256 newBps) external onlyRole(GOVERNANCE_ROLE) {
-        if (newBps > maxFeeBps) revert InvalidBps();
+        if (newBps > MAX_FEE_BPS) revert InvalidBps();
         // R7-03: lowering the base must not drop it below the floor.
-        if ((newBps * cryptoFeeMultiplierBps) / BPS_DENOMINATOR < minFeeBps) revert InvalidBps();
+        if ((newBps * cryptoFeeMultiplierBps) / BPS_DENOMINATOR < MIN_FEE_BPS) revert InvalidBps();
         emit BaseFeeUpdated(baseFeeRateBps, newBps);
         baseFeeRateBps = newBps;
     }
@@ -265,7 +254,7 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
     function setCryptoFeeMultiplier(uint256 newBps) external onlyRole(GOVERNANCE_ROLE) {
         if (newBps > BPS_DENOMINATOR) revert InvalidBps();
         // R7-03: the crypto base is the lowest base — it must not fall below the floor.
-        if ((baseFeeRateBps * newBps) / BPS_DENOMINATOR < minFeeBps) revert InvalidBps();
+        if ((baseFeeRateBps * newBps) / BPS_DENOMINATOR < MIN_FEE_BPS) revert InvalidBps();
         emit CryptoMultiplierUpdated(cryptoFeeMultiplierBps, newBps);
         cryptoFeeMultiplierBps = newBps;
     }
@@ -276,17 +265,14 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
         stakingContract = newAddr;
     }
 
-    function setFeeLimits(uint256 newMin, uint256 newMax) external onlyRole(GOVERNANCE_ROLE) {
-        if (newMax > BPS_DENOMINATOR) revert InvalidBps(); // A4-M-01: cap cannot exceed 100%
-        if (newMin > newMax)          revert InvalidBps();
-        // R7-03: the floor must never exceed the lowest achievable base fee, or it would
-        // clamp every tier upward and turn discounts into increases. To raise both, raise
-        // the base rate first.
-        if (newMin > _lowestBaseFeeBps()) revert InvalidBps();
-        emit FeeLimitsUpdated(minFeeBps, maxFeeBps, newMin, newMax);
-        minFeeBps = newMin;
-        maxFeeBps = newMax;
-    }
+    // ⛔ setFeeLimits() is gone (REG-54, 12 Oct 2026): the floor and ceiling are constants.
+    //    These two views keep the getters the hub manifest and integrations already read.
+
+    /// @notice The fee floor in basis points (MIN_FEE_BPS).
+    function minFeeBps() external pure returns (uint256) { return MIN_FEE_BPS; }
+
+    /// @notice The fee ceiling in basis points (MAX_FEE_BPS).
+    function maxFeeBps() external pure returns (uint256) { return MAX_FEE_BPS; }
 
     // ── Fee distribution routing table ─────────────────────────────────────────
 
@@ -307,7 +293,7 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
      * @param recipient Address that receives this share of fee revenue.
      * @param shareBps  Share of total fee revenue in basis points (out of 10,000).
      * @param active    Whether this destination is live.
-     * @param label     Human-readable label, e.g. "Treasury", "RealYield", "AutoBurn".
+     * @param label     Human-readable label, e.g. "Treasury", "AutoBurn".
      */
     function setFeeDestination(
         uint256 index,
@@ -418,7 +404,6 @@ contract FeeController is Initializable, AccessControlUpgradeable, PausableUpgra
         }
     }
 
-    function _authorizeUpgrade(address newImpl) internal override onlyRole(UPGRADER_ROLE) {}
 }
 
 // ── Minimal staking interface ──────────────────────────────────────────────────

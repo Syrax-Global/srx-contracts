@@ -55,19 +55,23 @@ describe("GuardianModule — pause desynchronisation (R7-02)", function () {
     // Emergency stop must still work for everything else.
     await expect(gm.connect(guardian).pauseAll("incident")).to.not.be.reverted;
 
-    for (const k of ["bridge", "staking", "fee", "treasury"]) {
+    for (const k of ["staking", "fee", "treasury"]) {
       expect(await stubs[k].paused()).to.equal(true);
       expect(await gm.isModulePaused(IDS[k])).to.equal(true);
     }
+    expect(await stubs.bridge.bridgePaused()).to.equal(true); // the bridge-only stop
+    expect(await gm.isModulePaused(IDS.bridge)).to.equal(true);
   });
 
-  it("emits ModuleCallSkipped for the module it could not pause", async function () {
+  it("adopts a module already paused outside it, visibly, as governance's (SWEEP-02)", async function () {
     const { gm, stubs, IDS, guardian } = await loadFixture(fx);
     await stubs.token.pause();
 
+    // Read first, so the batch never calls pause on it: adopted, and the guardian cannot lift it.
     await expect(gm.connect(guardian).pauseAll("incident"))
-      .to.emit(gm, "ModuleCallSkipped")
-      .withArgs(IDS.token, await stubs.token.getAddress(), true);
+      .to.emit(gm, "ModuleStateReconciled")
+      .withArgs(IDS.token, true);
+    expect(await gm.governanceOnlyUnpause(IDS.token)).to.equal(true);
   });
 
   it("reconciles stale local state from the target contract", async function () {
@@ -85,7 +89,8 @@ describe("GuardianModule — pause desynchronisation (R7-02)", function () {
     const { gm, stubs, IDS, guardian, governance } = await loadFixture(fx);
 
     await gm.connect(guardian).pauseAll("incident");
-    for (const k of Object.keys(IDS)) expect(await stubs[k].paused()).to.equal(true);
+    const stopped = async (k) => (k === "bridge" ? stubs[k].bridgePaused() : stubs[k].paused());
+    for (const k of Object.keys(IDS)) expect(await stopped(k)).to.equal(true);
 
     // Admin unpauses one directly — GuardianModule still thinks it is paused.
     await stubs.token.unpause();
@@ -95,7 +100,7 @@ describe("GuardianModule — pause desynchronisation (R7-02)", function () {
     await expect(gm.connect(governance).emergencyUnpauseAll("recovered")).to.not.be.reverted;
 
     for (const k of Object.keys(IDS)) {
-      expect(await stubs[k].paused()).to.equal(false);
+      expect(await stopped(k)).to.equal(false);
       expect(await gm.isModulePaused(IDS[k])).to.equal(false);
     }
   });
@@ -104,17 +109,65 @@ describe("GuardianModule — pause desynchronisation (R7-02)", function () {
     const { gm, stubs, IDS, guardian } = await loadFixture(fx);
     await gm.connect(guardian).pauseAll("incident");
     for (const k of Object.keys(IDS)) {
-      expect(await stubs[k].paused()).to.equal(true);
+      expect(await (k === "bridge" ? stubs[k].bridgePaused() : stubs[k].paused())).to.equal(true);
       expect(await gm.isModulePaused(IDS[k])).to.equal(true);
     }
+    expect(await stubs.bridge.paused(), "the bridge module never pauses ordinary transfers").to.equal(false);
   });
 
   it("single-module pause still reverts loudly (strict path unchanged)", async function () {
     const { gm, stubs, IDS, guardian } = await loadFixture(fx);
-    await stubs.bridge.pause(); // desync this one
+    await stubs.staking.pause(); // desync this one (the bridge stop is idempotent, like the token's)
 
-    // pauseModule targets ONE module — the caller must be told it failed.
-    await expect(gm.connect(guardian).pauseModule(IDS.bridge, "targeted"))
-      .to.be.revertedWithCustomError(gm, "CallFailed");
+    // pauseModule targets ONE module — the caller must be told; it is already paused outside
+    // the module, so it is not the guardian's to take over (SWEEP-02).
+    await expect(gm.connect(guardian).pauseModule(IDS.staking, "targeted"))
+      .to.be.revertedWithCustomError(gm, "ModuleAlreadyPaused");
   });
+});
+
+// Antoni's case (external report; Security work order A4, 22 Oct 2026): the bridge target is
+// paused DIRECTLY (outside GuardianModule), then reported volume crosses the breaker's
+// threshold. recordBridgeActivity must not revert: it latches `tripped`, counts the trip and
+// keeps the volume in flight, and only governance reopens.
+describe("GuardianModule — breaker trip on a target already paused directly (Antoni)", function () {
+  async function wired(targetKind) {
+    const [admin, guardian, governance, monitor] = await ethers.getSigners();
+    const gm = await (await ethers.getContractFactory("GuardianModule"))
+      .deploy(admin.address, guardian.address, governance.address, 15_552_000);
+    let target;
+    if (targetKind === "token") {
+      const ep = await (await ethers.getContractFactory("MockLZEndpoint")).deploy(30101);
+      target = await (await ethers.getContractFactory("SRXToken")).deploy(await ep.getAddress(), admin.address);
+      await target.connect(admin).grantRole(await target.PAUSER_ROLE(), await gm.getAddress());
+    } else {
+      target = await (await ethers.getContractFactory("PausableStrictStub")).deploy();
+    }
+    const BRIDGE = await gm.MODULE_BRIDGE();
+    await gm.connect(governance).registerModule(BRIDGE, await target.getAddress());
+    await gm.connect(governance).configureCircuitBreaker(BRIDGE, ethers.parseUnits("1000", 18), 3600);
+    await gm.connect(admin).grantRole(await gm.CIRCUIT_BREAKER_ROLE(), monitor.address);
+    return { admin, governance, monitor, gm, target, BRIDGE };
+  }
+
+  for (const kind of ["token", "strict stub"]) {
+    it(`latches tripped and tripCount and keeps volumeInFlight, with no revert (${kind})`, async function () {
+      const { admin, governance, monitor, gm, target, BRIDGE } = await wired(kind === "token" ? "token" : "stub");
+      await target.connect(admin).setBridgePaused(true);            // paused outside the module
+      expect(await gm.isModulePaused(BRIDGE)).to.equal(false);
+      const amount = ethers.parseUnits("1500", 18);                 // crosses the 1,000 threshold
+      await expect(gm.connect(monitor).recordBridgeActivity(BRIDGE, amount)).to.emit(gm, "CircuitBreakerTripped");
+      const s = await gm.getCircuitBreakerStatus(BRIDGE);
+      expect(s.tripped).to.equal(true);
+      expect(s.tripCount).to.equal(1n);
+      expect(s.volumeInFlight).to.equal(amount);
+      expect(await target.bridgePaused()).to.equal(true);
+      expect(await gm.isModulePaused(BRIDGE)).to.equal(true);
+      // Only governance reopens; further reports are refused meanwhile.
+      await expect(gm.connect(monitor).recordBridgeActivity(BRIDGE, 1n))
+        .to.be.revertedWithCustomError(gm, "CircuitBreakerAlreadyTripped");
+      await gm.connect(governance).resetCircuitBreaker(BRIDGE);
+      expect((await gm.getCircuitBreakerStatus(BRIDGE)).tripped).to.equal(false);
+    });
+  }
 });

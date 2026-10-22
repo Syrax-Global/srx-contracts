@@ -26,18 +26,15 @@ describe("SRXTreasury", function () {
 
     // ── Treasury (UUPS) ───────────────────────────────────────────────────
     const SRXTreasury = await ethers.getContractFactory("SRXTreasury");
-    const treasury = await upgrades.deployProxy(
-      SRXTreasury,
-      [await token.getAddress(), admin.address, timelock.address],
-      { kind: "uups", initializer: "initialize" }
-    );
+    const treasury = await SRXTreasury.deploy(...[await token.getAddress(), admin.address, timelock.address]);
     await treasury.waitForDeployment();
     const treasuryAddr = await treasury.getAddress();
 
     // ── Grant SPENDER_ROLE to admin for test convenience ──────────────────
-    // (In production this role belongs exclusively to the Timelock)
+    // (In production this role belongs exclusively to the Timelock.) SPENDER_ROLE
+    // administers itself (45d8fd15), so only a spender — the Timelock — can grant it.
     const SPENDER_ROLE = await treasury.SPENDER_ROLE();
-    await treasury.connect(admin).grantRole(SPENDER_ROLE, admin.address);
+    await treasury.connect(timelock).grantRole(SPENDER_ROLE, admin.address);
 
     // ── Grant BURN_ROLE on token to treasury ──────────────────────────────
     const BURN_ROLE = await token.BURN_ROLE();

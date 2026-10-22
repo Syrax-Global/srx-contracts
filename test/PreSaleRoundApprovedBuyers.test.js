@@ -22,7 +22,7 @@ describe("PreSaleRound — approved buyers only", function () {
   const srx = (n) => ethers.parseUnits(String(n), 18);
 
   async function fixture(flat = true) {
-    const [admin, buyer, other, third] = await ethers.getSigners();
+    const [admin, buyer, other, third, treasury] = await ethers.getSigners();
     const LZ = await ethers.getContractFactory("MockLZEndpoint");
     const lz = await LZ.deploy(40161);
     const T = await ethers.getContractFactory("SRXToken");
@@ -38,7 +38,7 @@ describe("PreSaleRound — approved buyers only", function () {
     const R = await ethers.getContractFactory("PreSaleRound");
     const r = await R.deploy(
       token.target, usdc.target, usdt.target, wbtc.target, ethFeed.target, btcFeed.target,
-      admin.address, CAP_SRX, PRICE, flat, flat ? 5_000n : 0n,
+      admin.address, CAP_SRX, PRICE, flat, flat ? 5_000n : 0n, treasury.address,
     );
     await token.connect(admin).transfer(r.target, CAP_SRX);
     for (const w of [buyer, other, third]) {

@@ -75,6 +75,17 @@ PUBLISH=(
   "docs/CONTRACTS.md"
   "docs/TOKENOMICS.md"
   "docs/audits/README.md"
+  # Added 22 Oct 2026: the security documents now cite these, and the reference check
+  # refused a tree without them. ADDRESSES.md is the one published place for deployed
+  # (testnet) addresses; MIGRATION.md is the wind-down and successor procedure; the
+  # triage explains every static-analysis finding. The class-sweep tables stay private.
+  "docs/ADDRESSES.md"
+  "docs/MIGRATION.md"
+  "docs/audits/STATIC_ANALYSIS_TRIAGE.md"
+  # The deployment records docs/ADDRESSES.md is generated from (test/AddressesDoc.test.js
+  # checks the two agree). Testnet addresses, block numbers and the source commit only.
+  "deployments/sepolia.json"
+  "deployments/bscTestnet.json"
 
   # Product documentation
   "README.md"

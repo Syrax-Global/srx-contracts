@@ -7,17 +7,24 @@ import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol"
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title SRXOFTNative
  * @notice SRX token representation on remote chains (BSC, zkSync, and future chains).
  *
  * Deployed on every chain that is NOT the Ethereum origin chain. Tokens on
- * remote chains are minted exclusively when the LayerZero bridge receives a
- * verified burn message from the origin or another remote chain. They are burned
- * when the user sends tokens cross-chain.
+ * remote chains are minted only when this contract receives a LayerZero message
+ * from the Ethereum hub (the only peer it accepts, at an address fixed at
+ * deployment). They are burned when the user sends tokens cross-chain, and a
+ * send goes to the hub only. Spoke-to-spoke is two hops through Ethereum.
  *
- * No genesis mint occurs here — all supply originates from Ethereum.
+ * No genesis mint occurs here — all supply originates from Ethereum. Each spoke
+ * caps its own supply at MAX_SUPPLY. A compromised spoke can forge SRX on this
+ * chain, but the hub re-credits Ethereum only up to what it sent here
+ * (outstandingByEid) and within its per-chain inbound limit, which the guardian
+ * can freeze (SRXToken).
  *
  * For zkSync specifically, this contract serves as the placeholder token until
  * the Syrax Chain launches and SRX is migrated to a native gas token via
@@ -26,10 +33,31 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
  * Governance note: Voting power is NOT tracked on remote chains. All governance
  * participation happens on Ethereum where full supply accountability is maintained.
  *
- * ⚠ Multi-sig prerequisite:
- *  DEFAULT_ADMIN_ROLE MUST be a Gnosis Safe before mainnet deployment.
+ * ⚠ Hand-over prerequisite:
+ *  This chain's owner() and its LayerZero delegate must be this chain's own
+ *  SRXTimelock (48 h) before launch (07_deploy_bridge.js steps D and E, checked by
+ *  scripts/verify/verify_spoke.js; MULTISIG_SPEC.md). Pausing stays fast
+ *  (PAUSER_ROLE). Never leave a single EOA as owner.
  */
-contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
+/**
+ * @notice The hub's own address (SRXToken on Ethereum), as a LayerZero peer, fixed at
+ *         deployment: the hub peer may be set to this, or to zero to freeze the bridge,
+ *         and to nothing else.
+ * @dev ⛔ External disclosure A (3 Oct 2026): a compromised owner could point the hub
+ *      peer at an attacker, accept a forged mint, and restore it. With the peer fixed,
+ *      that path does not exist even for the owner. A separate base contract, so the
+ *      address is recorded before OFT stores the name and symbol: as a fourth live
+ *      constructor value it took the constructor past the EVM stack limit.
+ */
+abstract contract HubPeer {
+    bytes32 public immutable hubPeer;
+    constructor(address hub) {
+        hubPeer = bytes32(uint256(uint160(hub)));
+    }
+}
+
+contract SRXOFTNative is HubPeer, OFT, Ownable2Step, AccessControl, Pausable {
+    using SafeERC20 for IERC20;
 
     // ── Roles ──────────────────────────────────────────────────────────────────
 
@@ -43,11 +71,14 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
     // ── Events ─────────────────────────────────────────────────────────────────
 
     event BuyAndBurn(address indexed initiator, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
     error ZeroAddress();
     error ZeroAmount();
+    /// @notice An ordinary transfer to this contract's own address was refused.
+    error TransferToTokenContract();
     /// @notice A mint would take this chain's supply above MAX_SUPPLY.
     error SupplyCapExceeded(uint256 resultingSupply, uint256 cap);
     /// @notice This chain sends to, and accepts from, the Ethereum hub only.
@@ -59,6 +90,9 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
     ///      Hub-and-spoke (Jared, 23 Sep 2026): Ethereum tracks what it sent to
     ///      each chain; this contract refuses any other route.
     uint32 public immutable hubEid;
+
+    /// @notice A peer other than the fixed hub address (or zero) was refused.
+    error PeerNotHub(bytes32 peer, bytes32 hubPeer);
 
     // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -97,17 +131,22 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
 
     /**
      * @param _lzEndpoint  LayerZero V2 EndpointV2 address on this chain.
-     * @param _admin       Initial admin. Must be replaced with Gnosis Safe pre-mainnet.
+     * @param _admin       Initial admin and owner, used during setup. Before launch the
+     *                     owner and delegate move to this chain's own SRXTimelock.
+     * @param _hubEid      LayerZero endpoint id of the Ethereum hub.
+     * @param _hub         The hub's SRXToken address (fixed as the only allowed hub peer).
      */
     constructor(
         address _lzEndpoint,
         address _admin,
-        uint32  _hubEid
+        uint32  _hubEid,
+        address _hub
     )
+        HubPeer(_hub)
         OFT("Syrax Token", "SRX", _lzEndpoint, _admin)
         Ownable(_admin)
     {
-        if (_admin == address(0)) revert ZeroAddress();
+        if (_admin == address(0) || _hub == address(0)) revert ZeroAddress();
         if (_hubEid == 0) revert NotHub(0, 0);
         hubEid = _hubEid;
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
@@ -122,8 +161,11 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
 
     /**
      * @notice Burn SRX purchased on this chain's open market.
-     *         Calling this reduces supply on this chain without minting on Ethereum —
-     *         this is the intended deflationary mechanism.
+     *         Calling this reduces supply on this chain without minting on Ethereum.
+     *         Note: SRX burned here was sent out from the hub, so the hub still counts
+     *         it as outstanding (outstandingByEid) and totalBurned on the hub does not
+     *         change; only the hub's own buyAndBurn and ZkSyncMigrator.migrate add to
+     *         the hub's totalBurned.
      *
      *         Burns only from msg.sender's own balance — BURN_ROLE holders cannot burn
      *         tokens from arbitrary third-party wallets (A3-H-02 fix, mirrors A2-H-01
@@ -138,6 +180,38 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
         emit BuyAndBurn(msg.sender, amount);
     }
 
+    // ── Rescue (external report, 14 Oct 2026; board 585533e0) ───────────────────
+
+    /**
+     * @notice Recover tokens held at this contract's own address, through governance.
+     * @dev ⛔ SRX sent here, by a bridge arrival addressed to this contract, could never
+     *      leave: the spoke had no rescue, unlike SRXToken, ZkSyncMigrator and
+     *      BuybackBurner. Ordinary transfers to this address are now refused in _update;
+     *      a bridge arrival is still accepted (reverting in _credit would strand the
+     *      LayerZero message and leave the SRX locked on the hub), and this recovers it.
+     *      onlyOwner: the owner is this chain's SRXTimelock (48 h), as for setPeer.
+     *      Safe because this contract only mints and burns and never holds SRX for
+     *      anyone, so any balance here is stray. A rescue is a transfer, not a mint or
+     *      burn, so MAX_SUPPLY and the hub's outstandingByEid are unaffected. Like every
+     *      transfer, it waits while the token is paused.
+     */
+    function rescueTokens(address token, address to, uint256 amount) external onlyOwner {
+        if (to == address(0) || to == address(this)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        if (token == address(this)) {
+            _transfer(address(this), to, amount);
+        } else if (token == address(0)) {
+            // Internal audit TB-05 / Aderyn H-1 (22 Oct 2026): native value an executor sends
+            // with a bridge delivery (lzReceive is payable) had no way out. token == 0 is ETH.
+            // slither-disable-next-line arbitrary-send-eth -- reviewed 22 Oct 2026: onlyOwner (this chain's Timelock, 48 h) only; moves only ETH stranded at this contract, which holds none for anyone
+            (bool ok, ) = to.call{value: amount}("");
+            if (!ok) revert ZeroAmount();
+        } else {
+            IERC20(token).safeTransfer(to, amount);
+        }
+        emit TokenRescued(token, to, amount);
+    }
+
     // ── Emergency Controls ─────────────────────────────────────────────────────
 
     function pause() external onlyRole(PAUSER_ROLE) {
@@ -150,12 +224,6 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
 
     // ── Bridge Peer Configuration (SC-LZ-001 hardening) ────────────────────────
 
-    /**
-     * @notice Override setPeer to require the contract is NOT paused.
-     *         Base OFT setPeer is `onlyOwner`. This override adds a pause guard so
-     *         that if the owner key is compromised, the guardian can pause the
-     *         contract to freeze peer changes until governance intervenes.
-     */
     /**
      * @dev ⛔ THIS WAS `whenNotPaused`, WHICH MADE THE DOCUMENTED INCIDENT
      *      RESPONSE IMPOSSIBLE. INCIDENT_RESPONSE.md step 5 says to freeze bridge
@@ -174,6 +242,9 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
         public
         override
     {
+        // Disclosure A: the only peer is the hub, at its fixed address, or zero (frozen).
+        if (_eid != hubEid) revert NotHub(_eid, hubEid);
+        if (_peer != hubPeer && _peer != bytes32(0)) revert PeerNotHub(_peer, hubPeer);
         super.setPeer(_eid, _peer);
     }
 
@@ -210,6 +281,10 @@ contract SRXOFTNative is OFT, Ownable2Step, AccessControl, Pausable {
         if (from == address(0)) {
             uint256 resulting = totalSupply() + value;
             if (resulting > MAX_SUPPLY) revert SupplyCapExceeded(resulting, MAX_SUPPLY);
+        } else if (to == address(this)) {
+            // Board 585533e0: a plain transfer here would be stranded. Mints (bridge
+            // arrivals) are not refused; rescueTokens recovers those.
+            revert TransferToTokenContract();
         }
         super._update(from, to, value);
     }

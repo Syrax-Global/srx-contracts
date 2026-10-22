@@ -11,26 +11,26 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
  * Vesting model:
  *  - All schedules reference a shared TGE timestamp set by the admin.
  *  - Optional TGE unlock: a percentage of total allocation is immediately
- *    claimable at TGE (used for presale: 25% at TGE).
- *  - Cliff: no tokens vest during the cliff period after TGE.
+ *    claimable at TGE (tgeUnlockBps). Every launch vault is configured at 0%.
+ *  - Cliff: the linear part does not start vesting until the cliff has passed. Any
+ *    TGE unlock share is claimable inside the cliff.
  *  - Linear vesting: the remaining tokens vest linearly over the vesting duration
  *    starting from (TGE + cliff). The contract allows claiming at any time;
  *    "monthly" tranches are a UI convention, not an on-chain restriction.
  *
- * Allocation categories and their parameters:
- *  ┌───────────────────┬──────────┬──────────────┬──────────────┬──────────────┐
- *  │ Category          │ TGE BPS  │ Cliff        │ Vesting      │ SRX          │
- *  ├───────────────────┼──────────┼──────────────┼──────────────┼──────────────┤
- *  │ Founders          │   0      │ 365 days     │ 1095 days    │ 1,000,000,000│
- *  │ Core Team         │   0      │ 182 days     │  730 days    │   600,000,000│
- *  │ Seed Investors    │   0      │ 273 days     │  730 days    │   400,000,000│
- *  │ Presale           │ 2500     │   0 days     │  180 days    │ 1,400,000,000│
- *  │ Ecosystem DAO     │   0      │   0 days     │ 1460 days    │ 1,300,000,000│
- *  └───────────────────┴──────────┴──────────────┴──────────────┴──────────────┘
+ * Launch vault parameters (six vaults: founders, core team, seed investors, presale,
+ * ecosystem and liquidity reserve) live in scripts/deploy/00_config.js (ALLOCATIONS,
+ * VESTING and TGE_PLAN) and are published, generated from that file, in
+ * docs/TOKENOMICS.md. This contract takes them as constructor arguments and never
+ * changes them.
  *
- * Revocation: admin may revoke unvested tokens (e.g. if an investor breaches
- * agreement). Vested-but-unclaimed tokens are paid to the beneficiary; unvested
- * tokens are returned to the `revokeRecipient` (typically the treasury).
+ * Revocation: the vault's admin may revoke unvested tokens (e.g. if an investor
+ * breaches agreement). Vested-but-unclaimed tokens are paid to the beneficiary;
+ * unvested tokens go to `revokeRecipient`, fixed at deployment (the Treasury), never
+ * to an address chosen at revoke time and never to the beneficiary. The admin of the
+ * launch vaults is the SRXTimelock, so governance can revoke one, as a public 48-hour
+ * proposal; a Genesis buyer's vault is revocable by the presale admin. Revoking stops
+ * vesting. Nobody can accelerate a schedule or change its parameters.
  */
 contract VestingVault {
     using SafeERC20 for IERC20;
@@ -40,6 +40,13 @@ contract VestingVault {
     IERC20  public immutable token;
     address public immutable beneficiary;
     address public immutable admin;
+    /// @notice Where the unvested part goes on revoke(): fixed at deployment (the Treasury).
+    /// @dev ⛔ Internal audit M2 / external report 15 Oct 2026 (#4): revoke took the
+    ///      recipient as an argument, unvalidated, so the admin could name the
+    ///      beneficiary and make a whole locked grant liquid at once (on a Genesis vault,
+    ///      instantly, by the Safe), or a typo could send it nowhere. The recipient is now
+    ///      chosen once, at deployment, and can never be the beneficiary.
+    address public immutable revokeRecipient;
     uint256 public immutable cliffDuration;   // seconds from TGE before any cliff-gated vesting
     uint256 public immutable vestingDuration; // seconds of linear vesting after cliff
     uint256 public immutable tgeUnlockBps;    // basis points (0-10000) released instantly at TGE
@@ -86,6 +93,8 @@ contract VestingVault {
     error AllocationAlreadyDeclared();
     /// @notice The vault holds less than the declared allocation.
     error VaultUnderfunded(uint256 held, uint256 declared);
+    /// @notice The revoke recipient was zero or the beneficiary (internal audit M2).
+    error InvalidRevokeRecipient();
 
     // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -95,11 +104,13 @@ contract VestingVault {
         address _admin,
         uint256 _cliffDuration,
         uint256 _vestingDuration,
-        uint256 _tgeUnlockBps
+        uint256 _tgeUnlockBps,
+        address _revokeRecipient
     ) {
         if (_token == address(0))       revert ZeroAddress();
         if (_beneficiary == address(0)) revert ZeroAddress();
         if (_admin == address(0))       revert ZeroAddress();
+        if (_revokeRecipient == address(0) || _revokeRecipient == _beneficiary) revert InvalidRevokeRecipient();
         if (_tgeUnlockBps > 10_000)    revert InvalidBps();
 
         token           = IERC20(_token);
@@ -108,14 +119,16 @@ contract VestingVault {
         cliffDuration   = _cliffDuration;
         vestingDuration = _vestingDuration;
         tgeUnlockBps    = _tgeUnlockBps;
+        revokeRecipient = _revokeRecipient;
     }
 
     // ── Admin: TGE trigger ─────────────────────────────────────────────────────
 
     /**
-     * @notice Start all vesting clocks. Called once by admin when TGE occurs.
-     *         All VestingVaults for the same TGE should be triggered in the same tx
-     *         via the TGEDistributor to ensure clock alignment.
+     * @notice Start the vesting clock. Called once by the admin when TGE occurs.
+     *         For the launch vaults the admin is the SRXTimelock, so every vault is
+     *         triggered by one scheduled Timelock batch (scripts/deploy/lib/vaultOps.js),
+     *         which keeps the clocks aligned. TGEDistributor does not call this.
      */
     /**
      * @notice Declare, once and before TGE, how much this vault is meant to hold.
@@ -133,7 +146,9 @@ contract VestingVault {
      * ⭐ Optional and additive. If it is never called the vault behaves exactly as
      *      before, so existing deployments and scripts are unaffected. When it IS
      *      called, the grant is what was declared, the surplus is recoverable
-     *      before TGE, and triggerTGE() refuses to run on an underfunded vault --
+     *      without revoking once triggerTGE() has run (not before: corrected
+     *      7 Oct 2026, test/Gaps.Vesting.test.js V6), and triggerTGE() refuses
+     *      to run on an underfunded vault --
      *      which also turns a silently-short grant into a failure at setup.
      * @param amount The intended allocation, in wei.
      */
@@ -146,6 +161,7 @@ contract VestingVault {
         emit ExpectedAllocationDeclared(amount);
     }
 
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function triggerTGE() external {
         if (msg.sender != admin)  revert OnlyAdmin();
         if (tgeTriggered)         revert TGEAlreadyTriggered();
@@ -241,6 +257,7 @@ contract VestingVault {
     /**
      * @notice Claim all currently releasable tokens. Callable only by beneficiary.
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function release() external {
         if (msg.sender != beneficiary) revert OnlyBeneficiary();
         if (!tgeTriggered)             revert TGENotTriggered();
@@ -259,7 +276,7 @@ contract VestingVault {
     /**
      * @notice Revoke unvested tokens. Pays out any vested-but-unclaimed balance
      *         to the beneficiary first, then returns the unvested remainder to
-     *         `revokeRecipient` (normally the Treasury contract).
+     *         `revokeRecipient`, fixed at deployment (the Treasury).
      *
      *         TGE must have been triggered before revocation. Revoking a pre-TGE
      *         vault would result in initialAllocation=0, so unvested=0 — nothing
@@ -267,18 +284,16 @@ contract VestingVault {
      *         block all future claims, permanently trapping any tokens in the vault
      *         with no admin recovery path (A3-M-02 fix).
      *
-     * ⚠️  IRREVERSIBLE: Once revoked, there is no un-revoke mechanism. The admin
-     *     should verify the `revokeRecipient` address carefully before calling.
-     *     Sending unvested tokens to an incorrect or non-recoverable address results
-     *     in permanent loss with no on-chain recourse (A5-L-01 documentation).
+     * ⚠️  IRREVERSIBLE: Once revoked, there is no un-revoke mechanism. The recipient
+     *     is no longer an argument (internal audit M2), so a revoke can neither name
+     *     the beneficiary nor mistype the destination; it is checked once, at deployment.
      *
      * After revocation, vestedAmount() returns 0 to freeze further claims.
      */
-    function revoke(address revokeRecipient) external {
+    function revoke() external {
         if (msg.sender != admin)          revert OnlyAdmin();
         if (!tgeTriggered)                revert TGENotTriggered();
         if (revoked)                      revert AlreadyRevoked();
-        if (revokeRecipient == address(0)) revert ZeroAddress();
 
         uint256 vestedSoFar    = vestedAmount();
         uint256 releasableNow  = vestedSoFar > released ? vestedSoFar - released : 0;
@@ -320,6 +335,7 @@ contract VestingVault {
      *
      * @param recipient Address to receive the rescued tokens (admin-controlled).
      */
+    // slither-disable-next-line incorrect-equality -- reviewed 7 Oct 2026: a `== 0` nothing-to-do guard on internal accounting or our own balance; no outsider can move it to bypass or block anything
     function rescueDonatedTokens(address recipient) external {
         if (msg.sender != admin)     revert OnlyAdmin();
         if (recipient == address(0)) revert ZeroAddress();

@@ -35,7 +35,7 @@ describe("ZZ bridge-lens PoC", function () {
     await token.connect(admin).genesis(admin.address);
 
     const Native = await ethers.getContractFactory("SRXOFTNative");
-    const native = await Native.deploy(epAddr, admin.address, REMOTE_EID); // hub (N-01)
+    const native = await Native.deploy(epAddr, admin.address, REMOTE_EID, await token.getAddress()); // hub (N-01)
     await native.waitForDeployment();
 
     // impersonate the endpoint so we can call lzReceive as it would
@@ -101,6 +101,7 @@ describe("ZZ bridge-lens PoC", function () {
     const peer = b32(attacker.address);
     await token.connect(admin).setPeer(REMOTE_EID, peer);
     const amountLD = ethers.parseUnits("1000000000", 18);
+    await token.connect(admin).setInboundLimit(REMOTE_EID, amountLD); // returns fail closed (disclosure A)
     const origin = { srcEid: REMOTE_EID, sender: peer, nonce: 1 };
     await token.connect(epSigner).lzReceive(
       origin, ethers.ZeroHash, oftMsg(attacker.address, amountLD / 10n ** 12n), ethers.ZeroAddress, "0x"
@@ -152,7 +153,7 @@ describe("ZZ bridge-lens PoC", function () {
   //    at the cap (allowed) and then one token more (refused).
   it("E: [FIXED] the remote SRXOFTNative refuses a mint above MAX_SUPPLY", async function () {
     const { admin, attacker, native, epSigner } = await fixture();
-    const peer = b32(attacker.address);
+    const peer = await native.hubPeer(); // the only peer a spoke accepts (disclosure A)
     await native.connect(admin).setPeer(REMOTE_EID, peer);
 
     const MAX = await native.MAX_SUPPLY();

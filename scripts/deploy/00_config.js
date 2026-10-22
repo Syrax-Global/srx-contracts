@@ -101,6 +101,9 @@ const WALLET_ENV = Object.freeze({
  * @param {string|null} networkName  defaults to the network Hardhat is running on
  * @param {object} env          defaults to process.env (injectable for tests)
  */
+/** Addresses that must never appear in a mainnet deployment (Security ruling, 12 Oct 2026). */
+const NEVER_ON_MAINNET = ["0x049fea6abBbc88487Ca14A7910d37E1feCdb9236"];
+
 function walletFor(key, networkName = currentNetwork(), env = process.env) {
   const { getAddress, ZeroAddress } = require("ethers");
   const envName = WALLET_ENV[key];
@@ -123,6 +126,11 @@ function walletFor(key, networkName = currentNetwork(), env = process.env) {
 
   if (!isTestnet) {
     if (addr === ZeroAddress) throw new Error(`${envName} is the zero address`);
+    // ⛔ Security ruling, 12 Oct 2026 (DEPLOYMENT_SECURITY.md D2-2): the testnet deployer is
+    //    never a mainnet owner, admin or allocation wallet.
+    if (NEVER_ON_MAINNET.includes(addr)) {
+      throw new Error(`${envName} on "${networkName ?? "an unknown network"}" is the TESTNET DEPLOYER, which is never a mainnet key.`);
+    }
     if (Object.values(TESTNET_WALLET_DEFAULTS).includes(addr)) {
       throw new Error(
         `${envName} on "${networkName ?? "an unknown network"}" is a built-in TESTNET address. ` +
@@ -318,8 +326,7 @@ const GOVERNANCE = {
 //
 // The Strategic Reserve (15% = 1,500,000,000 SRX) is sent to the
 // StabilisationFund contract at TGE — NOT to a plain wallet. The SSF
-// implements the three-tier emergency response architecture described in
-// the Syrax Liquidity Resilience Whitepaper.
+// implements a three-tier emergency response architecture (see the contract).
 //
 // Three-tier deployment authority during a declared stress event:
 //   Tier 1 — DEPLOYER_ROLE (treasurer multi-sig): instant, up to MAX_DEPLOYER_BPS
@@ -331,10 +338,94 @@ const SSF = {
   MAX_DEPLOYER_BPS:       3_000,          // 30%  — Tier 1 individual cap
   MAX_GUARDIAN_BPS:       7_000,          // 70%  — Tier 2 combined cap (deployer + guardian)
   WITHDRAW_LOCK_DURATION: 30 * 24 * 3600, // 30 days — contributor withdrawal lock
+  // REG-50 (11 Oct 2026): the most SRX depositor rewards can EVER total, set once at
+  // deployment (StabilisationFund.rewardAllocation) and never changeable. Fees never
+  // feed it. ⛔ mainnet is null on purpose: the size is Jared's decision, taken before
+  // mainnet after modelling (11 Oct). 05b refuses to deploy on mainnet until it is set.
+  //    The testnet figure is a PLACEHOLDER for testing only, not a proposal.
+  REWARD_ALLOCATION: {
+    testnet: parseUnits("100000000", 18), // placeholder: 100M test SRX
+    mainnet: null,
+  },
+};
+
+/** The SSF reward allocation for a network: the testnet placeholder, or the mainnet
+ *  figure, which must have been decided (null throws rather than guessing). */
+function ssfRewardAllocation(networkName = currentNetwork()) {
+  const isTestnet = networkName !== null && TESTNET_CHAINS.has(networkName);
+  const value = isTestnet ? SSF.REWARD_ALLOCATION.testnet : SSF.REWARD_ALLOCATION.mainnet;
+  if (value === null || value === undefined) {
+    throw new Error(`No StabilisationFund reward allocation is set for ${networkName} (SSF.REWARD_ALLOCATION.mainnet). ` +
+      "It is fixed for the life of the contract, so it is Jared's decision (REG-50); record it in 00_config.js.");
+  }
+  return value;
+}
+
+// ── Bridge: the most each spoke may return to Ethereum (disclosure A) ──────────
+//    A draining bucket: at most this much in flight, refilling at this amount per day.
+//
+// ⭐ SRXToken refuses returns from a spoke above this per 24 hours, and refuses ALL
+//    returns from a spoke with no limit. It bounds what a compromised spoke can take
+//    before the guardian freezes it (GuardianModule.freezeBridgeInbound). 07 step B
+//    sets it on the hub for every spoke; governance changes it afterwards.
+// ⛔ mainnet is null on purpose: the figure trades how fast honest holders can bring
+//    SRX home against how much a compromised chain could take in a day. That is
+//    Jared's decision. Until it is recorded here, the hub accepts no returns on mainnet.
+const BRIDGE = {
+  inboundLimitPerDay: {
+    testnet: parseUnits("50000000", 18), // 50M test SRX per spoke per day
+    mainnet: null,
+  },
+  // The guardian's bridge circuit breaker (08 configures it in the Safe's batch while it
+  // still holds GOVERNANCE_ROLE on the GuardianModule). Bridge volume reported in EITHER
+  // direction (circuit_breaker_monitor.js) fills a draining bucket; reaching `threshold`
+  // stops the bridge until governance resets it. ⛔ Internal audit CONTROL-10 (16 Oct
+  // 2026): it was left for a later governance proposal, which at launch cannot reach
+  // quorum, so an unconfigured breaker would never trip; verify_roles now refuses that.
+  // ⛔ mainnet is null on purpose, like inboundLimitPerDay: Jared's decision.
+  circuitBreaker: {
+    testnet: { threshold: parseUnits("100000000", 18), windowSeconds: 24 * 3600 },
+    mainnet: null,
+  },
+  // Gas the destination executor is paid to deliver a transfer, set as the OApp's
+  // enforced option for every pathway (07 SET_PEERS). ⛔ Without it every send with
+  // empty options reverts at the quote (found on the Sepolia proof, 7 Oct 2026).
+  // Measured 7 Oct: a hub return ~135k gas with base costs, a spoke credit ~77k; voting
+  // checkpoints for a delegated recipient add more. 200k covers both with margin.
+  lzReceiveGas: 500000, // 7 Oct: 200k was too low — a hub return measured 327k on Sepolia (token alone), so the executor failed
+  // Which messages each chain believes (07 SET_DVNS=true, checked by lib/dvnCheck.js).
+  // ⛔ The LayerZero defaults are one DVN (LayerZero Labs) and are not accepted. Every
+  //    chain lists the SAME operators, at that chain's addresses, so both ends of a
+  //    pathway agree. `confirmations` is this chain's OUTBOUND block confirmations; the
+  //    receiving chain uses the sender's value. Testnet addresses: LayerZero's published
+  //    metadata (metadata.layerzero-api.com/v1/metadata), read 7 Oct 2026; the libraries
+  //    are the endpoint's current SendUln302 / ReceiveUln302.
+  //    Mainnet operators are Jared's decision: null until chosen.
+  dvns: {
+    sepolia: {
+      sendLib: "0xcc1ae8Cf5D3904Cef3360A9532B477529b177cCE",
+      receiveLib: "0xdAf00F5eE2158dD58E0d3857851c432E34A3A851",
+      confirmations: 2,
+      operators: {
+        "LayerZero Labs": "0x8eebf8b423B73bFCa51a1Db4B7354AA0bFCA9193",
+        "Nethermind":     "0x68802e01D6321D5159208478f297d7007A7516Ed",
+      },
+    },
+    bscTestnet: {
+      sendLib: "0x55f16c442907e86D764AFdc2a07C2de3BdAc8BB7",
+      receiveLib: "0x188d4bbCeD671A7aA2b5055937F79510A32e9683",
+      confirmations: 5,
+      operators: {
+        "LayerZero Labs": "0x0eE552262f7B562eFcED6DD4A7e2878AB897d405",
+        "Nethermind":     "0x6334290B7b4a365F3c0E79c85B1b42F078db78E4",
+      },
+    },
+    ethereum: null, bsc: null, zkSync: null,
+  },
 };
 
 module.exports = {
-  LZ_ENDPOINTS, LZ_EIDS, WALLETS, ALLOCATIONS, VESTING, GOVERNANCE, SSF,
-  TESTNET_CHAINS, TESTNET_WALLET_DEFAULTS, WALLET_ENV, walletFor, currentNetwork,
+  LZ_ENDPOINTS, LZ_EIDS, WALLETS, ALLOCATIONS, VESTING, GOVERNANCE, SSF, ssfRewardAllocation, BRIDGE,
+  TESTNET_CHAINS, TESTNET_WALLET_DEFAULTS, WALLET_ENV, walletFor, currentNetwork, NEVER_ON_MAINNET,
   TGE_PLAN, launchFloat, vestedByDay,
 };

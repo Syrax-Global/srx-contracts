@@ -8,11 +8,11 @@ cross-chain migration path.
 
 > **Maintained by Syrax Global FZCO** (Dubai, United Arab Emirates) and published from the
 > company's official GitHub organisation, [`Syrax-Global`](https://github.com/Syrax-Global).
-> No other GitHub account or organisation using the "Syrax" name is affiliated with us, with
-> one exception: [`@SyraxGlobal`](https://github.com/SyraxGlobal), a company-held account that
-> currently hosts our website repositories and will move into the organisation.
-> ⚠️ Contract addresses should only ever be taken from this repository or from
-> [syrax.global](https://www.syrax.global) — never from a third party claiming to be Syrax.
+> No other GitHub account or organisation using the "Syrax" name is affiliated with us, except
+> [`@SyraxGlobal`](https://github.com/SyraxGlobal), a company-held account that is a member of
+> this organisation. All Syrax repositories live here.
+> ⚠️ Contract addresses should only ever be taken from [`docs/ADDRESSES.md`](docs/ADDRESSES.md)
+> or from [syrax.global](https://www.syrax.global) — never from a third party claiming to be Syrax.
 
 ---
 
@@ -20,9 +20,11 @@ cross-chain migration path.
 
 ⚠️ **Testnet only. Not deployed to any mainnet.**
 
-Deployed on Sepolia and BSC testnet only; there is no mainnet deployment and no
-mainnet upgrade manifest. Mainnet deployment is gated on an external audit that
-has not yet been performed.
+Deployed on Sepolia and BSC testnet only ([`docs/ADDRESSES.md`](docs/ADDRESSES.md)); there is no mainnet deployment and no
+mainnet upgrade manifest (no SRX contract is upgradeable). Those testnet contracts predate REG-50,
+REG-53 and REG-54 and the 16 October 2026 internal-audit fixes, and will be redeployed. Mainnet
+deployment is gated on an external audit that has not yet been performed. It is upcoming and has
+not been engaged.
 
 ⛔ **Nothing here should be read as a statement that Syrax Global FZCO holds any
 licence.** It does not, it has not applied for one, and no licensed activity is
@@ -35,7 +37,7 @@ has been established.
 |---|---|
 | `token/SRXToken.sol` | The token. ERC-20 + Permit + Votes + LayerZero OFT, 10,000,000,000 fixed supply |
 | `token/TGEDistributor.sol` | One-shot genesis distribution |
-| `bridge/SRXOFTNative.sol` | The token on non-origin chains — minted only against a verified bridge message |
+| `bridge/SRXOFTNative.sol` | The token on non-origin chains — accepts messages from the Ethereum hub only (its address fixed at deployment), supply capped per chain |
 | `staking/SRXStaking.sol` | Lock-duration staking with fee tiers |
 | `staking/FeeController.sol` | Platform fee calculation and tier discounts |
 | `vesting/VestingVault.sol` | One vault per vested allocation, cliff + linear |
@@ -52,8 +54,8 @@ has been established.
 
 ```bash
 npm ci
-npx hardhat test          # 817 passing, 1 pending (23 Sep 2026)
-forge test                # 7 invariants + 3 property-fuzz tests
+npx hardhat test          # over 1,200 passing (1,204 on 16 Oct 2026)
+forge test                # 16 invariants + 5 property-fuzz tests
 ```
 
 ⭐ `test/audit-poc/` holds **executable proofs of vulnerabilities found during the
@@ -75,16 +77,20 @@ reintroducing any of those defects turns the suite red. Read
 ⭐ **`REMEDIATION.md` is the honest starting point for a reviewer.** It records 31
 vulnerabilities proven by executable test, their dispositions, and the mistakes
 made while fixing them — including two cases where a control could not fail and
-one where documentation described a guarantee the code did not provide.
+one where documentation described a guarantee the code did not provide. Its top section is the
+16 October 2026 internal audit (12 Medium, 17 Low; the fixes with their tests, and the items
+still open for design decisions).
 
 ## Things a reviewer should know up front
 
 - **Launch protection is not an accumulation cap.** `maxTransferAmount` and
   `maxWalletBalance` deliberately exempt DEX pool addresses and the bridge
-  (`SRXToken.sol:82-88`), so they are friction on direct wallet-to-wallet
-  transfers during the launch window, nothing more.
+  (`isExemptFromLimits` in `SRXToken.sol`), so they are friction on direct wallet-to-wallet
+  transfers during the launch window, nothing more. The wallet cap also never applies to SRX
+  leaving a listed wind-down exit (staking, the fund): a holder's own principal always comes back.
 - **The timelock delay is derived from the network.** 48 hours on anything not
-  explicitly a testnet, and a shorter value is refused rather than accepted.
+  explicitly a testnet, and a shorter value is refused rather than accepted. The
+  Timelock also cannot be set below its deployment delay later (`minDelayFloor`).
 - **Governance quorum is a fixed fraction of the global supply cap**, not of live
   Ethereum-side supply, so bridging tokens away cannot lower it.
 - **Voting power is Ethereum-native.** Cross-chain vote aggregation is not built.

@@ -1,7 +1,6 @@
 {
   "_comment": "Slither configuration for the SRX Token suite. Tuned to suppress framework-noise and surface findings that matter.",
-
-  "detectors_to_exclude": "naming-convention,solc-version,pragma,assembly,low-level-calls,calls-loop,unused-state,arbitrary-send-erc20,arbitrary-send-eth,reentrancy-no-eth",
+  "detectors_to_exclude": "naming-convention,solc-version,pragma,assembly,low-level-calls,calls-loop",
   "_detectors_to_exclude_rationale": [
     "naming-convention: OZ + LayerZero use conventions Slither doesn't recognize; not relevant",
     "solc-version: locked to ^0.8.24 intentionally; not a finding",
@@ -9,21 +8,16 @@
     "assembly: LayerZero V2 OFT base uses assembly internally; not our code",
     "low-level-calls: BuybackBurner uses .call by design (swap calldata); reviewed in audit",
     "calls-loop: PreSaleRound batchDeployVaults intentionally loops; capped + paginated",
-    "unused-state: __gap arrays are intentional UUPS upgrade storage reservation; confirmed false positive",
-    "arbitrary-send-erc20: StabilisationFund.recoverLiquidity is admin-only AND safeTransferFrom requires source approval; double-gated. Slither cannot see ERC20 approval state",
-    "arbitrary-send-eth: BuybackBurner.rescueETH and SRXTreasury.withdrawETH are intentionally admin-only ETH rescue/withdraw functions. Slither does not recognize OZ AccessControl role gating",
-    "reentrancy-no-eth: GuardianModule.pauseAll/emergencyUnpauseAll call admin-registered module targets which are trusted SRX-suite contracts. State writes are timestamps/counters tolerant to call-order anomalies. Trust model documented in MULTISIG_SPEC.md"
+    "8 Oct 2026: arbitrary-send-erc20, arbitrary-send-eth and reentrancy-no-eth are no longer excluded repo-wide; each existing occurrence carries its own dated slither-disable-next-line reason, so a NEW occurrence fails CI (board 656063d0).",
+    "16 Oct 2026 (internal audit): unused-state is no longer excluded. Its reason (UUPS __gap arrays) ended with REG-53, and run without the exclusion it reports nothing."
   ],
-
   "filter_paths": "node_modules|contracts/mocks|contracts/test|contracts/echidna|test/foundry|test/.+\\.test\\.js",
   "_filter_paths_rationale": "Skip dependencies, test stubs, mocks, Foundry test code and the Echidna harness. contracts/echidna is test code by SECURITY.md's own definition; it sits under contracts/ only so Hardhat compiles it, and its unchecked-transfer finding failed CI on every push from 10 Sep 2026 while no deployable contract was affected. The finding itself was also fixed in the harness.",
-
   "exclude_informational": false,
-  "exclude_low":           false,
-  "exclude_medium":        false,
-  "exclude_high":          false,
-  "exclude_optimization":  true,
-
+  "exclude_low": false,
+  "exclude_medium": false,
+  "exclude_high": false,
+  "exclude_optimization": true,
   "solc_remaps": [
     "@openzeppelin/contracts=node_modules/@openzeppelin/contracts",
     "@openzeppelin/contracts-upgradeable=node_modules/@openzeppelin/contracts-upgradeable",
@@ -32,9 +26,7 @@
     "@layerzerolabs/lz-evm-protocol-v2=node_modules/@layerzerolabs/lz-evm-protocol-v2",
     "@layerzerolabs/lz-evm-messagelib-v2=node_modules/@layerzerolabs/lz-evm-messagelib-v2"
   ],
-
   "solc_args": "--via-ir --optimize --optimize-runs 200 --evm-version cancun",
-
   "disable_color": true,
   "json": "slither-report.json"
 }

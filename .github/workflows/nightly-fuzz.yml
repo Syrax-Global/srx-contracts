@@ -3,10 +3,14 @@ name: Nightly — Heavy Fuzz Campaign
 # Runs an extended Foundry invariant campaign every night.
 # 1024 runs × 100 depth = ~100K randomized calls per invariant.
 # Catches multi-step state corruption that the lighter PR run won't surface.
+#
+# Runs on Syrax's own runner (CI-02, Security ruling 15 Oct 2026), at night. Every action is pinned to an exact
+# commit; Node and Foundry are pinned downloads whose sha256 is checked BEFORE anything is extracted (the same pins
+# as ci.yml). The failure-trace artifact is kept for 7 days.
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # 03:00 UTC daily
+    - cron: '0 3 * * *'   # 03:00 UTC daily (night)
   workflow_dispatch:       # manual trigger
 
 env:
@@ -19,36 +23,47 @@ permissions:
 jobs:
   invariant-campaign:
     name: Foundry invariant — heavy profile
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Setup Node 20.19.3 (pinned download, sha256 checked)
+        # nodejs.org/dist/v20.19.3/SHASUMS256.txt: 76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o node.tar.gz https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz
+          echo "76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3  node.tar.gz" | sha256sum -c -
+          tar -xzf node.tar.gz
+          echo "$RUNNER_TEMP/node-v20.19.3-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Install Node deps
-        run: npm ci
+        run: npm ci --ignore-scripts
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
-        with:
-          version: stable
+      - name: Install Foundry v1.8.5 (pinned download, sha256 checked)
+        # pinned 8 Oct 2026 (board 656063d0): the version run locally; bump deliberately with a re-run.
+        # github.com/foundry-rs/foundry/releases/download/v1.8.5/foundry_v1.8.5_linux_amd64.sha256 (upstream's own checksum file)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/foundry" && cd "$RUNNER_TEMP/foundry"
+          curl -fsSL -o foundry.tar.gz https://github.com/foundry-rs/foundry/releases/download/v1.8.5/foundry_v1.8.5_linux_amd64.tar.gz
+          echo "6c66ffcc55fa4249197721baa3098bc208014ea1d8aa04b2ed50ac6bccffb226  foundry.tar.gz" | sha256sum -c -
+          tar -xzf foundry.tar.gz
+          echo "$RUNNER_TEMP/foundry" >> "$GITHUB_PATH"
 
       - name: Install forge-std
-        run: mkdir -p lib && git clone https://github.com/foundry-rs/forge-std lib/forge-std
+        run: mkdir -p lib && git clone --depth 1 --branch v1.16.1 https://github.com/foundry-rs/forge-std lib/forge-std   # pinned tag (was HEAD, so two runs of one commit could differ)
 
       - name: Run heavy invariant campaign
         run: forge test --match-path "test/foundry/invariant/*" -vvv
 
       - name: Upload failure traces on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: invariant-failure-trace
+          retention-days: 7
           path: |
             foundry-out/
             *.log

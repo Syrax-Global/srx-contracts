@@ -46,21 +46,47 @@ async function main() {
   const nonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
   const predictedGov = ethers.getCreateAddress({ from: deployer.address, nonce: nonce + 1 });
   const tl = await (await f("SRXTimelock")).deploy(DELAY, [predictedGov], [ethers.ZeroAddress], safe.address);
+  const tlDeployBlock = (await tl.deploymentTransaction().wait()).blockNumber;
   const gov = await (await f("SRXGovernor")).deploy(await token.getAddress(), await tl.getAddress());
-  const gm = await (await f("GuardianModule")).deploy(safe.address, safe.address, await tl.getAddress(), 365 * 24 * 3600);
+  const gm = await (await f("GuardianModule")).deploy(safe.address, safe.address, await tl.getAddress(), 180 * 24 * 3600);
   const srx = await token.getAddress(), tla = await tl.getAddress();
-  const proxy = async (n, args) => upgrades.deployProxy(await f(n), args, { kind: "uups" });
+  const proxy = async (n, args) => (await f(n)).deploy(...args);
   const treasury = await proxy("SRXTreasury", [srx, safe.address, tla]);
-  const staking  = await proxy("SRXStaking", [srx, safe.address]);
+  // REG-50: a stand-in launch distributor (role rehearsal only; rewards are not exercised here).
+  const allocSrc = await (await f("MockTGEAllocationSource")).deploy(srx, ethers.parseUnits("1700000000", 18), true);
+  const staking  = await proxy("SRXStaking", [srx, safe.address, await allocSrc.getAddress()]);
   const fees     = await proxy("FeeController", [await staking.getAddress(), safe.address]);
-  const ssf      = await proxy("StabilisationFund", [srx, safe.address, 500, 1000, 7 * 24 * 3600]);
+  const ssf      = await proxy("StabilisationFund", [srx, safe.address, 500, 1000, 7 * 24 * 3600, ethers.parseUnits("100000000", 18), await allocSrc.getAddress()]);
   if ((await gov.getAddress()) !== predictedGov) throw new Error("governor address prediction failed");
+
+  // As 08's Safe batch does it: register the six guardian modules and configure the bridge
+  // breaker under a temporary GOVERNANCE_ROLE, then give the role back (internal audit
+  // CONTROL-10: verify_roles now refuses an unwired guardian).
+  {
+    const GOV = await gm.GOVERNANCE_ROLE();
+    await (await gm.connect(safe).grantRole(GOV, safe.address)).wait();
+    const ids = ["TOKEN", "BRIDGE", "STAKING", "FEE_CONTROLLER", "TREASURY", "STABILISATION_FUND"].map((n) => ethers.id(n));
+    const targets = [srx, srx, await staking.getAddress(), await fees.getAddress(), await treasury.getAddress(), await ssf.getAddress()];
+    for (let i = 0; i < ids.length; i++) await (await gm.connect(safe).registerModule(ids[i], targets[i])).wait();
+    await (await gm.connect(safe).configureCircuitBreaker(ethers.id("BRIDGE"), ethers.parseUnits("100000000", 18), 24 * 3600)).wait();
+    await (await gm.connect(safe).revokeRole(GOV, safe.address)).wait();
+  }
+  // As 08 does it: the token lists staking and the fund as wind-down exits (12 Oct ruling).
+  for (const exit of [await staking.getAddress(), await ssf.getAddress()]) {
+    await (await token.connect(safe).addWindDownExit(exit)).wait();
+  }
 
   const env = {
     DEPLOYER_EOA: deployer.address, ADMIN_ADDRESS: safe.address,
     SRX_TOKEN: srx, TIMELOCK: tla, GOVERNOR: await gov.getAddress(), GUARDIAN_MODULE: await gm.getAddress(),
     TREASURY: await treasury.getAddress(), STAKING: await staking.getAddress(),
     FEE_CONTROLLER: await fees.getAddress(), STABILISATION: await ssf.getAddress(),
+    TIMELOCK_DEPLOY_BLOCK: String(tlDeployBlock),
+    // Contracts this narrow rehearsal does not deploy, declared absent (the gate refuses
+    // an undeclared one). The launch distributor and vesting vaults cannot be declared
+    // absent; rehearse_deploy_suite.js deploys them and runs the whole gate.
+    BUYBACK_BURNER_LOCALHOST: "none", AIRDROP_LOCALHOST: "none", SRX_OFT_NATIVE_LOCALHOST: "none",
+    MIGRATOR_LOCALHOST: "none", PRESALE_ROUND_LOCALHOST: "none",
   };
   console.log("Deployed the governed set.\n");
 
@@ -83,7 +109,13 @@ async function main() {
   expect((await token.owner()) === tla, "Timelock owns the token");
 
   r = run("scripts/verify/verify_roles.js", env);
-  expect(r.code !== 1 && /Failures: 0/.test(r.out), "gate reports zero failures on the migrated topology", r.out);
+  {
+    // Every failure must be a launch-distribution contract this rehearsal does not deploy.
+    const fails = r.out.split(/\r?\n/).filter((l) => l.startsWith("❌") && !/ROLE TOPOLOGY INVALID/.test(l));
+    const outOfScope = /^❌ (TGEDistributor|VestingVault \w+): not declared/;
+    const unexpected = fails.filter((l) => !outOfScope.test(l));
+    expect(unexpected.length === 0, `the gate's only failures are the undeployed launch-distribution contracts (${fails.length})`, r.out);
+  }
   console.log(r.out.split("\n").filter((l) => /Checks run|INCOMPLETE|•|ALL CHECKS/.test(l)).join("\n"));
 
   r = run("scripts/ops/migrate_roles.js", { ...env, MIGRATE_EXECUTE: "1" });

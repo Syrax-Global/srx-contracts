@@ -24,7 +24,8 @@ describe("AUDIT PoC — vesting / airdrop", function () {
     const V = await ethers.getContractFactory("VestingVault");
     const vault = await V.deploy(
       await token.getAddress(), beneficiary.address, admin.address,
-      BigInt(cliffDays) * BigInt(DAY), BigInt(vestDays) * BigInt(DAY), BigInt(bps)
+      BigInt(cliffDays) * BigInt(DAY), BigInt(vestDays) * BigInt(DAY), BigInt(bps),
+      treasury.address // revokeRecipient (internal audit M2)
     );
     await vault.waitForDeployment();
     await token.connect(admin).transfer(await vault.getAddress(), TOTAL);
@@ -69,7 +70,7 @@ describe("AUDIT PoC — vesting / airdrop", function () {
     //    balance forever, so release() and revoke() both reverted permanently.
     //    Now the vault still holds the unvested remainder and revoke() works.
     expect(await token.balanceOf(va)).to.be.gt((TOTAL * 49n) / 100n);
-    await expect(vault.connect(admin).revoke(admin.address)).to.not.be.reverted;
+    await expect(vault.connect(admin).revoke()).to.not.be.reverted;
   });
 
   it("V2: [FIXED] presale vault yields exactly its 25% TGE unlock", async function () {
@@ -118,7 +119,7 @@ describe("AUDIT PoC — vesting / airdrop", function () {
     // computes a positive releasableNow off the inflated totalAllocation().
     // ✅ FIXED — revoke() is no longer bricked by prior releases, because the
     //    vault no longer believes it owes more than it holds.
-    await expect(vault.connect(admin).revoke(treasury.address)).to.not.be.reverted;
+    await expect(vault.connect(admin).revoke()).to.not.be.reverted;
   });
 
   // ✅ FIXED 10 Sep 2026 via declareExpectedAllocation(), which is OPT-IN so
@@ -184,7 +185,7 @@ describe("AUDIT PoC — vesting x launch protection", function () {
   //    would breach the wallet cap. This test keeps the behaviour visible.
   const DAY = 86400;
   it("V6: [CONFIG HAZARD, now checked] the wallet cap blocks a claim, because it caps the RECIPIENT", async function () {
-    const [admin, beneficiary] = await ethers.getSigners();
+    const [admin, beneficiary, treasury] = await ethers.getSigners();
     const MockLZEndpoint = await ethers.getContractFactory("MockLZEndpoint");
     const ep = await MockLZEndpoint.deploy(40161); await ep.waitForDeployment();
     const SRXToken = await ethers.getContractFactory("SRXToken");
@@ -198,7 +199,7 @@ describe("AUDIT PoC — vesting x launch protection", function () {
     const V = await ethers.getContractFactory("VestingVault");
     const vault = await V.deploy(
       await token.getAddress(), beneficiary.address, admin.address,
-      0n, BigInt(180 * DAY), 2500n
+      0n, BigInt(180 * DAY), 2500n, treasury.address
     );
     await vault.waitForDeployment();
     const va = await vault.getAddress();
@@ -225,12 +226,12 @@ describe("V7 revoke clawback leak", function () {
     await token.connect(admin).genesis(admin.address);
     const TOTAL = ethers.parseUnits("1000000", 18);
     const vault = await (await ethers.getContractFactory("VestingVault")).deploy(
-      await token.getAddress(), ben.address, admin.address, 0n, BigInt(365*86400), 0n);
+      await token.getAddress(), ben.address, admin.address, 0n, BigInt(365*86400), 0n, tre.address);
     await token.connect(admin).transfer(await vault.getAddress(), TOTAL);
     await vault.connect(admin).triggerTGE();
     await time.increase(219 * 86400);              // 60% of the vest
     await vault.connect(ben).release();            // ONE ordinary claim
-    await vault.connect(admin).revoke(tre.address);// admin claws back
+    await vault.connect(admin).revoke();// admin claws back
     const F = (x)=>Number(ethers.formatUnits(x,18));
     console.log("      beneficiary total :", F(await token.balanceOf(ben.address)), " (schedule says ~600000)");
     console.log("      treasury got      :", F(await token.balanceOf(tre.address)), " (schedule says ~400000)");

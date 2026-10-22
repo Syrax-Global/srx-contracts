@@ -17,7 +17,7 @@
 
 | # | Domain | Status | Residual | Primary doc | Owner |
 |---|--------|--------|----------|-------------|-------|
-| D1 | Contract code correctness | ✅ 5 rounds, 0 open C/H/M | Low | `docs/audits/` | Eng |
+| D1 | Contract code correctness | ✅ internal rounds plus the 7 Oct 2026 external reports, all fixed with tests; the 16 Oct 2026 internal audit (12 Medium, 17 Low) fixed in part, the rest in progress or open for design decisions (see `REMEDIATION.md`) | Low | `docs/audits/`, `REMEDIATION.md` | Eng |
 | D2 | Deployment & TGE execution | ✅ remediated R6 | Med | `DEPLOYMENT_SECURITY.md` | Eng/DevOps |
 | D3 | Economic / tokenomics | 🟡 draft | High | `ECONOMIC_THREAT_MODEL.md` | Founder/Eng |
 | D4 | Cross-chain / bridge | 🟡 draft | High | `BRIDGE_SECURITY_MODEL.md` | Eng |
@@ -55,9 +55,9 @@ A living list of every attack/failure angle to test or document. ✅ = covered, 
 
 ### D1 — Contract code (✅ complete)
 ✅ Reentrancy · ✅ access control · ✅ integer over/underflow · ✅ oracle staleness/bounds ·
-✅ UUPS storage-gap discipline · ✅ initializer protection · ✅ LayerZero setPeer guard ·
+✅ no upgradeable contract (REG-53: SRXStaking, FeeController, StabilisationFund and SRXTreasury are plain contracts, so there is no upgrade path, upgrade key or storage layout to attack) · ✅ locked hub peer on every spoke (it accepts the hub or zero, nothing else) and the hub's per-chain inbound limit with guardian freeze ·
 ✅ launch-protection bypass on mint/burn · ✅ reward-pool solvency (`periodFinish`) ·
-✅ Merkle replay/second-preimage · ✅ tier-boundary math · ✅ 7 Foundry invariants · ✅ Slither (CI).
+✅ Merkle replay/second-preimage · ✅ tier-boundary math · ✅ 16 Foundry invariants (7 token, 4 bridge, 5 reward pools) · ✅ Slither (CI).
 
 ### D2 — Deployment & TGE (✅ remediated)
 ✅ TGE destination allowlist gate (`verify_tge_targets.js`) · ✅ supply-sum invariant in the gate ·
@@ -71,6 +71,7 @@ A living list of every attack/failure angle to test or document. ✅ = covered, 
 ⬜ sniper/MEV launch-day modeling.
 
 ### D4 — Bridge (🟡)
+✅ hub-and-spoke: a spoke sends to and accepts from the hub only, at an address fixed at deployment · ✅ hub inbound limit per chain (a draining bucket; none set means no returns) with a guardian freeze that only governance lifts · ✅ each spoke's owner and LayerZero delegate behind that chain's own 48-hour Timelock · ⬜ the spoke pause and the Safe's roles on a spoke (internal audit M4, open) · ⬜ spoke burns counted on the hub (L9, open) ·
 🟡 LayerZero DVN/executor config spec (≥2 independent DVNs) · ⬜ cross-chain supply reconciliation
 monitor · ⬜ circuit-breaker thresholds set · ⬜ peer-set ceremony runbook · ⬜ reorg-on-mint handling ·
 ⬜ ZkSyncMigrator oracle = multisig + time-boxed.
@@ -78,7 +79,7 @@ monitor · ⬜ circuit-breaker thresholds set · ⬜ peer-set ceremony runbook �
 ### D5 — Governance (🟡)
 ✅ flash-loan-vote resistance (timestamp clock + snapshot + delay) · ⬜ delegation-participation target ·
 ⬜ quorum-at-low-delegation analysis · ⬜ committed decentralization milestone dates · ⬜ canceller-guardian
-collusion model.
+collusion model (internal audit M8, M9 open) · ✅ a paused staking contract or fund cannot hold principal indefinitely: irreversible exit-only wind-down (REG-53), started by the Timelock, the admin Safe (`WIND_DOWN_ROLE`) or anyone after a 30-day pause that no break of 7 days or more has interrupted (a shorter break does not restart the count, L2); exits return exactly the caller's own principal, no deadline once on, and no function moves anyone's tokens for them (a token-wide `SRXToken` pause still stops every transfer, exits included).
 
 ### D6 — Key management (🟡)
 ⬜ Safe signer set defined (count/roles/jurisdictional independence) · ⬜ key-generation ceremony ·
@@ -102,8 +103,8 @@ linkage · ⬜ sanctions screening · ⬜ exchange-listing legal readiness.
 program · ⬜ signer social-engineering defense · ⬜ launch-protection parameter values decided.
 
 ### D11 — Formal verification (🟡)
-✅ 7 single-contract Foundry invariants · 🟡 cross-contract global supply-conservation invariant ·
-⬜ full-TGE-sequence property · ⬜ bridge mint==burn conservation · ⬜ external formal verification
+✅ 7 single-contract Foundry invariants · ✅ 5 reward-pool invariants (REG-50, `RewardPoolsInvariant`) · ✅ cross-chain supply-conservation invariant (Foundry `BridgeConservationInvariant`, 8 Oct 2026; JS property test alongside) ·
+⬜ full-TGE-sequence property · ✅ bridge conservation (`test/BridgeConservation.property.test.js`, `test/security-triage-2026-10.test.js`) · ⬜ external formal verification
 (Certora/SMT) decision.
 
 ### D12 — Incident response (🟡)

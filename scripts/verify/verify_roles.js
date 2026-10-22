@@ -5,20 +5,36 @@
  * It asserts that, AFTER the role-migration runbook has been executed, the
  * privileged-role topology matches the intended end state:
  *
- *   • The deployer EOA holds NO roles on ANY contract.
- *   • UPGRADER_ROLE is held ONLY by the Timelock (never admin, never deployer).
+ *   • The deployer EOA holds NO roles on any contract this gate covers (see the
+ *     matrix below; a role outside it is not checked).
+ *   • REG-53: SRXStaking, FeeController, StabilisationFund and SRXTreasury are NOT
+ *     upgradeable. The gate checks that none of them is a proxy (no EIP-1967
+ *     implementation) and that none answers proxiableUUID().
+ *   • WIND_DOWN_ROLE (staking, fund) is held by the admin Safe: the fast, one-way
+ *     exit-only switch. Never the deployer.
+ *   • SRXToken lists staking and the fund as wind-down exits, so a token pause never
+ *     blocks an exit-only withdrawal; the GuardianModule's sunset is within 180 days
+ *     (Security ruling, 12 Oct 2026).
  *   • GOVERNANCE_ROLE is held by the Timelock (never deployer).
  *   • PAUSER_ROLE is held by the GuardianModule (never deployer).
  *   • SPENDER_ROLE (Treasury) is held by the Timelock (never deployer).
  *   • DEFAULT_ADMIN_ROLE is held by the Timelock — NOT the admin Safe.
+ *   • The GuardianModule has all six modules registered to the right contract and the
+ *     bridge circuit breaker configured (internal audit 16 Oct 2026, CONTROL-10).
+ *   • No Timelock operation is scheduled and still pending, other than ones named in
+ *     TIMELOCK_ALLOWED_OPS_<NET>. The Safe is a temporary PROPOSER during setup, and what
+ *     it scheduled then outlives the revoke (CONTROL-05). A missing
+ *     TIMELOCK_DEPLOY_BLOCK_<NET> is a FAILURE: an absence check that cannot look is not a pass.
  *   • The admin Safe holds NO admin, governance, upgrade, spend, pause or burn
- *     role anywhere, is not the token's bridge owner or LayerZero delegate, and
- *     is neither admin nor proposer of the Timelock.
+ *     role on the CORE contracts, is not the token's bridge owner or LayerZero
+ *     delegate, and is neither admin nor proposer of the Timelock. It does
+ *     administer the operational contracts (BuybackBurner, SRXAirdrop, PreSaleRound)
+ *     by design, and this gate requires that: MULTISIG_SPEC.md lists them.
  *
  * ⛔ DELAY-ONLY AT LAUNCH (Jared, 23 Sep 2026; pre-external-audit sweep GOV-H1).
  *    This gate used to REQUIRE the admin Safe to hold DEFAULT_ADMIN_ROLE. From
  *    there one Safe batch could grant itself SPENDER_ROLE and empty the treasury,
- *    re-grant UPGRADER_ROLE and upgrade anything, or use GOVERNANCE_ROLE on the
+ *    or use GOVERNANCE_ROLE on the
  *    StabilisationFund to send all 1.5B SRX anywhere — all without the 48-hour
  *    delay the documentation promises. And as Timelock admin it could make itself
  *    proposer and schedule updateDelay(0). Every power now sits behind the delay;
@@ -39,11 +55,18 @@
  *   STABILISATION_<NET>, TIMELOCK_<NET>, GUARDIAN_MODULE_<NET>
  *   ADMIN_ADDRESS (the admin Safe), and optionally GUARDIAN_MULTISIG_<NET>,
  *   DEPLOYER_MULTISIG_<NET> for SSF tiered roles.
+ *   TIMELOCK_DEPLOY_BLOCK_<NET> (REQUIRED: the block the Timelock was deployed in) and
+ *   TIMELOCK_ALLOWED_OPS_<NET> (optional: comma-separated operation ids expected to be pending).
  *
  * Run: npx hardhat run scripts/verify/verify_roles.js --network ethereum
  */
 const { ethers, network } = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 require("dotenv").config();
+const { TGE_PLAN, TESTNET_CHAINS, GOVERNANCE, LZ_EIDS } = require("../deploy/00_config");
+const { checkDvnConfig, checkEnforcedOptions, ENDPOINT_ABI } = require("../deploy/lib/dvnCheck");
+const { checkGuardianWiring, checkNoPendingTimelockOps, parseOpList, parseBlock } = require("../deploy/lib/gate_checks");
 
 const NET = network.name.toUpperCase();
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -52,16 +75,33 @@ const ZERO = "0x0000000000000000000000000000000000000000";
 const ROLE = {
   DEFAULT_ADMIN_ROLE: "0x0000000000000000000000000000000000000000000000000000000000000000",
   GOVERNANCE_ROLE: ethers.id("GOVERNANCE_ROLE"),
-  UPGRADER_ROLE: ethers.id("UPGRADER_ROLE"),
+  WIND_DOWN_ROLE: ethers.id("WIND_DOWN_ROLE"),
   PAUSER_ROLE: ethers.id("PAUSER_ROLE"),
   SPENDER_ROLE: ethers.id("SPENDER_ROLE"),
   GUARDIAN_ROLE: ethers.id("GUARDIAN_ROLE"),
   DEPLOYER_ROLE: ethers.id("DEPLOYER_ROLE"),
   ORACLE_REPORTER_ROLE: ethers.id("ORACLE_REPORTER_ROLE"),
+  GATEWAY_ROLE: ethers.id("GATEWAY_ROLE"),
   BURN_ROLE: ethers.id("BURN_ROLE"),
   PROPOSER_ROLE: ethers.id("PROPOSER_ROLE"),
   CANCELLER_ROLE: ethers.id("CANCELLER_ROLE"),
+  CIRCUIT_BREAKER_ROLE: ethers.id("CIRCUIT_BREAKER_ROLE"),
+  ORACLE_ROLE: ethers.id("ORACLE_ROLE"),
+  EXECUTOR_ROLE: ethers.id("EXECUTOR_ROLE"),
 };
+
+/**
+ * A contract no deploy script creates must be DECLARED for this network: its
+ * address, or the literal "none". ⛔ An undeclared one is a failure, never a skip —
+ * "not configured" and "not deployed" must never look the same to a blocking gate.
+ * Returns { state: "address", addr } | { state: "none" } | { state: "undeclared" }.
+ */
+function declared(key) {
+  const v = (process.env[`${key}_${NET}`] || process.env[key] || "").trim();
+  if (!v) return { state: "undeclared" };
+  if (v.toLowerCase() === "none") return { state: "none" };
+  return { state: "address", addr: ethers.getAddress(v) };
+}
 
 function envAddr(key, { required = true } = {}) {
   const v = process.env[`${key}_${NET}`] || process.env[key];
@@ -83,6 +123,9 @@ async function main() {
   const deployerAddr = statedDeployer ? ethers.getAddress(statedDeployer) : loadedAddr;
 
   const advisories = [];
+  let failures = 0;
+  let checks = 0;
+  let skipped = 0;
   if (!statedDeployer) {
     advisories.push(
       "DEPLOYER_EOA is not set, so the 'deployer holds no roles' assertion was made against the " +
@@ -100,6 +143,7 @@ async function main() {
   const guardianM = envAddr("GUARDIAN_MODULE");          // GuardianModule (PAUSER holder)
   const guardianMS = envAddr("GUARDIAN_MULTISIG", { required: false }); // SSF GUARDIAN_ROLE
   const deployerMS = envAddr("DEPLOYER_MULTISIG", { required: false }); // SSF DEPLOYER_ROLE
+  const reporter   = envAddr("ORACLE_REPORTER", { required: false });   // SSF ORACLE_REPORTER_ROLE (the monitor)
 
   const contracts = {
     SRXToken:          { addr: srxToken,                 artifact: "SRXToken" },
@@ -133,26 +177,27 @@ async function main() {
     ],
     SRXTreasury: [
       ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
-      ["UPGRADER_ROLE",      [timelock], noSafe],
       ["GOVERNANCE_ROLE",    [timelock], noSafe],
       ["PAUSER_ROLE",        [guardianM],noSafe],
       ["SPENDER_ROLE",       [timelock], noSafe],
     ],
     SRXStaking: [
       ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
-      ["UPGRADER_ROLE",      [timelock], noSafe],
+      ["WIND_DOWN_ROLE",     [admin],    baseForbidden],
       ["GOVERNANCE_ROLE",    [timelock], noSafe],
       ["PAUSER_ROLE",        [guardianM],noSafe],
     ],
     FeeController: [
       ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
-      ["UPGRADER_ROLE",      [timelock], noSafe],
       ["GOVERNANCE_ROLE",    [timelock], noSafe],
       ["PAUSER_ROLE",        [guardianM],noSafe],
+      // GATEWAY_ROLE gates no function today (internal review, 7 Oct 2026); the
+      // deployer key must still not hold it, so a future use starts clean.
+      ["GATEWAY_ROLE",       [],         baseForbidden],
     ],
     StabilisationFund: [
       ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
-      ["UPGRADER_ROLE",      [timelock], noSafe],
+      ["WIND_DOWN_ROLE",     [admin],    baseForbidden],
       // ⛔ The Safe held GOVERNANCE_ROLE here from initialize() and nothing forbade
       //    it: deployLiquidity's governance path has no stress, cap or allowlist.
       ["GOVERNANCE_ROLE",    [timelock], noSafe],
@@ -164,27 +209,115 @@ async function main() {
       //    incomplete run cannot read as a clean one.
       ...(deployerMS ? [["DEPLOYER_ROLE", [deployerMS], [...baseForbidden]]] : []),
       ...(guardianMS ? [["GUARDIAN_ROLE", [guardianMS], [...baseForbidden]]] : []),
+      // ⛔ Internal review, 7 Oct 2026: this role was outside the gate. It declares a
+      //    stress event, which opens the guardian's and deployer's capped fast paths.
+      //    The deployer key must never hold it; the monitor's address must, when stated.
+      ["ORACLE_REPORTER_ROLE", reporter ? [reporter] : [], baseForbidden],
     ],
   };
 
   if (!deployerMS) advisories.push("DEPLOYER_MULTISIG unset — the StabilisationFund DEPLOYER_ROLE check did not run.");
+  if (!reporter) advisories.push("ORACLE_REPORTER unset — only 'the deployer does not hold ORACLE_REPORTER_ROLE' was checked, not who does.");
   if (!guardianMS) advisories.push("GUARDIAN_MULTISIG unset — the StabilisationFund GUARDIAN_ROLE check did not run.");
 
-  // ⚠️ Coverage is 4 of 11 privileged contracts. The omitted ones hold mint,
-  //    burn and bridge authority, so this gate says nothing about them. Stated
-  //    every run rather than left as a silence a reader must notice.
-  const UNCOVERED = ["GuardianModule", "VestingVault", "BuybackBurner",
-                     "PreSaleRound", "SRXOFTNative", "ZkSyncMigrator", "SRXAirdrop"];
+  // ── GuardianModule (30 Sep 2026: it was outside this gate) ─────────────────
+  // ⛔ 08_deploy_guardian gives the admin Safe DEFAULT_ADMIN_ROLE here and nothing
+  //    removed it. From it the Safe could grant itself GOVERNANCE_ROLE and, with
+  //    no delay, call emergencyUnpauseAll / governanceUnpause /
+  //    resetCircuitBreaker / updateModuleTarget — re-opening a tripped circuit
+  //    breaker, which GOV-H1 and MULTISIG_SPEC say the Safe can never do. The Safe
+  //    keeps GUARDIAN_ROLE (pause) through GUARDIAN_MULTISIG, nothing more.
+  contracts.GuardianModule = { addr: guardianM, artifact: "GuardianModule" };
+  expectations.GuardianModule = [
+    ["DEFAULT_ADMIN_ROLE",   [timelock], noSafe],
+    ["GOVERNANCE_ROLE",      [timelock], noSafe],
+    ["GUARDIAN_ROLE",        [],         baseForbidden],
+    ["CIRCUIT_BREAKER_ROLE", [],         baseForbidden],
+  ];
+
+  // ── Operational contracts (MULTISIG_SPEC "Safe-administered by design") ────
+  // Each is declared for the network: an address, or "none". Their administrator
+  // is the Safe BY DESIGN, with the trust disclosed in MULTISIG_SPEC — a 48-hour
+  // delay would stop day-to-day operation. What the gate enforces is the spec:
+  // the Safe is the administrator, the deployer key never is, and where the spec
+  // puts a role behind the Timelock it is there.
+  // ⭐ ZkSyncMigrator's admin is the Timelock (Jared, 30 Sep 2026): as admin the
+  //    Safe could grant itself GOVERNANCE and open migration (users burn SRX)
+  //    without the delay. migrate_roles.js hands it over.
+  const optional = {
+    ZkSyncMigrator: { key: "MIGRATOR", artifact: "ZkSyncMigrator", roles: [
+      ["DEFAULT_ADMIN_ROLE", [timelock], noSafe],
+      ["GOVERNANCE_ROLE",    [timelock], noSafe],
+      ["ORACLE_ROLE",        [],         baseForbidden],
+    ] },
+    BuybackBurner: { key: "BUYBACK_BURNER", artifact: "BuybackBurner", roles: [
+      ["DEFAULT_ADMIN_ROLE", [admin],    baseForbidden],
+      ["EXECUTOR_ROLE",      [],         baseForbidden],
+    ] },
+    SRXAirdrop: { key: "AIRDROP", artifact: "SRXAirdrop", roles: [
+      ["DEFAULT_ADMIN_ROLE", [admin],    baseForbidden],
+    ] },
+    SRXOFTNative: { key: "SRX_OFT_NATIVE", artifact: "SRXOFTNative", roles: [
+      ["DEFAULT_ADMIN_ROLE", [admin],    baseForbidden],
+    ], owner: "admin" },
+  };
+  const declaredNone = [];
+  for (const [name, spec] of Object.entries(optional)) {
+    const d = declared(spec.key);
+    if (d.state === "undeclared") {
+      failures++;
+      console.log(`❌ ${name}: not declared — set ${spec.key}_${NET} to its address, or to "none" if this network has none`);
+    } else if (d.state === "none") {
+      declaredNone.push(name);
+    } else {
+      contracts[name] = { addr: d.addr, artifact: spec.artifact, owner: spec.owner };
+      expectations[name] = spec.roles;
+    }
+  }
+
+  // ── Contracts whose admin is fixed at deployment (immutable admin()) ───────
+  // Not roles: an address written into the contract that can never change. It
+  // must never be the deployer key.
+  // ⭐ LAUNCH VAULTS: THE ADMIN MUST BE THE TIMELOCK (Jared, 30 Sep 2026). A
+  //    VestingVault's admin can revoke() it at any moment and send the whole
+  //    unvested remainder to ANY address. With the Safe as admin that was an
+  //    instant power over every locked launch allocation — the "locked 12 months"
+  //    liquidity reserve included. Anything but the Timelock is a failure.
+  //    (Presale buyer vaults are admin'd by PreSaleRound — disclosed, SC-TRUST-004.)
+  const fixedAdmin = [];
+  const tgeDist = declared("TGE_DISTRIBUTOR");
+  if (tgeDist.state === "address") fixedAdmin.push({ name: "TGEDistributor", addr: tgeDist.addr, revokes: false });
+  else if (tgeDist.state === "undeclared") { failures++; console.log(`❌ TGEDistributor: not declared (TGE_DISTRIBUTOR_${NET})`); }
+  const presale = declared("PRESALE_ROUND");
+  // PreSaleRound's Safe admin (incl. revokeVault) is disclosed trust, SC-TRUST-004.
+  if (presale.state === "address") fixedAdmin.push({ name: "PreSaleRound", addr: presale.addr, revokes: false });
+  else if (presale.state === "undeclared") { failures++; console.log(`❌ PreSaleRound: not declared (PRESALE_ROUND_${NET}, or "none")`); }
+  for (const row of TGE_PLAN.filter((r) => r.kind === "vault")) {
+    const v = declared(row.vaultEnv);
+    if (v.state === "address") fixedAdmin.push({ name: `VestingVault ${row.label}`, addr: v.addr, mustBe: timelock });
+    else { failures++; console.log(`❌ VestingVault ${row.label}: not declared (${row.vaultEnv}_${NET})`); }
+  }
+
+  // ── The deployer, pinned on a real network ─────────────────────────────────
+  // On a real network the deployer comes from the reviewed manifest, not only from
+  // an env var: deploy/addresses.<net>.json roles.deployer must exist and agree.
+  if (!TESTNET_CHAINS.has(network.name)) {
+    const mf = path.join(__dirname, "..", "..", "deploy", `addresses.${network.name}.json`);
+    const pinned = fs.existsSync(mf) ? JSON.parse(fs.readFileSync(mf, "utf8"))?.roles?.deployer : null;
+    if (!pinned || pinned === ZERO) {
+      failures++;
+      console.log(`❌ deploy/addresses.${network.name}.json has no roles.deployer — the deployer must be pinned in the reviewed manifest`);
+    } else if (ethers.getAddress(pinned) !== deployerAddr) {
+      failures++;
+      console.log(`❌ DEPLOYER_EOA ${deployerAddr} disagrees with the manifest's roles.deployer ${ethers.getAddress(pinned)}`);
+    }
+  }
 
   console.log(`\n🔐 SRX role-topology verification — network: ${network.name}`);
   console.log(`   deployer EOA (must hold NO roles): ${deployerAddr}`);
   console.log(`   admin Safe:    ${admin}`);
   console.log(`   timelock:      ${timelock}`);
   console.log(`   guardianModule:${guardianM}\n`);
-
-  let failures = 0;
-  let checks = 0;
-  let skipped = 0;
 
   for (const [name, meta] of Object.entries(contracts)) {
     const c = await ethers.getContractAt(meta.artifact, meta.addr);
@@ -219,8 +352,140 @@ async function main() {
         }
       }
     }
+    if (meta.owner) {
+      // ⛔ SPOKE-01 closed (disclosure A, 7 Oct 2026): a spoke's owner() is its OWN
+      //    Timelock, never the Safe. This used to REQUIRE the Safe. The full spoke check
+      //    (delegate, delay, proposer, the fixed hub peer) is scripts/verify/verify_spoke.js.
+      checks++;
+      const owner = ethers.getAddress(await c.owner());
+      const spokeTl = process.env[`SPOKE_TIMELOCK_${NET}`];
+      if (spokeTl && owner === ethers.getAddress(spokeTl)) console.log(`   ✅ owner() is the spoke Timelock`);
+      else { failures++; console.log(`   ❌ owner() is ${owner}, expected the spoke Timelock (SPOKE_TIMELOCK_${NET}); run 07 HANDOVER and FINALIZE`); }
+    }
     console.log("");
   }
+
+  // ── The Timelock's delay, and roles that administer themselves ─────────────
+  // ⛔ Internal review, 7 Oct 2026: the gate checked who HOLDS each role, but not
+  //    the Timelock's delay (the "48 hours, no bypass" claim) or that upgrade and
+  //    spending rights administer themselves (SC-TRUST-001 in code). Both are now
+  //    gated, so a deployment that drifted from either fails here.
+  {
+    const required = BigInt(GOVERNANCE.timelockDelayFor(network.name));
+    const tl = new ethers.Contract(timelock, [
+      "function getMinDelay() view returns (uint256)",
+      "function minDelayFloor() view returns (uint256)",
+    ], ethers.provider);
+    const delay = await tl.getMinDelay();
+    let floor = 0n;
+    try { floor = await tl.minDelayFloor(); } catch { /* an older Timelock has no floor */ }
+    checks++;
+    if (delay < required) { failures++; console.log(`❌ SRXTimelock delay ${delay}s is below the required ${required}s`); }
+    else console.log(`✅ SRXTimelock delay ${delay}s (required ${required}s)`);
+    checks++;
+    if (floor < required) { failures++; console.log(`❌ SRXTimelock floor ${floor}s is below ${required}s: a proposal could lower the delay`); }
+    else console.log(`✅ SRXTimelock floor ${floor}s: the delay cannot be lowered below it`);
+
+    const selfAdministered = [
+      ["SRXTreasury", "SPENDER_ROLE"],
+    ];
+    for (const [name, roleName] of selfAdministered) {
+      const c = new ethers.Contract(contracts[name].addr, ["function getRoleAdmin(bytes32) view returns (bytes32)"], ethers.provider);
+      const role = ethers.id(roleName);
+      checks++;
+      if ((await c.getRoleAdmin(role)) === role) console.log(`✅ ${name}: ${roleName} administers itself (DEFAULT_ADMIN cannot grant it)`);
+      else { failures++; console.log(`❌ ${name}: ${roleName} is administered by another role, so its holder can hand it out`); }
+    }
+    console.log("");
+  }
+
+  // ── REG-53: the staking and fee-path contracts are not proxies ─────────────
+  {
+    const { upgrades } = require("hardhat");
+    for (const name of ["SRXTreasury", "SRXStaking", "FeeController", "StabilisationFund"]) {
+      const addr = contracts[name].addr;
+      checks++;
+      let impl = null;
+      try { impl = await upgrades.erc1967.getImplementationAddress(addr); } catch { /* not a proxy: expected */ }
+      if (impl && BigInt(impl) !== 0n) { failures++; console.log(`❌ ${name}: is an EIP-1967 proxy (implementation ${impl}); REG-53 requires a plain contract`); continue; }
+      let answers = false;
+      try { await new ethers.Contract(addr, ["function proxiableUUID() view returns (bytes32)"], ethers.provider).proxiableUUID(); answers = true; } catch { /* expected */ }
+      if (answers) { failures++; console.log(`❌ ${name}: answers proxiableUUID() — it can be upgraded`); continue; }
+      console.log(`✅ ${name}: not a proxy and not upgradeable (REG-53)`);
+    }
+    console.log("");
+  }
+
+  // ── Security ruling, 12 Oct 2026: a token pause never blocks an exit ───────
+  // ⛔ Unlisted, a token pause would block exit-only withdrawals again: the exemption
+  //    is opt-in on the token. The guardian's sunset is bounded in its constructor.
+  {
+    const token = await ethers.getContractAt("SRXToken", srxToken);
+    for (const name of ["SRXStaking", "StabilisationFund"]) {
+      checks++;
+      if (await token.isWindDownExit(contracts[name].addr)) console.log(`✅ SRXToken lists ${name} as a wind-down exit`);
+      else { failures++; console.log(`❌ SRXToken does not list ${name} as a wind-down exit: a token pause would block its exit-only withdrawals`); }
+    }
+    checks++;
+    const gm = await ethers.getContractAt("GuardianModule", guardianM);
+    const life = (await gm.MAXIMUM_SUNSET()) - BigInt((await ethers.provider.getBlock("latest")).timestamp);
+    if (life <= await gm.MAX_SUNSET_DURATION()) console.log("✅ GuardianModule: sunset within the 180-day cap");
+    else { failures++; console.log(`❌ GuardianModule: MAXIMUM_SUNSET is ${life}s away, beyond the 180-day cap`); }
+    console.log("");
+  }
+
+  // ── GuardianModule registry and bridge breaker (internal audit 16 Oct 2026, CONTROL-10) ──
+  // ⛔ The roles above can all be right while a module was never registered, was registered
+  //    to the wrong contract, or the bridge breaker was never configured (reports then do
+  //    nothing, so it can never trip). Each is a failure.
+  {
+    const gm = await ethers.getContractAt("GuardianModule", guardianM);
+    const wiring = await checkGuardianWiring({ guardian: gm, expected: {
+      token: srxToken, staking: contracts.SRXStaking.addr, fee: contracts.FeeController.addr,
+      treasury: contracts.SRXTreasury.addr, ssf: contracts.StabilisationFund.addr,
+    } });
+    checks++;
+    if (wiring.length === 0) console.log("✅ GuardianModule: all six modules registered to the right contracts, bridge circuit breaker configured");
+    for (const f of wiring) { failures++; console.log(`❌ ${f}`); }
+    console.log("");
+  }
+
+  // ── Pending Timelock operations (internal audit 16 Oct 2026, CONTROL-05) ───
+  // ⛔ hasRole() cannot see an operation the Safe scheduled while it was a temporary
+  //    PROPOSER: it stays executable by anyone once the Safe is revoked. Read the
+  //    Timelock's own events from its deployment block. No start block means the check
+  //    cannot look, and that is a failure, never a skip.
+  {
+    let allowList = [];
+    let listError = null;
+    try { allowList = parseOpList(process.env[`TIMELOCK_ALLOWED_OPS_${NET}`] || process.env.TIMELOCK_ALLOWED_OPS); }
+    catch (e) { listError = e.message; }
+    checks++;
+    if (listError) { failures++; console.log(`❌ TIMELOCK_ALLOWED_OPS_${NET} is malformed: ${listError}`); }
+    else {
+      const tlc = await ethers.getContractAt("SRXTimelock", timelock);
+      const fromBlock = parseBlock(process.env[`TIMELOCK_DEPLOY_BLOCK_${NET}`] || process.env.TIMELOCK_DEPLOY_BLOCK);
+      const pendingOps = await checkNoPendingTimelockOps({ timelock: tlc, fromBlock, allowList });
+      if (pendingOps.length === 0) console.log(`✅ Timelock: no scheduled operation is still pending (read from block ${fromBlock}; ${allowList.length} allow-listed)`);
+      for (const f of pendingOps) { failures++; console.log(`❌ ${f}`); }
+    }
+    console.log("");
+  }
+
+  // ── Immutable admin() ──────────────────────────────────────────────────────
+  for (const f of fixedAdmin) {
+    const c = new ethers.Contract(f.addr, ["function admin() view returns (address)"], ethers.provider);
+    let a;
+    try { a = ethers.getAddress(await c.admin()); } catch { failures++; console.log(`❌ ${f.name} @ ${f.addr}: admin() did not answer`); continue; }
+    checks++;
+    if (a === deployerAddr) { failures++; console.log(`❌ ${f.name}: admin() is the deployer key ${a}`); continue; }
+    console.log(`✅ ${f.name}: admin() is not the deployer (${a === admin ? "the admin Safe" : a === timelock ? "the Timelock" : a})`);
+    if (f.mustBe && a !== f.mustBe) {
+      failures++;
+      console.log(`❌ ${f.name}: admin() must be the Timelock ${f.mustBe} — whoever holds it can revoke() the vault and send its locked SRX anywhere`);
+    }
+  }
+  if (fixedAdmin.length) console.log("");
 
   // ── Bridge authority (N-02): the OApp owner and the LayerZero delegate ─────
   // They control peers, enforced options, the message inspector and the DVN /
@@ -239,6 +504,23 @@ async function main() {
     checks++;
     if (delegate === timelock) console.log(`✅ LayerZero delegate is the Timelock`);
     else { failures++; console.log(`❌ LayerZero delegate is ${delegate}, expected the Timelock ${timelock}`); }
+
+    // Every chain the hub has a peer on: its DVN configuration (lib/dvnCheck.js).
+    const local = network.name === "hardhat" || network.name === "localhost";
+    const lz = new ethers.Contract(await token.endpoint(), ENDPOINT_ABI, ethers.provider);
+    for (const [name, eid] of Object.entries(LZ_EIDS)) {
+      if ((await token.peers(eid)) === ethers.ZeroHash) continue;
+      checks++;
+      let dvn;
+      try { dvn = await checkDvnConfig({ endpoint: lz, oapp: srxToken, remoteEid: eid, label: `hub <-> ${name}` }); }
+      catch (e) {
+        if (local) { skipped++; advisories.push(`DVN configuration for ${name} not checked: the local endpoint is a mock.`); continue; }
+        failures++; console.log(`❌ hub <-> ${name}: the endpoint did not answer the DVN configuration read (${e.shortMessage || e.message})`); continue;
+      }
+      dvn.push(...await checkEnforcedOptions({ oapp: token, remoteEid: eid, label: `hub -> ${name}` }));
+      if (dvn.length === 0) console.log(`✅ hub <-> ${name}: own libraries, at least 2 DVNs each way, delivery gas enforced`);
+      for (const f of dvn) { failures++; console.log(`❌ ${f}`); }
+    }
     console.log("");
   }
 
@@ -250,7 +532,9 @@ async function main() {
 
   console.log("──────────────────────────────────────────────");
   console.log(`Checks run: ${checks} | Failures: ${failures} | Skipped: ${skipped}`);
-  console.log(`Contracts NOT covered by this gate (${UNCOVERED.length}): ${UNCOVERED.join(", ")}`);
+  console.log(`Role-checked: ${Object.keys(contracts).join(", ")}`);
+  console.log(`Fixed admin checked: ${fixedAdmin.map((f) => f.name).join(", ") || "none"}`);
+  if (declaredNone.length) console.log(`Declared "none" on ${network.name}: ${declaredNone.join(", ")}`);
 
   if (advisories.length) {
     console.log("\n⚠️  This run was INCOMPLETE:");
@@ -272,7 +556,7 @@ async function main() {
   }
 
   console.log("\n✅ ALL CHECKS PASSED — role topology matches the intended end state.");
-  console.log(`   (Coverage is ${Object.keys(contracts).length} contracts; the ${UNCOVERED.length} listed above are out of scope for this gate.)`);
+  console.log(`   (${Object.keys(contracts).length} role-checked contracts, ${fixedAdmin.length} fixed-admin contracts, ${declaredNone.length} declared absent.)`);
 }
 
 main().catch((err) => {
