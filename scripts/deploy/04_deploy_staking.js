@@ -1,14 +1,18 @@
 /**
- * Step 4 — Deploy SRXStaking + FeeController (UUPS proxies)
+ * Step 4 — Deploy SRXStaking + FeeController
  *
- * Both contracts are UUPS upgradeable. This script deploys their
- * implementation contracts and ERC1967 proxy wrappers, then initializes them.
+ * Both are PLAIN contracts: not upgradeable, no proxy and no initializer (REG-53). Each is
+ * deployed once and its constructor sets everything; its code can never change. verify_roles.js
+ * fails a deployment where either is an EIP-1967 proxy or answers proxiableUUID().
+ *
+ * ⛔ SRXStaking fixes TGE_DISTRIBUTOR_<NETWORK> (Step 3) immutably (REG-50, E-01). If Step 3 is
+ * ever re-run, this step must be re-run against the new distributor, or 06 refuses to launch.
  *
  * Prerequisites: SRXToken deployed (Step 1).
  *
  * Run: npx hardhat run scripts/deploy/04_deploy_staking.js --network sepolia
  */
-const { ethers, upgrades, network } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { WALLETS } = require("./00_config");
 
 async function main() {
@@ -26,21 +30,21 @@ async function main() {
 
   // ── Deploy SRXStaking ────────────────────────────────────────────────────────
 
-  console.log("\nDeploying SRXStaking (UUPS proxy)...");
+  console.log("\nDeploying SRXStaking...");
   const SRXStaking = await ethers.getContractFactory("SRXStaking");
-  const stakingProxy = await SRXStaking.deploy(...[srxToken, admin, tgeDistributor]);
-  await stakingProxy.waitForDeployment();
-  const stakingAddress = await stakingProxy.getAddress();
-  console.log(`SRXStaking proxy: ${stakingAddress}`);
+  const staking = await SRXStaking.deploy(...[srxToken, admin, tgeDistributor]);
+  await staking.waitForDeployment();
+  const stakingAddress = await staking.getAddress();
+  console.log(`SRXStaking: ${stakingAddress}`);
 
   // ── Deploy FeeController ─────────────────────────────────────────────────────
 
-  console.log("\nDeploying FeeController (UUPS proxy)...");
+  console.log("\nDeploying FeeController...");
   const FeeController = await ethers.getContractFactory("FeeController");
-  const feeProxy = await FeeController.deploy(...[stakingAddress, admin]);
-  await feeProxy.waitForDeployment();
-  const feeAddress = await feeProxy.getAddress();
-  console.log(`FeeController proxy: ${feeAddress}`);
+  const fee = await FeeController.deploy(...[stakingAddress, admin]);
+  await fee.waitForDeployment();
+  const feeAddress = await fee.getAddress();
+  console.log(`FeeController: ${feeAddress}`);
 
   console.log(`\n✅ Staking + FeeController deployed`);
   console.log(`\n⚠️  Save to .env:`);

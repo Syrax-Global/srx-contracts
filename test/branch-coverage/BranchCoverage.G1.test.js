@@ -215,13 +215,16 @@ describe("BranchCoverage G1 — PreSaleRound", function () {
       expect(await r.getInvestorList()).to.deep.equal([i1.address, i2.address]);
     });
 
-    it("removeInvestor: only admin, only before finalize, and a stranger with no allocation is NoAllocation (line 537 + 579)", async function () {
+    it("removeInvestor: only admin, open after finalize, and a stranger with no allocation is NoAllocation (line 537 + 579)", async function () {
       const { r, admin, i1, other } = await setup();
       await r.connect(admin).addInvestor(i1.address, usd(10_000));
       await expect(r.connect(other).removeInvestor(i1.address)).to.be.revertedWithCustomError(r, "OnlyAdmin");
       await expect(r.connect(admin).removeInvestor(other.address)).to.be.revertedWithCustomError(r, "NoAllocation");
       await r.connect(admin).finalize();
-      await expect(r.connect(admin).removeInvestor(i1.address)).to.be.revertedWithCustomError(r, "RoundFinalized");
+      // review round 22 Oct (C6): removeInvestor is no longer closed by finalize(), so a wire buyer who fails KYC late can be removed (an on-chain payer still cannot, a deployed vault still blocks)
+      await r.connect(admin).removeInvestor(i1.address);
+      expect(await r.investorCount()).to.equal(0n);
+      await expect(r.connect(admin).removeInvestor(i1.address)).to.be.revertedWithCustomError(r, "NoAllocation");
     });
 
     it("an investor with a deployed vault cannot be removed: VaultAlreadyDeployed (line 580)", async function () {
@@ -264,12 +267,12 @@ describe("BranchCoverage G1 — PreSaleRound", function () {
 
         // the payer gets it back, once
         if (asset === ZERO) {
-          await expect(s.r.connect(s.i1).claimRefund(asset)).to.changeEtherBalances([s.r, s.i1], [-paid, paid]);
+          await expect(s.r.connect(s.i1).claimRefund(asset, s.i1.address)).to.changeEtherBalances([s.r, s.i1], [-paid, paid]);
         } else {
           const t = await ethers.getContractAt("MockERC20", asset);
-          await expect(s.r.connect(s.i1).claimRefund(asset)).to.changeTokenBalances(t, [s.r, s.i1], [-paid, paid]);
+          await expect(s.r.connect(s.i1).claimRefund(asset, s.i1.address)).to.changeTokenBalances(t, [s.r, s.i1], [-paid, paid]);
         }
-        await expect(s.r.connect(s.i1).claimRefund(asset)).to.be.revertedWithCustomError(s.r, "ZeroAmount");
+        await expect(s.r.connect(s.i1).claimRefund(asset, s.i1.address)).to.be.revertedWithCustomError(s.r, "ZeroAmount");
       });
     }
 
@@ -688,7 +691,7 @@ describe("BranchCoverage G1 — PreSaleRound", function () {
       expect(await s.r.currentBtcPrice()).to.equal(BTC_PRICE);
       expect(await s.r.quoteETH(E(1), s.i1.address)).to.equal(srxFor(2_500));
       expect(await s.r.quoteWBTC(10n ** 8n, s.i1.address)).to.equal(srxFor(60_000));
-      expect(await s.r.quoteStable(U6(10_000), s.i1.address)).to.equal(srxFor(10_000));
+      expect(await s.r.quoteStable(s.usdc.target, U6(10_000), s.i1.address)).to.equal(srxFor(10_000));
     });
   });
 });

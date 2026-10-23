@@ -424,7 +424,30 @@ const BRIDGE = {
   },
 };
 
+// ── Launch reward rates (Security ruling, 23 Oct 2026) ─────────────────────────
+// After the role hand-over a rate change is a governance vote, and governance can pass nothing
+// until holders have delegated 400M SRX (launch delegation, option 1). So the launch rates are
+// set ONCE, in the 06 Safe batch, from this published plan; every later change is a vote. The
+// signed-off manifest (deploy/addresses.<network>.json, rewardRates) must state the same values,
+// byte for byte, or 06 refuses to run. Units: SRX wei per second.
+//   staking: 13.5 SRX/s, about 4 years for the 1.7B allocation (the published schedule).
+//   stabilisationFund: ⛔ null until Jared confirms the fund's rate in writing; 06 then leaves
+//   it unset and says so (the fund pays nothing until a rate is set).
+// A rate cannot promise more than the funded pool: setRewardRate ends the period when the pool
+// runs out (_recomputePeriodFinish, SC-ECON-001), so a wrong number only shortens the period.
+const REWARD_RATES = {
+  staking:           { testnet: parseUnits("13.5", 18), mainnet: parseUnits("13.5", 18) },
+  stabilisationFund: { testnet: null, mainnet: null },
+};
+
+/** The launch reward rates for a network ({ staking, stabilisationFund }, bigint or null). */
+function rewardRatesFor(networkName = currentNetwork()) {
+  const key = TESTNET_CHAINS.has(networkName) ? "testnet" : "mainnet";
+  return { staking: REWARD_RATES.staking[key], stabilisationFund: REWARD_RATES.stabilisationFund[key] };
+}
+
 module.exports = {
+  REWARD_RATES, rewardRatesFor,
   LZ_ENDPOINTS, LZ_EIDS, WALLETS, ALLOCATIONS, VESTING, GOVERNANCE, SSF, ssfRewardAllocation, BRIDGE,
   TESTNET_CHAINS, TESTNET_WALLET_DEFAULTS, WALLET_ENV, walletFor, currentNetwork, NEVER_ON_MAINNET,
   TGE_PLAN, launchFloat, vestedByDay,

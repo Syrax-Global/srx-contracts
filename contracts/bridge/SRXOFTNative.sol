@@ -26,9 +26,10 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
  * (outstandingByEid) and within its per-chain inbound limit, which the guardian
  * can freeze (SRXToken).
  *
- * For zkSync specifically, this contract serves as the placeholder token until
- * the Syrax Chain launches and SRX is migrated to a native gas token via
- * ZkSyncMigrator. At that point this contract will be deprecated.
+ * On ZKsync Era this contract is the spoke token. A holder who wants SRX on Syrax
+ * Chain returns it to the Ethereum hub over the OFT bridge and then deposits it
+ * through the Syrax Chain's own bridge (CH-13, 22 Oct 2026); there is no migrator
+ * contract (ZkSyncMigrator is retired and not deployed).
  *
  * Governance note: Voting power is NOT tracked on remote chains. All governance
  * participation happens on Ethereum where full supply accountability is maintained.
@@ -105,6 +106,7 @@ contract SRXOFTNative is HubPeer, OFT, Ownable2Step, AccessControl, Pausable {
     uint256 public constant MAX_SUPPLY = 10_000_000_000 * 10 ** 18; // 10 billion SRX
 
     error OwnershipCannotBeRenounced();
+    error ETHRescueFailed();
 
     // ── Bridge ownership (N-02) ─────────────────────────────────────────────────
     //
@@ -164,8 +166,7 @@ contract SRXOFTNative is HubPeer, OFT, Ownable2Step, AccessControl, Pausable {
      *         Calling this reduces supply on this chain without minting on Ethereum.
      *         Note: SRX burned here was sent out from the hub, so the hub still counts
      *         it as outstanding (outstandingByEid) and totalBurned on the hub does not
-     *         change; only the hub's own buyAndBurn and ZkSyncMigrator.migrate add to
-     *         the hub's totalBurned.
+     *         change; only the hub's own buyAndBurn adds to the hub's totalBurned.
      *
      *         Burns only from msg.sender's own balance — BURN_ROLE holders cannot burn
      *         tokens from arbitrary third-party wallets (A3-H-02 fix, mirrors A2-H-01
@@ -185,7 +186,7 @@ contract SRXOFTNative is HubPeer, OFT, Ownable2Step, AccessControl, Pausable {
     /**
      * @notice Recover tokens held at this contract's own address, through governance.
      * @dev ⛔ SRX sent here, by a bridge arrival addressed to this contract, could never
-     *      leave: the spoke had no rescue, unlike SRXToken, ZkSyncMigrator and
+     *      leave: the spoke had no rescue, unlike SRXToken and
      *      BuybackBurner. Ordinary transfers to this address are now refused in _update;
      *      a bridge arrival is still accepted (reverting in _credit would strand the
      *      LayerZero message and leave the SRX locked on the hub), and this recovers it.
@@ -205,7 +206,7 @@ contract SRXOFTNative is HubPeer, OFT, Ownable2Step, AccessControl, Pausable {
             // with a bridge delivery (lzReceive is payable) had no way out. token == 0 is ETH.
             // slither-disable-next-line arbitrary-send-eth -- reviewed 22 Oct 2026: onlyOwner (this chain's Timelock, 48 h) only; moves only ETH stranded at this contract, which holds none for anyone
             (bool ok, ) = to.call{value: amount}("");
-            if (!ok) revert ZeroAmount();
+            if (!ok) revert ETHRescueFailed(); // review round 22 Oct: was ZeroAmount
         } else {
             IERC20(token).safeTransfer(to, amount);
         }

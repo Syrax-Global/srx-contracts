@@ -44,8 +44,12 @@
  *  FEE_CONTROLLER_<NETWORK>     — from Step 4
  *  TREASURY_<NETWORK>           — from Step 5
  *  STABILISATION_FUND_<NETWORK> — from Step 5b  ← NEW
- *  GUARDIAN_MULTISIG            — Gnosis Safe holding GUARDIAN_ROLE
- *  CIRCUIT_BREAKER_ADDRESS      — Off-chain monitor wallet or contract
+ *  PAUSE_GUARDIAN               — GuardianModule's GUARDIAN_ROLE holder: the emergency pause, which
+ *                                 is the admin Safe (MULTISIG_SPEC). ⛔ NOT GUARDIAN_MULTISIG: that name
+ *                                 is retired (E-06) because verify_roles used it for a different role,
+ *                                 the StabilisationFund's GUARDIAN_ROLE (now SSF_GUARDIAN_MULTISIG)
+ *  CIRCUIT_BREAKER_ADDRESS      — Off-chain monitor wallet or contract: the CIRCUIT_BREAKER_ROLE holder.
+ *                                 REQUIRED, no default (E-04): the gate requires it to hold the role
  *  GUARDIAN_SUNSET_DAYS         — (optional) defaults to 180 days, the most the contract
  *                                 accepts (MAX_SUNSET_DURATION)
  *
@@ -56,6 +60,7 @@ const { ethers, network } = require("hardhat");
 const readline             = require("readline");
 const { WALLETS, BRIDGE, TESTNET_CHAINS } = require("./00_config");
 const { createAdminBatch } = require("./lib/adminTx");
+const { retiredGuardianVariable, retiredGuardianMessage, requireAddressEnv } = require("./lib/launch_order");
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -94,8 +99,15 @@ async function main() {
   const feeControllerAddr  = env(`FEE_CONTROLLER_${NET}`);
   const treasuryAddr       = env(`TREASURY_${NET}`);
   const ssfAddr            = env(`STABILISATION_FUND_${NET}`);
-  const guardianMultisig   = process.env.GUARDIAN_MULTISIG   || WALLETS.admin;
-  const circuitBreakerAddr = process.env.CIRCUIT_BREAKER_ADDRESS || WALLETS.admin;
+  const retired = retiredGuardianVariable(process.env, network.name);
+  if (retired) throw new Error(retiredGuardianMessage(retired) + " Nothing was deployed.");
+  // ⛔ E-04: both are STATED, never defaulted to the admin Safe (on any network).
+  const guardianMultisig   = requireAddressEnv("PAUSE_GUARDIAN", { what: "GuardianModule's GUARDIAN_ROLE holder: the emergency pause, which is the admin Safe" });
+  const circuitBreakerAddr = requireAddressEnv("CIRCUIT_BREAKER_ADDRESS", { what: "the CIRCUIT_BREAKER_ROLE holder: the monitor that reports bridge volume (scripts/ops/circuit_breaker_monitor.js)" });
+  if (guardianMultisig !== ethers.getAddress(WALLETS.admin)) {
+    console.warn(`⚠️  PAUSE_GUARDIAN (${guardianMultisig}) is not the admin Safe (${WALLETS.admin}). MULTISIG_SPEC makes the Safe the emergency pause, ` +
+      "and verify_roles.js FAILS unless the Safe holds GuardianModule GUARDIAN_ROLE.");
+  }
 
   const sunsetDays    = parseInt(process.env.GUARDIAN_SUNSET_DAYS || "180", 10);
   const sunsetSeconds = sunsetDays * 86400;
@@ -109,7 +121,7 @@ async function main() {
   console.log(`  FeeController:        ${feeControllerAddr}`);
   console.log(`  SRXTreasury:          ${treasuryAddr}`);
   console.log(`  StabilisationFund:    ${ssfAddr}`);
-  console.log(`  Guardian multisig:    ${guardianMultisig}`);
+  console.log(`  Pause guardian:       ${guardianMultisig}`);
   console.log(`  Circuit breaker:      ${circuitBreakerAddr}`);
   console.log(`  Sunset duration:      ${sunsetDays} days (${sunsetSeconds} seconds)\n`);
 
@@ -274,7 +286,7 @@ async function main() {
   console.log(`${"─".repeat(60)}`);
 
   console.log(`\n📋 Save to .env:`);
-  console.log(`GUARDIAN_${NET}=${guardianAddr}`);
+  console.log(`GUARDIAN_MODULE_${NET}=${guardianAddr}`);
 
   console.log(`\n📋 Post-deployment checklist:`);
   console.log(`  [ ] Verify GuardianModule on explorer`);

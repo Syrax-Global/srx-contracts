@@ -24,7 +24,7 @@ Secondary: Tenderly for simulation and deeper transaction analysis.
 
 ## Monitored Contracts
 
-All 16 contracts in the SRX token suite (15 in the audit scope, plus `GenesisAgreementRegistry`).
+All 15 contracts in the SRX token suite (14 in the audit scope, plus `GenesisAgreementRegistry`; `ZkSyncMigrator` is retired and not deployed, CH-13).
 Launch protection lives inside `SRXToken`, and there is no separate bridge adapter: the hub
 side of the bridge is `SRXToken` itself. Priority order:
 
@@ -42,8 +42,7 @@ side of the bridge is `SRXToken` itself. Priority order:
 12. `SRXTimelock` — scheduled and executed operations, role changes
 13. `SRXGovernor` — proposals and votes
 14. `TGEDistributor` — the one-shot distribution
-15. `ZkSyncMigrator` — migration requests
-16. `GenesisAgreementRegistry` — agreements recorded
+15. `GenesisAgreementRegistry` — agreements recorded
 
 ---
 
@@ -137,7 +136,7 @@ Sentinel 4: Bridge — Peer and Message Monitoring
   Alert channel: PagerDuty CRITICAL
 
 Sentinel 5: All Contracts — Role Changes
-  Contracts: All 16
+  Contracts: All 15
   Events: RoleGranted, RoleRevoked
   Alert channel: PagerDuty CRITICAL
 ```

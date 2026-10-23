@@ -17,7 +17,14 @@ import { ISRXBurnable } from "../token/ISRXBurnable.sol";
 
 /**
  * @title ZkSyncMigrator
- * @notice Strategy A — Burn-to-Migrate for the Syrax Chain (zkSync-based) transition.
+ * @notice RETIRED (CH-13, 22 Oct 2026): not deployed; kept as history. SRX moves onto
+ * Syrax Chain through the chain's own bridge: a holder signs one deposit, the SRX is
+ * locked 1:1 in the Ethereum vault and appears on Syrax Chain, withdrawable back at
+ * any time. Holders on BNB Chain or ZKsync Era first return to the Ethereum hub over
+ * the existing OFT bridge. The text below describes the superseded burn-and-claim
+ * design and is not the plan.
+ *
+ * Strategy A — Burn-to-Migrate for the Syrax Chain (zkSync-based) transition.
  *
  * When the Syrax Chain launches, SRX transitions from an OFT bridged token to the
  * native gas/staking/governance asset of the new chain. This contract facilitates

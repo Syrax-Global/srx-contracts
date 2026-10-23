@@ -16,17 +16,21 @@
  *    nothing: it is a finding to resolve, not something to paper over.
  *
  * Both calls are the Genesis contract's admin's (the admin Safe). A Safe batch is ONE
- * transaction, and each vault is a contract creation, so each run queues at most
- * GENESIS_VAULT_CHUNK buyers (default 20). Re-run after the Safe executes each batch
+ * transaction, and each vault is a contract creation (about 961,000 gas per buyer for the
+ * deploy and the trigger; Ethereum caps one transaction at 16,777,216 gas), so each run queues
+ * at most GENESIS_VAULT_CHUNK buyers (default 12, about 11.5M gas). The script estimates every
+ * chunk first and refuses one above 15,000,000 gas (C5). Re-run after the Safe executes each batch
  * until it reports every vault created and running. Re-running is always safe: the
  * contract skips vaults already created or already started.
  *
  * Run: npx hardhat run scripts/deploy/06b_genesis_vaults.js --network sepolia
  */
 const { ethers, network } = require("hardhat");
-const { VESTING } = require("./00_config");
+const { VESTING, WALLETS } = require("./00_config");
 const { createAdminBatch } = require("./lib/adminTx");
 const { readGenesisSold } = require("./lib/genesis_seed");
+const { checkRevokeRecipients } = require("./lib/gate_checks");
+const { chunkFromEnv, estimateChunkGas, assertChunkWithinLimit, TX_GAS_CAP, CHUNK_GAS_LIMIT } = require("./lib/genesis_chunk");
 
 function env(key) {
   const val = process.env[key];
@@ -78,8 +82,7 @@ async function main() {
       throw new Error(`maxWalletBalance is already set (${ethers.formatUnits(cap, 18)} SRX): creating a vault above it would revert (PSR-09). Create the Genesis vaults before the limit is switched on. Nothing was sent.`);
     }
 
-    const chunk = Number(process.env.GENESIS_VAULT_CHUNK || 20);
-    if (!Number.isInteger(chunk) || chunk < 1) throw new Error("GENESIS_VAULT_CHUNK must be a whole number of at least 1");
+    const chunk = chunkFromEnv();
     const batch = createAdminBatch("06b_genesis_vaults");
     const adminExecuting = await batch.isAdmin();
 
@@ -87,6 +90,11 @@ async function main() {
     let next = todo[0];
     do {
       const end = Math.min(next + chunk, investors.length);
+      // C5: one Safe transaction creates AND starts these vaults (about 961,000 gas a buyer), and Ethereum
+      // caps a transaction at 16,777,216. Refuse a chunk that could not be mined, before queuing it.
+      const est = await estimateChunkGas({ round, from: WALLETS.admin, start: next, end });
+      console.log(`  chunk ${next}–${end - 1}: ${end - next} buyers, estimated ${est.gas} gas (model ${est.model}${est.node ? `, node ${est.node}` : `, node estimate unavailable: ${est.nodeError}`}); limit ${CHUNK_GAS_LIMIT} of the ${TX_GAS_CAP} a transaction may use`);
+      assertChunkWithinLimit({ chunk: end - next, gas: est.gas });
       await batch.send(round, "batchDeployVaults", [next, end], `Genesis: create buyers' vaults ${next}–${end - 1}`);
       await batch.send(round, "batchTriggerTGE", [next, end], `Genesis: start the clock on vaults ${next}–${end - 1}`);
       next = end;
@@ -122,6 +130,15 @@ async function main() {
   const left = await token.balanceOf(genesis.address);
   if (left !== 0n) failures.push(`the Genesis contract still holds ${ethers.formatUnits(left, 18)} SRX`);
   if (inVaults !== genesis.sold) failures.push(`buyers' vaults hold ${ethers.formatUnits(inVaults, 18)} SRX, the round sold ${ethers.formatUnits(genesis.sold, 18)}`);
+
+  // E-02: the Genesis contract and every buyer's vault send revoked SRX to the SRXTreasury contract.
+  {
+    const r = await checkRevokeRecipients({
+      provider: ethers.provider, treasury: env(`TREASURY_${NET}`), tokenAddress: tokenAddr, genesisRound: genesis.address,
+    });
+    failures.push(...r.failures);
+    if (r.failures.length === 0) console.log(`✅ revoke recipient: the Genesis contract and all ${investors.length} buyer vaults name the SRXTreasury (${r.checked} checks)`);
+  }
 
   if (failures.length) {
     for (const f of failures) console.error(`❌ ${f}`);

@@ -48,37 +48,14 @@ const { LZ_ENDPOINTS, LZ_EIDS, WALLETS, GOVERNANCE, BRIDGE } = require("./00_con
 const { createAdminBatch } = require("./lib/adminTx");
 const { deploySpokeTimelock, handoverSpoke, finalizeSpoke } = require("./lib/spokeOps");
 const { lzReceiveOption } = require("./lib/dvnCheck");
+const { environmentOf } = require("./lib/bridgeEnv");
 
 function addressToBytes32(addr) {
   return ethers.zeroPadValue(addr, 32);
 }
 
-// One hub per environment. A network belongs to exactly one environment.
-const ENVIRONMENTS = {
-  testnet: {
-    hub:    { network: "sepolia",  env: "SRX_TOKEN_SEPOLIA",  eid: LZ_EIDS.sepolia },
-    spokes: [
-      { network: "bscTestnet",    env: "SRX_OFT_NATIVE_BSCTESTNET",    eid: LZ_EIDS.bscTestnet },
-      { network: "zkSyncSepolia", env: "SRX_OFT_NATIVE_ZKSYNCSEPOLIA", eid: LZ_EIDS.zkSyncSepolia },
-    ],
-  },
-  mainnet: {
-    hub:    { network: "ethereum", env: "SRX_TOKEN_ETHEREUM", eid: LZ_EIDS.ethereum },
-    spokes: [
-      { network: "bsc",    env: "SRX_OFT_NATIVE_BSC",    eid: LZ_EIDS.bsc },
-      { network: "zkSync", env: "SRX_OFT_NATIVE_ZKSYNC", eid: LZ_EIDS.zkSync },
-    ],
-  },
-};
-
-function environmentOf(networkName) {
-  for (const [name, e] of Object.entries(ENVIRONMENTS)) {
-    if (e.hub.network === networkName) return { name, e, role: "hub" };
-    const spoke = e.spokes.find((s) => s.network === networkName);
-    if (spoke) return { name, e, role: "spoke", spoke };
-  }
-  throw new Error(`${networkName} is not a hub or spoke in any bridge environment`);
-}
+// One hub per environment, and the spokes it may be peered to: lib/bridgeEnv.js (shared with
+// verify_roles.js, which fails a hub peer on any chain not listed there).
 
 async function deployNative() {
   const { e } = environmentOf(network.name);

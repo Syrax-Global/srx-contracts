@@ -29,7 +29,7 @@ describe("SRXToken — rescueTokens", function () {
     const STUCK_USDC = ethers.parseUnits("500", 6);
     await usdc.connect(admin).mint(await token.getAddress(), STUCK_USDC);
 
-    return { token, usdc, dai, admin, other, recipient, STUCK_USDC };
+    return { token, mockEndpoint, usdc, dai, admin, other, recipient, STUCK_USDC };
   }
 
   // ── Happy path ──────────────────────────────────────────────────────────────
@@ -81,10 +81,13 @@ describe("SRXToken — rescueTokens", function () {
   // ── Reverts ─────────────────────────────────────────────────────────────────
 
   it("rescues SRX accidentally sent to SRXToken contract (SC-RT-001 fix)", async function () {
-    const { token, admin, recipient } = await loadFixture(deployFixture);
-    // Simulate user mistake: send SRX to the SRXToken contract address
+    const { admin, recipient, mockEndpoint } = await loadFixture(deployFixture);
+    // review round 22 Oct (A3): a plain transfer to the token's own address is now refused
+    // (TransferToTokenContract), so SRX can only arrive there as a bridge credit (a mint).
+    // The test-only harness mints directly, as a bridge credit would.
+    const token = await (await ethers.getContractFactory("SRXTokenMintHarness")).deploy(await mockEndpoint.getAddress(), admin.address);
     const STUCK_SRX = ethers.parseUnits("10000", 18);
-    await token.connect(admin).transfer(await token.getAddress(), STUCK_SRX);
+    await token.harnessMint(await token.getAddress(), STUCK_SRX);   // no genesis here: the full supply is not minted
     expect(await token.balanceOf(await token.getAddress())).to.equal(STUCK_SRX);
     // Admin can now rescue it
     const balBefore = await token.balanceOf(recipient.address);

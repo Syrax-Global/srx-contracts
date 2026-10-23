@@ -124,7 +124,7 @@ describe("PreSaleRound — flat bonus mode (Genesis)", function () {
     it("a quote equals what is then received", async function () {
       const { round, usdc, investor1 } = await loadFixture(genesisFixture);
       const amount = 25_000n * 10n ** 6n;
-      const quoted = await round.quoteStable(amount, investor1.address);
+      const quoted = await round.quoteStable(usdc.target, amount, investor1.address);
       await usdc.connect(investor1).approve(await round.getAddress(), amount);
       await round.connect(investor1).investWithUSDC(amount);
       expect((await round.investors(investor1.address)).srxAllocation).to.equal(quoted);

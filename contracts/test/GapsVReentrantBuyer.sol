@@ -25,9 +25,9 @@ contract GapsVReentrantBuyer {
         round = _round;
     }
 
-    function arm(address asset, bool _bubble) external {
+    function arm(address asset, bool bubble_) external {
         reenterAsset = asset;
-        bubble = _bubble;
+        bubble = bubble_;
     }
 
     function disarm() external {
@@ -47,7 +47,7 @@ contract GapsVReentrantBuyer {
     }
 
     function claim(address asset) external {
-        (bool ok, bytes memory ret) = round.call(abi.encodeWithSignature("claimRefund(address)", asset));
+        (bool ok, bytes memory ret) = round.call(abi.encodeWithSignature("claimRefund(address,address)", asset, address(this)));
         if (!ok) _bubble(ret);
     }
 
@@ -55,7 +55,7 @@ contract GapsVReentrantBuyer {
         if (reenterAsset != address(1)) {
             reenterAttempts++;
             (bool ok, bytes memory ret) =
-                round.call(abi.encodeWithSignature("claimRefund(address)", reenterAsset));
+                round.call(abi.encodeWithSignature("claimRefund(address,address)", reenterAsset, address(this)));
             lastReenterOk = ok;
             lastReenterRevert = ret;
             if (!ok && bubble) revert("GapsVReentrantBuyer: re-entry refused");

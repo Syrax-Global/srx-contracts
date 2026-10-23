@@ -67,7 +67,7 @@ in any external communication.
 |------------|--------|
 | **Classification** | SRX is designed as a utility token, not a security. It is built to give access to functions of the Syrax network, and it is designed to confer no ownership, equity, debt or share of profits, and no guaranteed financial return. |
 | **Not a dividend-paying instrument** | No SRX holder receives dividends, and holders have no entitlement to Syrax's fee income, present or contingent. Staking rewards are paid in SRX only, from a fixed allocation set at launch — not from fee income. |
-| **Not inflationary** | Total supply is fixed at 10,000,000,000 SRX. The genesis mint is one-shot, and permanent reductions happen only through buy-and-burn (and migration, which calls it). The only post-genesis mint is a bridge return on Ethereum, which can restore only SRX the bridge burned there, so total supply on Ethereum never exceeds the cap. ⚠️ Open: internal audit M4 and L9 (design pending): a burn on a spoke chain reduces supply there but is not counted on Ethereum. |
+| **Not inflationary** | Total supply is fixed at 10,000,000,000 SRX. The genesis mint is one-shot, and the only permanent reduction on the hub is buy-and-burn. The only post-genesis mint is a bridge return on Ethereum, which can restore only SRX the bridge burned there, so total supply on Ethereum never exceeds the cap. ⚠️ Open: internal audit M4 and L9 (design pending): a burn on a spoke chain reduces supply there but is not counted on Ethereum. |
 | **Not a stablecoin** | SRX has no peg mechanism and no backing asset. |
 | **Not accepted on the Syrax gateway yet** | SRX payment acceptance is a Phase 2 feature. It is not enabled on the current gateway. |
 | **Not a governance token on remote chains** | Governance voting only happens on Ethereum. SRX on BNB Chain and zkSync confers no voting power. |
@@ -83,8 +83,8 @@ Maximum Supply (on-chain cap):  10,000,000,000 × 10¹⁸ wei — hardcoded in c
 Minting:                        ONE-TIME ONLY — genesis mint to TGEDistributor
 Post-genesis minting:           No function creates new supply. The only post-genesis mint
                                 is a bridge return on Ethereum, up to what was sent out
-Supply reduction:               Only via buyAndBurn() (and ZkSyncMigrator.migrate, which
-                                calls it) — permanent, counted in totalBurned
+Supply reduction:               Only via buyAndBurn() on the hub — permanent, counted
+                                in totalBurned (the ZkSyncMigrator is retired, CH-13)
 ```
 
 **Genuine SRX across all chains is 10,000,000,000 minus `totalBurned`, and never more.**
@@ -147,8 +147,8 @@ unlocked at launch: 15.5% in all, and only 49.5% locked. Nothing compared the te
 
 ## 5. Contract Suite — What Each Contract Does
 
-There are 16 contracts in the SRX ecosystem (15 in the audit scope, plus the Genesis agreement
-registry). Here is what each one does in plain language.
+There are 15 contracts in the SRX ecosystem (14 in the audit scope, plus the Genesis agreement
+registry). A retired 16th, the ZkSyncMigrator, is described at the end of this section. Here is what each one does in plain language.
 
 ---
 
@@ -567,6 +567,8 @@ date, guardian powers expire permanently and cannot be restored.
 **What does NOT expire at sunset:**
 - Anyone's ability to lift a pause the guardian left in place (`releaseAfterSunset`); a pause that is
   governance's own stays governance's to lift
+- A per-chain inbound freeze the guardian placed: only governance lifts it (`unfreezeInbound`), even after
+  the sunset. This is deliberate: after the sunset nobody else could re-freeze a compromised chain
 - The contract itself (it remains deployed)
 - The circuit breaker reset function (governance still controls this)
 - The token-pause lapse: a guardian token pause running at the sunset still ends after its
@@ -575,25 +577,16 @@ date, guardian powers expire permanently and cannot be restored.
 
 ---
 
-### ZkSyncMigrator.sol — Syrax Chain Migration Contract
+### ZkSyncMigrator.sol — RETIRED, not deployed
 
-When the Syrax Chain launches, SRX holders on EVM chains can burn their tokens here
-to receive equivalent native SRX on the Syrax Chain.
+Retired by decision CH-13 (22 Oct 2026). The contract and its tests stay in the repository
+as history; it is not deployed and no role on any contract is granted to it.
 
-**Migration flow:**
-1. User approves ZkSyncMigrator to spend their SRX
-2. User calls `migrate(amount)` — the migrator pulls the tokens and burns them through `SRXToken.buyAndBurn` (counted in `totalBurned`; not sent to a dead address)
-3. A `MigrationRequest` event fires with a migration ID (unique per chain and migrator contract, so consumers key on the emitting address too)
-4. The Syrax Chain bridge oracle monitors this event
-5. The oracle mints equivalent native SRX on the Syrax Chain to the same address
-6. Oracle calls `confirmMigration()` on-chain for record-keeping
-
-**What it cannot do:**
-- Cannot be used until `enableMigration()` is called by governance
-- Cannot be used after `closeMigration()` is called
-- Cannot be re-enabled once closed
-- Cannot mint SRX — it can only burn existing SRX
-- Cannot guarantee migration if the oracle is offline (centralization risk, documented)
+SRX moves onto the Syrax Chain through the chain's own bridge, not through a contract of
+this suite (see section 14). The retired design burned SRX on Ethereum and relied on a
+Syrax-run oracle to issue the SRX on the other side. On the Syrax Chain, SRX exists only as
+SRX locked on Ethereum, so that design would have needed a funded reserve and a hot key, and
+would have shrunk supply twice. Any future helper must be stateless and hold no funds and no roles.
 
 ---
 
@@ -633,8 +626,9 @@ This section describes every action an ordinary SRX holder can take with their t
 - Claim accumulated SRX rewards at any time (without withdrawing)
 - Contribute USDC/USDT directly to the stable reserves layer
 
-### Migration (when Syrax Chain is live)
-- Burn EVM SRX to receive native Syrax Chain SRX via ZkSyncMigrator
+### Moving SRX onto the Syrax Chain (when it is live)
+- Sign one deposit through the Syrax Chain's own bridge: the SRX is locked 1:1 in the Ethereum vault and appears on the Syrax Chain, and can be withdrawn back at any time
+- Holders on BNB Chain or ZKsync Era first return to the Ethereum hub over the existing OFT bridge
 
 ---
 
@@ -656,7 +650,6 @@ including the founding team, can override these without an exploit.
 | Unstake before lock expires | Normal unlock reverts if `block.timestamp < lockEnd`. |
 | Hold two staking positions | The contract enforces one position per address. |
 | Receive SRX from a bridge without a verified LZ message | OFT minting is gated by LayerZero's verification layer. |
-| Use the migrator before it is enabled | Migration reverts until governance calls `enableMigration()`. |
 | Transfer during a pause | `_update()` hook blocks all transfers when `Pausable.paused = true`. |
 
 ---
@@ -696,8 +689,13 @@ not the balance at any historical snapshot.
 
 ### Staking Rewards
 
-The 1.7 billion SRX reward pool is deposited into the staking contract at TGE.
-Governance controls how fast it is paid out via `setRewardRate()`.
+The 1.7 billion SRX reward pool is deposited into the staking contract at TGE. **The launch
+rate is set at TGE, by the launch multisig, from the published schedule: 13.5 SRX per second,
+about four years for the whole pool.** It is set then because voting starts only once holders
+have delegated enough SRX to reach quorum. Every later change to the rate is a governance vote
+(`setRewardRate()`, through the 48-hour Timelock), and the multisig keeps no role for rates
+after the hand-over. A rate can never pay out more than the pool holds: the period simply ends
+when it runs out.
 
 **The allocation is fixed (REG-50).** Rewards are paid in SRX only, and only from the SRX that
 the launch TGEDistributor recorded delivering to the staking contract, never more than the
@@ -944,7 +942,7 @@ participation must hold their SRX on Ethereum and delegate.
 The `buyAndBurn()` function on `SRXOFTNative` allows the treasury to burn SRX
 purchased on non-Ethereum markets. This reduces the supply on that chain without
 creating new supply on Ethereum. (Ethereum still counts the SRX it sent to that chain as outstanding,
-and `totalBurned` on Ethereum does not change; only Ethereum's own `buyAndBurn` and the migrator add to it.)
+and `totalBurned` on Ethereum does not change; only Ethereum's own `buyAndBurn` adds to it.)
 ⚠️ Open: internal audit M4 and L9 (design pending): until this is decided, the supply statement above
 is a build target, not a current guarantee.
 
@@ -988,7 +986,7 @@ Gnosis Safe (≥3/5 multi-sig)
 SRXTimelock (controlled by SRXGovernor / token holders)
   ├── Holds DEFAULT_ADMIN_ROLE and GOVERNANCE_ROLE on the core contracts
   ├── Holds SPENDER_ROLE on SRXTreasury (the only spender)
-  ├── Is admin of the launch VestingVaults and ZkSyncMigrator
+  ├── Is admin of the launch VestingVaults
   └── Is owner() and LayerZero delegate of SRXToken (and each spoke has its own Timelock)
 
 GuardianModule (controlled by Guardian multi-sig)
@@ -998,7 +996,7 @@ GuardianModule (controlled by Guardian multi-sig)
   ├── Holds PAUSER_ROLE on StabilisationFund
   └── Holds PAUSER_ROLE on FeeController
 
-SRXTreasury, ZkSyncMigrator, BuybackBurner
+SRXTreasury, BuybackBurner
   └── Hold BURN_ROLE on SRXToken (never the Safe)
 ```
 
@@ -1047,32 +1045,33 @@ buy-and-burn reduces supply.
 
 ## 14. The Migration Path (Syrax Chain)
 
-When the Syrax Chain launches, SRX evolves from an EVM token to the native gas
-and governance asset of a custom ZK Validium chain.
+When the Syrax Chain launches, SRX becomes the native gas and governance asset of a
+custom ZK Validium chain. SRX gets there through the chain's own bridge (CH-13, 22 Oct 2026),
+not through a migration contract: the `ZkSyncMigrator` is retired and will not be deployed.
 
-### How Migration Works
+### How SRX Moves onto the Syrax Chain
 
 Users who want to participate on the Syrax Chain:
-1. Approve ZkSyncMigrator to spend their SRX
-2. Call `migrate(amount)` — this burns the SRX permanently on the EVM chain
-3. Receive equivalent native SRX on the Syrax Chain at the same address
+1. Sign one deposit through the Syrax Chain's own bridge
+2. The SRX is locked 1:1 in the Ethereum vault (it is not burned)
+3. The same amount appears on the Syrax Chain
+
+The SRX can be withdrawn back to Ethereum at any time. On the Syrax Chain, SRX exists only
+as SRX locked on Ethereum, so total supply is counted once.
+
+Holders on BNB Chain or ZKsync Era first return their SRX to the Ethereum hub over the
+existing OFT bridge, then deposit from there.
 
 **This is voluntary.** Users who prefer to stay on Ethereum or BNB Chain can
 continue to hold and use SRX on those chains. The OFT bridge continues to operate.
 
-**Users who do not migrate:**
+**Users who do not move to the Syrax Chain:**
 - Continue to hold SRX on Ethereum/BNB Chain as normal ERC-20 tokens
 - Continue to have governance voting power (Ethereum only)
 - Can bridge between EVM chains normally
-- Can migrate to the Syrax Chain at any time during the open migration window
-- After the migration window closes, a governance-controlled snapshot fallback
-  is the only recourse for users who missed the window
+- Can deposit to the Syrax Chain at any time; there is no migration window to miss
 
-### Migration Window
-
-- Opens when governance calls `enableMigration()` (only after Syrax Chain is live)
-- Closes permanently when governance calls `closeMigration()` (cannot be reversed)
-- The window duration is determined by governance
+Any future helper contract for this path must be stateless and hold no funds and no roles.
 
 ---
 
@@ -1205,7 +1204,7 @@ CURRENT STATUS:
   Testnet live on Sepolia since 13 May 2026
   Independent audit upcoming; required before launch
   Gateway (Phase 1) must be live before SRX is accepted for payments
-  Syrax Chain (Phase 2) required before native gas and chain migration
+  Syrax Chain (Phase 2) required before native gas and moving SRX onto it
 ```
 
 ---

@@ -458,9 +458,9 @@ describe("PSR-06 — an investor who paid on-chain can always be refunded exactl
     expect(await r.totalAllocated()).to.equal(0n);
     expect(await r.investorCount()).to.equal(0n);
 
-    await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalances(usdc, [r, i1], [-U6(10_000), U6(10_000)]);
-    await expect(r.connect(i1).claimRefund(ethers.ZeroAddress)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
-    await expect(r.connect(i1).claimRefund(usdc.target)).to.be.revertedWithCustomError(r, "ZeroAmount");
+    await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalances(usdc, [r, i1], [-U6(10_000), U6(10_000)]);
+    await expect(r.connect(i1).claimRefund(ethers.ZeroAddress, i1.address)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
+    await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.be.revertedWithCustomError(r, "ZeroAmount");
   });
 
   it("money owed as refunds cannot be withdrawn by the admin", async function () {
@@ -472,7 +472,7 @@ describe("PSR-06 — an investor who paid on-chain can always be refunded exactl
     await r.connect(admin).refundInvestor(i1.address);
     // Only the 5,000 from i2 is the admin's to take; the 10,000 from i1 stays for i1.
     await expect(r.connect(admin).withdrawUSDC(admin.address)).to.changeTokenBalance(usdc, admin, U6(5_000));
-    await r.connect(i1).claimRefund(usdc.target);
+    await r.connect(i1).claimRefund(usdc.target, i1.address);
     expect(await usdc.balanceOf(r.target)).to.equal(0n);
   });
 
@@ -483,7 +483,7 @@ describe("PSR-06 — an investor who paid on-chain can always be refunded exactl
     await expect(r.connect(admin).refundInvestor(i1.address)).to.be.revertedWithCustomError(r, "RefundUnderfunded");
     await usdc.connect(admin).transfer(r.target, U6(10_000));
     await r.connect(admin).refundInvestor(i1.address);
-    await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalance(usdc, i1, U6(10_000));
+    await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalance(usdc, i1, U6(10_000));
   });
 });
 
@@ -549,7 +549,7 @@ describe("PSR-12 — oracle and payment-token details", function () {
 
   it("a stablecoin feed above $1 does not credit more than the dollar paid", async function () {
     const { admin, i1, r, usdc } = await presale();
-    const baseline = await r.quoteStable(U6(10_000), i1.address);
+    const baseline = await r.quoteStable(usdc.target, U6(10_000), i1.address);
     const F = await ethers.getContractFactory("MockChainlinkFeed");
     const feed = await F.deploy(105_000_000n); // USDC at $1.05
     await r.connect(admin).setStablecoinFeeds(feed.target, ethers.ZeroAddress);

@@ -320,6 +320,8 @@ contract PreSaleRound is ReentrancyGuard {
         uint256 minBtcPriceUsd8Dec, uint256 maxBtcPriceUsd8Dec
     );
     event StablecoinFeedsUpdated(address indexed usdcFeed, address indexed usdtFeed);
+    /// @notice Raised ETH put back by the admin (returnFunds) so a late refund can be paid.
+    event FundsReturned(address indexed by, uint256 amount);
     event StablecoinPriceBoundsUpdated(uint256 minStablePriceUsd8Dec, uint256 maxStablePriceUsd8Dec);
     event FeedStalenessUpdated(uint256 ethMaxStaleness, uint256 btcMaxStaleness, uint256 stableMaxStaleness);
     event PaymentReceived(address indexed investor, address indexed asset, uint256 amount, uint256 usd8Dec);
@@ -383,8 +385,8 @@ contract PreSaleRound is ReentrancyGuard {
 
     /**
      * @param _srxToken        SRX token address.
-     * @param _usdc            USDC address (6-dec). Pass address(0) to disable.
-     * @param _usdt            USDT address (6-dec). Pass address(0) to disable.
+     * @param _usdc            USDC address (decimals read at deploy). Pass address(0) to disable.
+     * @param _usdt            USDT address (decimals read at deploy). Pass address(0) to disable.
      * @param _wbtc            WBTC address (8-dec). Pass address(0) to disable.
      * @param _ethUsdFeed      Chainlink ETH/USD feed. Pass address(0) to disable ETH investment.
      * @param _btcUsdFeed      Chainlink BTC/USD feed. Pass address(0) to disable WBTC investment.
@@ -489,7 +491,11 @@ contract PreSaleRound is ReentrancyGuard {
             bytes32 ref   = agreementRefs[i];
             if (buyer == address(0)) revert ZeroAddress();
             if (cap != 0 && ref == bytes32(0)) revert ZeroAmount();
-            if (cap < investors[buyer].cumulativeUsd8Dec) revert CapBelowAllocated();
+            // Review round 22 Oct (C2): this reverted the whole batch, so a buyer could
+            // front-run "set the cap to what they bought" with one more purchase and block
+            // every other approval in it. A cap below what they bought now stops them there.
+            uint256 bought = investors[buyer].cumulativeUsd8Dec;
+            if (cap < bought) { cap = bought; ref = buyerApprovals[buyer].agreementRef; }
             buyerApprovals[buyer] = BuyerApproval(cap, ref);
             emit BuyerApprovalSet(buyer, cap, ref);
         }
@@ -536,7 +542,10 @@ contract PreSaleRound is ReentrancyGuard {
      *      block gas limits. If the investor set ever grows into the thousands, migrate
      *      to an off-chain index mapping to make removal O(1) (A3-L-01 note).
      */
-    function removeInvestor(address investor) external onlyAdmin notFinalized {
+    function removeInvestor(address investor) external onlyAdmin {
+        // Review round 22 Oct (C6): this refused after finalize(), so a wire buyer who
+        // failed KYC late could not be removed, while an on-chain payer could be refunded.
+        // _removeInvestor still refuses once their vault exists.
         // ⛔ PSR-06: this deleted an on-chain payer's allocation and kept their
         //    ETH or stablecoins. A payer is removed only by refundInvestor().
         if (_hasOnChainPayment(investor)) revert HasOnChainPayment(investor);
@@ -551,6 +560,13 @@ contract PreSaleRound is ReentrancyGuard {
      *      asset involved. If raised funds were already withdrawn, return them
      *      first. Off-chain amounts on the same investor are refunded off-chain.
      */
+    /// @notice Put raised funds back so a late refund can be paid (review round 22 Oct, C1):
+    ///         ETH could not be returned once withdrawn (no receive(), and invest() is closed
+    ///         after finalize() and would book the sender as a buyer). Credits no one.
+    function returnFunds() external payable onlyAdmin {
+        emit FundsReturned(msg.sender, msg.value);
+    }
+
     function refundInvestor(address investor) external onlyAdmin nonReentrant {
         if (!_hasOnChainPayment(investor)) revert NoAllocation();
         _removeInvestor(investor);
@@ -560,18 +576,22 @@ contract PreSaleRound is ReentrancyGuard {
         _oweRefund(investor, address(wbtc));
     }
 
-    /// @notice Claim a refund made owing by refundInvestor(). Paid to the caller —
-    ///         the address that made the payment — and to no one else.
-    function claimRefund(address asset) external nonReentrant {
+    /// @notice Claim a refund made owing by refundInvestor(). Only the address that made
+    ///         the payment can claim it, and it chooses where the refund is paid (review
+    ///         round 22 Oct, C3: a payer contract with no receive(), or a blacklisted
+    ///         stablecoin holder, could otherwise never be paid, and the refund stayed
+    ///         ring-fenced for ever).
+    function claimRefund(address asset, address to) external nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
         uint256 amount = refundOwed[msg.sender][asset];
         if (amount == 0) revert ZeroAmount();
         refundOwed[msg.sender][asset] = 0;
         totalRefundOwed[asset] -= amount;
         if (asset == address(0)) {
-            (bool ok,) = msg.sender.call{ value: amount }("");
+            (bool ok,) = to.call{ value: amount }("");
             if (!ok) revert ETHTransferFailed();
         } else {
-            IERC20(asset).safeTransfer(msg.sender, amount);
+            IERC20(asset).safeTransfer(to, amount);
         }
         emit RefundClaimed(msg.sender, asset, amount);
     }
@@ -772,7 +792,7 @@ contract PreSaleRound is ReentrancyGuard {
     /**
      * @notice Deploy vesting vaults for a range of investors by index.
      *         Use startIndex=0, endIndex=investorList.length for a full run.
-     *         For large investor sets, call in batches of 20-50 per transaction
+     *         For large investor sets, call in batches of up to 12 (06b refuses a batch above 15,000,000 gas)
      *         to stay within block gas limits (M-07 fix).
      *
      * @param startIndex Inclusive start index in investorList.
@@ -909,7 +929,7 @@ contract PreSaleRound is ReentrancyGuard {
      *           ETH min/max: $100  / $20,000   (8-dec: 10_000_000_000 / 2_000_000_000_000)
      *           BTC min/max: $10K  / $500,000  (8-dec: 1_000_000_000_000 / 50_000_000_000_000)
      *
-     *         A min > max is rejected. Pass (0, 0) on both pairs to disable bounds
+     *         A min >= max is rejected (an equal pair would admit one price only). Pass (0, 0) on both pairs to disable bounds
      *         entirely (NOT recommended for production).
      *
      * @param _minEth Minimum acceptable ETH price (8-dec). 0 = disabled.
@@ -933,6 +953,12 @@ contract PreSaleRound is ReentrancyGuard {
         emit OraclePriceBoundsUpdated(_minEth, _maxEth, _minBtc, _maxBtc);
     }
 
+    /// @notice Set the minimum purchase, in 8-decimal USD.
+    function setMinContribution(uint256 usd8Dec) external onlyAdmin {
+        emit MinContributionSet(minContributionUsd8Dec, usd8Dec);
+        minContributionUsd8Dec = usd8Dec;
+    }
+
     /**
      * @notice Set optional Chainlink USDC/USDT price feeds (SC-OPS-002 fix).
      *         When set, the contract uses the live feed price (with staleness +
@@ -940,11 +966,6 @@ contract PreSaleRound is ReentrancyGuard {
      *         disable a feed and fall back to $1.
      *         Recommended on mainnet to defend against stablecoin depeg events.
      */
-    function setMinContribution(uint256 usd8Dec) external onlyAdmin {
-        emit MinContributionSet(minContributionUsd8Dec, usd8Dec);
-        minContributionUsd8Dec = usd8Dec;
-    }
-
     function setStablecoinFeeds(address _usdcFeed, address _usdtFeed) external onlyAdmin {
         _requireUsdFeed(_usdcFeed);
         _requireUsdFeed(_usdtFeed);
@@ -1013,7 +1034,7 @@ contract PreSaleRound is ReentrancyGuard {
      *         failure mode of withdrawETH() when the destination is a multisig with
      *         restricted receive() handling.
      * @param to     Recipient address (must accept ETH).
-     * @param amount Amount of ETH in wei. Must be > 0 and ≤ contract balance.
+     * @param amount Amount of ETH in wei. Must be > 0 and ≤ withdrawable (the balance less refunds owed).
      */
     function withdrawETHAmount(address to, uint256 amount) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
@@ -1079,15 +1100,17 @@ contract PreSaleRound is ReentrancyGuard {
         return _computeTotalSRXWithBonus(newCumulative) - investors[investor].srxAllocation;
     }
 
-    /// @notice How many SRX (including tier bonus) will `stableAmount` of USDC/USDT buy,
-    ///         given the investor's current cumulative USD.
-    /// @dev R5-04 fix: quotes through the SAME feed-aware conversion the invest path
-    ///      uses (_stableToUsd8Dec with the USDC/USD feed), so quoted SRX matches
-    ///      received SRX even during a stablecoin depeg. With no feed configured this
-    ///      is identical to the legacy $1 assumption. USDT amounts quote via the USDC
-    ///      feed here; for exact USDT pricing during a divergence, compare on-chain.
-    function quoteStable(uint256 stableAmount, address investor) external view returns (uint256) {
-        uint256 usdValue8Dec    = _stableToUsd8Dec(stableAmount, usdcUsdFeed, usdcDecimals);
+    /// @notice How many SRX (including tier bonus) will `stableAmount` of `stablecoin`
+    ///         (the USDC or USDT address) buy, given the investor's current cumulative USD.
+    /// @dev Quotes through the same conversion the invest path uses for that coin: its own
+    ///      feed and decimals (review round 22 Oct, C4: USDT was quoted with USDC's, 10^12
+    ///      out with 6- and 18-decimal coins, and a disabled coin still quoted).
+    function quoteStable(address stablecoin, uint256 stableAmount, address investor) external view returns (uint256) {
+        bool isUsdc = stablecoin == address(usdc);
+        if (stablecoin == address(0) || (!isUsdc && stablecoin != address(usdt))) revert CurrencyDisabled();
+        uint256 usdValue8Dec = isUsdc
+            ? _stableToUsd8Dec(stableAmount, usdcUsdFeed, usdcDecimals)
+            : _stableToUsd8Dec(stableAmount, usdtUsdFeed, usdtDecimals);
         uint256 newCumulative   = investors[investor].cumulativeUsd8Dec + usdValue8Dec;
         return _computeTotalSRXWithBonus(newCumulative) - investors[investor].srxAllocation;
     }
@@ -1366,7 +1389,7 @@ contract PreSaleRound is ReentrancyGuard {
     // ── Stable → USD 8-dec helper (SC-OPS-002) ────────────────────────────────
 
     /**
-     * @dev Converts a 6-decimal stablecoin amount to 8-decimal USD value.
+     * @dev Converts a stablecoin amount (in its own decimals) to 8-decimal USD value.
      *      If `feed` is set, applies the live Chainlink price (with staleness +
      *      completeness checks). If `feed` is address(0), defaults to $1 (the
      *      legacy behavior — `amount * 100` to scale 6-dec → 8-dec).

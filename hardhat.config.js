@@ -9,6 +9,7 @@ const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || ""; // Etherscan V2 â
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
+    compilers: [{
     version: "0.8.24",
     settings: {
       optimizer: {
@@ -22,6 +23,17 @@ module.exports = {
           "*": ["storageLayout"],
         },
       },
+    },
+    }],
+    // Size, not gas: these two sit close to the 24,576-byte code limit (EIP-170), so they
+    // are optimised for size (review round 22 Oct 2026). Behaviour is identical; calls cost
+    // slightly more gas. The test-only harness that extends SRXToken follows it. Foundry
+    // (foundry.toml) still builds at 200 runs for its invariant suites; the bytecode differs,
+    // the behaviour does not.
+    overrides: {
+      "contracts/presale/PreSaleRound.sol": { version: "0.8.24", settings: { optimizer: { enabled: true, runs: 1 }, viaIR: true, evmVersion: "cancun", outputSelection: { "*": { "*": ["storageLayout"] } } } },
+      "contracts/token/SRXToken.sol": { version: "0.8.24", settings: { optimizer: { enabled: true, runs: 1 }, viaIR: true, evmVersion: "cancun", outputSelection: { "*": { "*": ["storageLayout"] } } } },
+      "contracts/test/SRXTokenMintHarness.sol": { version: "0.8.24", settings: { optimizer: { enabled: true, runs: 1 }, viaIR: true, evmVersion: "cancun", outputSelection: { "*": { "*": ["storageLayout"] } } } },
     },
   },
 

@@ -295,7 +295,8 @@ describe("BranchCoverage G2: GuardianModule", function () {
     expect(await gm.tokenPauseEndsAt()).to.not.equal(0n);
     await time.increase(SUNSET);
     await expect(gm.connect(other).releaseAfterSunset(ids.token))
-      .to.emit(gm, "GuardianAction").withArgs(ids.token, other.address, 1, "released after sunset", anyTimestamp)
+      // review round 22 Oct (D-3): the release is its own event, so a stranger is not logged as the guardian who acted
+      .to.emit(gm, "ReleasedAfterSunset").withArgs(ids.token, other.address)
       .and.to.emit(gm, "TokenPauseEnded");
     expect(await stubs.token.paused()).to.equal(false);
     expect(await gm.isModulePaused(ids.token)).to.equal(false);
@@ -605,7 +606,8 @@ describe("BranchCoverage G2: GuardianModule", function () {
       await gm.connect(guardian).pauseModule(ids.staking, "outer");
       await resetStub(stub);
       await time.increase(SUNSET);
-      await expect(gm.connect(other).releaseAfterSunset(ids.staking)).to.emit(gm, "GuardianAction");
+      // review round 22 Oct (D-3): ReleasedAfterSunset, not GuardianAction
+      await expect(gm.connect(other).releaseAfterSunset(ids.staking)).to.emit(gm, "ReleasedAfterSunset");
       await expectBlocked(stub);
       expect(await gm.isModulePaused(ids.staking)).to.equal(false);
     });
@@ -693,12 +695,12 @@ describe("BranchCoverage G2: SRXToken", function () {
     expect(await token.paused()).to.equal(false);
   });
 
-  it("[T461] rescuing ETH to a receiver that refuses it reverts (ZeroAmount) and the ETH stays in the token", async function () {
+  it("[T461] rescuing ETH to a receiver that refuses it reverts (ETHRescueFailed; review round 22 Oct, was ZeroAmount) and the ETH stays in the token", async function () {
     const { token, admin, to } = await loadFixture(tfx);
     const refuser = await (await ethers.getContractFactory("MockERC20")).deploy("R", "R", 18); // no receive()
     await network.provider.send("hardhat_setBalance", [await token.getAddress(), ethers.toBeHex(ethers.parseEther("1"))]);
     await expect(token.connect(admin).rescueTokens(ZERO, await refuser.getAddress(), ethers.parseEther("1")))
-      .to.be.revertedWithCustomError(token, "ZeroAmount");
+      .to.be.revertedWithCustomError(token, "ETHRescueFailed");
     expect(await ethers.provider.getBalance(await token.getAddress())).to.equal(ethers.parseEther("1"));
     // control: an EOA receiver takes it
     await expect(token.connect(admin).rescueTokens(ZERO, to.address, ethers.parseEther("1")))
@@ -737,13 +739,13 @@ describe("BranchCoverage G2: SRXOFTNative", function () {
       .to.be.revertedWithCustomError(native, "OwnableInvalidOwner").withArgs(ZERO);
   });
 
-  it("[N208] rescuing ETH to a receiver that refuses it reverts (ZeroAmount) and the ETH stays; an EOA receiver takes it", async function () {
+  it("[N208] rescuing ETH to a receiver that refuses it reverts (ETHRescueFailed; review round 22 Oct, was ZeroAmount) and the ETH stays; an EOA receiver takes it", async function () {
     const { native, admin, to } = await loadFixture(nfx);
     const refuser = await (await ethers.getContractFactory("MockERC20")).deploy("R", "R", 18);
     const one = ethers.parseEther("1");
     await network.provider.send("hardhat_setBalance", [await native.getAddress(), ethers.toBeHex(one)]);
     await expect(native.connect(admin).rescueTokens(ZERO, await refuser.getAddress(), one))
-      .to.be.revertedWithCustomError(native, "ZeroAmount");
+      .to.be.revertedWithCustomError(native, "ETHRescueFailed");
     expect(await ethers.provider.getBalance(await native.getAddress())).to.equal(one);
     await expect(native.connect(admin).rescueTokens(ZERO, to.address, one))
       .to.emit(native, "TokenRescued").withArgs(ZERO, to.address, one);

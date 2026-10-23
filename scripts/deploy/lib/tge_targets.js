@@ -36,6 +36,8 @@ const SAFE_ABI = ["function getOwners() view returns (address[])", "function get
 const MIN_SAFE_THRESHOLD = 2n;
 const { ALLOCATIONS, VESTING, TESTNET_CHAINS, TGE_PLAN, walletFor } = require("../00_config");
 const { launchPlan, readGenesisSold } = require("./genesis_seed");
+const { checkRevokeRecipients, checkDistributorWiring } = require("./gate_checks");
+const { lookupEnv } = require("./launch_order");
 
 const MAX_SUPPLY = parseUnits("10000000000", 18);
 
@@ -100,7 +102,7 @@ function liveRoles({ networkName, env = process.env }) {
   try { roles.admin = walletFor("admin", networkName, env); }
   catch (e) { roles.admin = { error: e.message }; }
   for (const [label, key] of Object.entries(ROLE_ENV)) {
-    const raw = env[`${key}_${NET}`];
+    const raw = lookupEnv(key, networkName, env, { bare: false })?.value; // the older GUARDIAN spelling is still read (E-08)
     if (!raw) { roles[label] = null; continue; }
     try { roles[label] = checksum(raw, `${key}_${NET}`); }
     catch (e) { roles[label] = { error: e.message }; }
@@ -277,7 +279,55 @@ async function checkOnChain({ allocations, manifest, provider, vaultAt, tokenAdd
 }
 
 /**
- * The whole gate. Returns { allocations, genesisSold, failures, manifestPath, skipped }.
+ * Launch wiring that does not depend on a manifest, so it runs on every network, the
+ * disposable ones included (a rehearsal has no manifest, and must still exercise it):
+ *
+ *   E-02  every launch vault, the Genesis contract and every existing Genesis buyer vault
+ *         names the SRXTreasury CONTRACT (TREASURY_<NET>) as its revokeRecipient.
+ *   E-01  SRXStaking.tgeDistributor() == StabilisationFund.tgeDistributor() ==
+ *         TGE_DISTRIBUTOR_<NET>, the distributor 06 launches through. Both fix it at
+ *         deployment, so a re-run of Step 3 after Step 4 / 5b strands the staking allocation.
+ *
+ * Returns failure strings (empty = pass). Passing summaries are appended to `notes`.
+ */
+async function checkLaunchWiring({ allocations, provider, tokenAddress, genesisRound = null, tgeDistributor = null, notes = [] }) {
+  const failures = [];
+  const token = checksum(tokenAddress, "SRX token address");
+
+  // ── E-02: every vault's revoked SRX goes to the SRXTreasury contract ─────────
+  const treasuryRow = allocations.find((a) => a.label === "Treasury");
+  const vaults = allocations.filter((a) => a.isVestingVault).map((a) => ({ label: `${a.label} vault`, address: a.destination }));
+  if (!treasuryRow) {
+    failures.push("the TGE list has no Treasury row, so the vaults' revokeRecipient cannot be checked");
+  } else {
+    const r = await checkRevokeRecipients({ provider, treasury: treasuryRow.destination, tokenAddress: token, vaults, genesisRound });
+    failures.push(...r.failures);
+    if (r.failures.length === 0) {
+      notes.push(`✅ revoke recipient: ${vaults.length} launch vaults${genesisRound ? ", the Genesis contract and every existing Genesis buyer vault" : ""} all name the SRXTreasury ${getAddress(treasuryRow.destination)} (${r.checked} checks)`);
+    }
+  }
+
+  // ── E-01: staking and the fund are built for the distributor that launches ───
+  {
+    const staking = allocations.find((a) => a.label === "Staking");
+    const fund = allocations.find((a) => a.label === "StabilisationFund");
+    const r = await checkDistributorWiring({
+      provider, tgeDistributor, tokenAddress: token,
+      targets: [
+        ...(staking ? [{ label: "SRXStaking", address: staking.destination, rerun: "Step 4 (04_deploy_staking.js)" }] : []),
+        ...(fund ? [{ label: "StabilisationFund", address: fund.destination, rerun: "Step 5b (05b_deploy_stabilisation.js)" }] : []),
+      ],
+    });
+    failures.push(...r.failures);
+    if (r.failures.length === 0) {
+      notes.push(`✅ distributor: SRXStaking and the StabilisationFund both name ${getAddress(tgeDistributor)}, the TGEDistributor that launches (${r.checked} checks)`);
+    }
+  }
+  return failures;
+}
+
+/**
+ * The whole gate. Returns { allocations, genesisSold, failures, manifestPath, skipped, notes }.
  * Does not throw on a mismatch — the caller decides — but DOES throw if the
  * allocation list itself cannot be built (a missing or invalid address).
  */
@@ -286,6 +336,12 @@ async function runTgeTargetChecks({
   manifestPath = manifestPathFor(networkName),
   genesisSold,
 }) {
+  // The Genesis contract, if the network declares one (PRESALE_ROUND_<NET>, or "none").
+  const genesisRaw = (env[`PRESALE_ROUND_${networkName.toUpperCase()}`] || "").trim();
+  let genesisRound = null;
+  try { if (genesisRaw && genesisRaw.toLowerCase() !== "none") genesisRound = getAddress(genesisRaw); } catch { /* readGenesisSold reports a bad value */ }
+  const notes = [];
+
   // What the Genesis round sold, from the Genesis contract (refuses while the round
   // is open). A caller without a provider may pass it; otherwise there is no round.
   if (genesisSold === undefined) {
@@ -295,34 +351,64 @@ async function runTgeTargetChecks({
   }
   const allocations = buildTgeAllocations({ networkName, env, genesisSold });
 
+  // The wiring checks need no manifest: they run whenever there is a chain to read.
+  const tgeDistributor = (env[`TGE_DISTRIBUTOR_${networkName.toUpperCase()}`] || "").trim() || null;
+  const wiring = provider ? await checkLaunchWiring({ allocations, provider, tokenAddress, genesisRound, tgeDistributor, notes }) : [];
+
   if (!fs.existsSync(manifestPath)) {
     if (LOCAL_CHAINS.has(networkName)) {
-      return { allocations, genesisSold, failures: [], manifestPath, skipped: true };
+      return { allocations, genesisSold, failures: [...wiring], manifestPath, skipped: true, notes };
     }
     return {
-      allocations, genesisSold, manifestPath, skipped: false,
-      failures: [`no manifest at ${manifestPath} — create it from deploy/addresses.example.json with the FINAL addresses`],
+      allocations, genesisSold, manifestPath, skipped: false, notes,
+      failures: [`no manifest at ${manifestPath} — create it from deploy/addresses.example.json with the FINAL addresses`, ...wiring],
     };
   }
 
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); }
-  catch { return { allocations, genesisSold, manifestPath, skipped: false, failures: [`manifest ${manifestPath} is not valid JSON`] }; }
+  catch { return { allocations, genesisSold, manifestPath, skipped: false, notes, failures: [`manifest ${manifestPath} is not valid JSON`, ...wiring] }; }
 
   const failures = checkAgainstManifest({
     allocations, manifest, roles: liveRoles({ networkName, env }), networkName, chainId,
   });
+  failures.push(...checkRewardRates({ manifest, networkName }));
+  failures.push(...wiring);
   if (provider) {
     failures.push(...await checkOnChain({ allocations, manifest, provider, vaultAt, tokenAddress, networkName }));
   } else if (!LOCAL_CHAINS.has(networkName)) {
     failures.push("no provider given — the on-chain checks did not run");
   }
-  return { allocations, genesisSold, failures, manifestPath, skipped: false };
+  return { allocations, genesisSold, failures, manifestPath, skipped: false, notes };
+}
+
+/**
+ * Security ruling, 23 Oct 2026: the launch reward rates are part of the frozen plan. The manifest
+ * must state them (rewardRates.staking / rewardRates.stabilisationFund, SRX wei per second as a
+ * decimal string, or null for "not set at launch"), and they must equal 00_config's
+ * rewardRatesFor(network) exactly. Pure.
+ */
+function checkRewardRates({ manifest, networkName }) {
+  const { rewardRatesFor } = require("../00_config");
+  const plan = rewardRatesFor(networkName);
+  const stated = manifest && manifest.rewardRates;
+  if (!stated || typeof stated !== "object") {
+    return [`the manifest does not state rewardRates (staking, stabilisationFund): the launch rates are part of the frozen plan`];
+  }
+  const out = [];
+  for (const key of ["staking", "stabilisationFund"]) {
+    const want = plan[key] === null || plan[key] === undefined ? null : plan[key].toString();
+    const got = stated[key] === undefined ? undefined : (stated[key] === null ? null : String(stated[key]));
+    if (got === undefined) out.push(`the manifest's rewardRates.${key} is missing (state the rate, or null for not set at launch)`);
+    else if (got !== want) out.push(`rewardRates.${key}: the manifest says ${got}, the plan (00_config REWARD_RATES) says ${want}`);
+  }
+  return out;
 }
 
 module.exports = {
+  checkRewardRates,
   MIN_SAFE_THRESHOLD,
   MAX_SUPPLY, LOCAL_CHAINS, VAULT_SCHEDULE, WALLET_ROWS,
   buildTgeAllocations, liveRoles, manifestPathFor,
-  checkAgainstManifest, checkOnChain, runTgeTargetChecks,
+  checkAgainstManifest, checkOnChain, checkLaunchWiring, runTgeTargetChecks,
 };

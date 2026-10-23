@@ -55,7 +55,11 @@ describe("TGE destination controls", function () {
         ...(a.isVestingVault ? { beneficiary: addr() } : {}),
       };
     }
-    return { network: net, chainId, roles: { ...roles }, tgeAllocations };
+    // The launch reward rates are part of the frozen plan (Security ruling, 23 Oct 2026).
+    const { rewardRatesFor } = require("../scripts/deploy/00_config");
+    const r = rewardRatesFor(net);
+    const rewardRates = { staking: r.staking === null ? null : r.staking.toString(), stabilisationFund: r.stabilisationFund === null ? null : r.stabilisationFund.toString() };
+    return { network: net, chainId, roles: { ...roles }, tgeAllocations, rewardRates };
   }
 
   function mainnetCase(over = {}) {

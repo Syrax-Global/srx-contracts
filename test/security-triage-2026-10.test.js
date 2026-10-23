@@ -190,9 +190,12 @@ describe("Security triage 2026-10 — report A: bridge returns (FIXED, disclosur
 describe("Security triage 2026-10 — report B: rescueTokens vs launch protection (FIXED)", function () {
   async function stuck() {
     const ctx = await hubAndSpoke();
-    const { admin, alice, token } = ctx;
-    await token.connect(admin).transfer(alice.address, E(100_000));
-    await token.connect(alice).transfer(token.target, E(100_000));   // sent by mistake, before limits
+    const { admin, token, onHub } = ctx;
+    // review round 22 Oct (A3): a plain transfer to the token's own address is refused now, so the
+    // stuck SRX arrives the one way left: a bridge credit (a mint) addressed to the token itself.
+    await aliceOnSpoke(ctx);
+    await token.connect(admin).setInboundLimit(SPOKE, E(10_000_000));
+    await onHub(token.target, E(100_000));                           // credited to the token, before limits
     await token.connect(admin).setMaxTransferAmount(E(50_000));     // launch protection switched on
     return ctx;
   }

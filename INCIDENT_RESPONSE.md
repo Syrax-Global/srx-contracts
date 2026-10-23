@@ -84,12 +84,14 @@ within 15 minutes of the first alert.
    (BuybackBurner, SRXAirdrop, PreSaleRound) can be revoked with a Safe tx.
 
 5. **Freeze returns from the affected chain** — If the LayerZero bridge is involved. This is the fastest and
-   most targeted step: it stops one chain sending SRX back to Ethereum, and leaves everything else running.
+   most targeted step: it stops one chain sending SRX back to Ethereum, also refuses sends from Ethereum INTO that chain
+   (`InboundChainFrozen`, so no SRX is burned that could not come back), and leaves everything else running.
    ```
    Guardian multisig tx: GuardianModule.freezeBridgeInbound(chainEid, "reason")
    (before the launch hand-over: Safe tx SRXToken.freezeInbound(chainEid))
    ```
-   Only governance lifts it (`SRXToken.unfreezeInbound`, a Timelock proposal). The hub's limit for a chain
+   Only governance lifts it (`SRXToken.unfreezeInbound`, a Timelock proposal), even after the guardian's sunset:
+   that is deliberate, because after the sunset nobody else could re-freeze a compromised chain. The hub's limit for a chain
    (`SRXToken.inboundLimit`) is a draining bucket: at most that much can be in flight at any moment,
    and it refills at that amount per 24 hours. A compromised chain could therefore bring back the
    limit at once, plus one more limit's worth for each day that passes before the freeze, so act

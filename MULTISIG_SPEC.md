@@ -68,7 +68,7 @@ covers every privileged contract:
   the deployer holding one of those roles when not listed is a failure. A role outside that
   matrix is not checked, and the gate cannot enumerate every holder of a role on chain;
 - the operational contracts: the administrator is the Safe as listed, never the deployer;
-  where a role sits with the Timelock (the migrator's `GOVERNANCE`) that is checked too;
+  where a role sits with the Timelock that is checked too;
 - contracts with an **immutable `admin()`** (TGEDistributor, PreSaleRound, each launch
   VestingVault): never the deployer;
 - a contract a network does not have must be **declared** `none`. An undeclared one fails;
@@ -78,7 +78,7 @@ covers every privileged contract:
 
 | Contract | `DEFAULT_ADMIN` | `GOVERNANCE` | `SPENDER` | `PAUSER` | Other |
 |---|---|---|---|---|---|
-| SRXToken | Timelock | Timelock | — | GuardianModule | `BURN_ROLE`: contracts only (Treasury, Migrator, BuybackBurner), never the Safe. `owner()` and the LayerZero delegate: Timelock |
+| SRXToken | Timelock | Timelock | — | GuardianModule | `BURN_ROLE`: contracts only (Treasury, BuybackBurner), never the Safe. `owner()` and the LayerZero delegate: Timelock |
 | SRXTimelock | Timelock itself | — | — | — | `PROPOSER`: Governor only. `CANCELLER`: Governor, and the Safe (veto). Delay floor: `updateDelay` below the deployment delay (48 h on mainnet) reverts `DelayBelowFloor` |
 | SRXTreasury | Timelock | Timelock | Timelock | GuardianModule | Not upgradeable: plain contract (REG-53) |
 | SRXStaking | Timelock | Timelock | — | GuardianModule | `WIND_DOWN_ROLE`: the admin Safe (kept after the hand-over; never the deployer). Not upgradeable: plain contract (REG-53) |
@@ -104,12 +104,36 @@ the trust assumption an investor or auditor is being asked to accept.
 | PreSaleRound | Safe (immutable `admin`) | The raised funds, **minus every refund owed** (ring-fenced, PSR-06); the SRX no buyer is owed (`recoverSRX` takes only the surplus above `pendingDeployment()`, so buyers' SRX is ring-fenced like their refunds; internal audit L6, 16 Oct 2026); `revokeVault` on any investor. It cannot change the price while any investor exists (the lock follows the live investor list, so it reopens only if every investor has been refunded or removed), or remove a paying investor without refunding them. ⚠️ Open: internal audit M3 (design pending): once a buyer's vault exists, `revokeVault` can remove a paying buyer with no refund, because `refundInvestor` refuses after that point. **SC-TRUST-004**: disclosed custodial-presale trust. On mainnet the deploy script refuses an admin with no code (PSR-11) |
 | BuybackBurner | Safe (`DEFAULT_ADMIN`), executor key (`EXECUTOR_ROLE`) | Only what is sent to the burner. Every swap is capped per token, per swap and per 24 hours; a token with no caps cannot be swapped; approvals are exact and reset (BB-M2) |
 | SRXAirdrop | Safe | The SRX loaded into the current round, recoverable only after its deadline; a live round lasts at least 7 days and its deadline cannot move earlier (N-06) |
-| ZkSyncMigrator | Timelock (`DEFAULT_ADMIN` after the hand-over, and `GOVERNANCE`), oracle (`ORACLE_ROLE`) | Migration settlement records; the SRX it burns comes only from the migrating user. ⭐ Jared, 30 Sep: its admin moved behind the delay (as admin the Safe could have granted itself `GOVERNANCE` and opened migration at once). **Gated** |
-| VestingVault | Launch vaults: **the Timelock** (immutable, set by `03_deploy_vesting`). Presale buyer vaults: PreSaleRound (SC-TRUST-004) | `triggerTGE`, `revoke`, and surplus rescue above the declared grant (PSR-08). ⭐ Jared, 30 Sep: `revoke` sends a vault's whole unvested remainder anywhere, so for the launch vaults it is a 48-hour governance proposal, never a Safe power. ⚠️ Open: internal audit M2 (design pending): the recipient is a parameter and can be the beneficiary, which makes a whole locked grant liquid. Grant declaration and the clock start are scheduled Timelock operations (see TGE_DEPLOYMENT_RUNBOOK). **Gated**: any other admin fails |
-| GuardianModule | Safe (guardian), Timelock (`GOVERNANCE`, and `DEFAULT_ADMIN` after the hand-over) | Pause only, bounded: a guardian token pause lasts at most 14 days (then anyone may lift it), is followed by a 7-day block after a full term, and totals at most 30 days; pauses less than 7 days apart count as one 14-day run, so unpausing a moment early buys nothing (M7); the guardian's life is at most 180 days (constructor). A token pause that governance holds, or an outside pause that `pauseAll` adopted, can be lifted only by governance (M12), and after the sunset anyone may lift a pause the guardian left (`releaseAfterSunset`, L15). `pauseAll` ignores the per-module one-hour wait by design. The circuit breaker stops the bridge only, never ordinary transfers (12 Oct 2026). The guardian cannot re-open a tripped circuit breaker (G-L1). ⛔ Until 30 Sep the Safe kept `DEFAULT_ADMIN` here and could grant itself `GOVERNANCE` — now handed over by `migrate_roles.js` and **gated** |
+| ZkSyncMigrator | **Retired, not deployed (CH-13, Jared, 22 Oct 2026).** No role is held anywhere and none may be granted | Nothing: SRX moves onto Syrax Chain through the chain's own bridge (one signed deposit, the SRX locked 1:1 in the Ethereum vault, withdrawable back at any time), so there is no burn-and-claim and no oracle. The contract stays in the repository as history. Any future helper must be stateless and hold no funds and no roles. `09_deploy_migrator.js` refuses to run, and `verify_roles.js` fails a network that declares a migrator (**gated**) |
+| VestingVault | Launch vaults: **the Timelock** (immutable, set by `03_deploy_vesting`). Presale buyer vaults: PreSaleRound (SC-TRUST-004) | `triggerTGE`, `revoke`, and surplus rescue above the declared grant (PSR-08). ⭐ Jared, 30 Sep: `revoke` moves a vault's whole unvested remainder, so for the launch vaults it is a 48-hour governance proposal, never a Safe power. Fixed 22 Oct 2026 (internal audit M2): `revoke()` takes no argument and sends the remainder to the vault's immutable `revokeRecipient` (the SRXTreasury), never the beneficiary; before that the recipient was a parameter and could be the beneficiary, which made a whole locked grant liquid. The gate checks that every launch vault, the Genesis contract and every Genesis buyer vault names the SRXTreasury (C7/E-02). Grant declaration and the clock start are scheduled Timelock operations (see TGE_DEPLOYMENT_RUNBOOK). **Gated**: any other admin fails |
+| GuardianModule | Safe (guardian), Timelock (`GOVERNANCE`, and `DEFAULT_ADMIN` after the hand-over) | Pause only, bounded: a guardian token pause lasts at most 14 days (then anyone may lift it), is followed by a 7-day block after a full term, and totals at most 30 days; pauses less than 7 days apart count as one 14-day run, so unpausing a moment early buys nothing (M7); the guardian's life is at most 180 days (constructor). A token pause that governance holds, or an outside pause that `pauseAll` adopted, can be lifted only by governance (M12), and after the sunset anyone may lift a pause the guardian left (`releaseAfterSunset`, L15). A per-chain inbound freeze (`freezeBridgeInbound`) is different: it is lifted only by governance (`unfreezeInbound`), even after the sunset, because after the sunset nobody else could re-freeze a compromised chain (D-1, deliberate); while it is on, sends into that chain are refused too (A2). Only the six module ids can be registered, and one `pause()` module per target. `updateModuleTarget` is refused while the guardian holds that module paused (D-2). `pauseAll` ignores the per-module one-hour wait by design. The circuit breaker stops the bridge only, never ordinary transfers (12 Oct 2026). The guardian cannot re-open a tripped circuit breaker (G-L1). ⛔ Until 30 Sep the Safe kept `DEFAULT_ADMIN` here and could grant itself `GOVERNANCE` — now handed over by `migrate_roles.js` and **gated** |
 | SRXOFTNative (spokes) | **That chain's own SRXTimelock** (48 h; the Safe proposes and can cancel, anyone executes, no admin), as `owner()` (Ownable2Step) **and** LayerZero delegate. Pausing stays fast (`PAUSER_ROLE`) | Peers, enforced options, DVN/library configuration and `rescueTokens` (SRX or any token stranded at the spoke's own address; plain transfers to that address are refused) on that chain. ⚠️ Open: internal audit M4 (design pending): "Pausing stays fast" is also unbounded. The spoke pause is held by the Safe directly and has none of the hub's limits (no maximum duration, lapse, sunset or governance override), and the spoke's Timelock cannot lift it. The only peer it accepts is the hub, at the address fixed at deployment, or zero. ⛔ **Corrected 7 Oct 2026 (external disclosure A):** this row used to say a bad spoke configuration "cannot mint unbacked SRX back onto Ethereum". **That was false.** The hub's ledger (N-01) cannot tell real SRX from forged, so a compromised spoke owner or delegate could return everything ever sent to that chain. **SPOKE-01 is now closed:** the spoke's authority is behind its Timelock (`07_deploy_bridge.js` steps D–E, checked by `verify_spoke.js`), and the hub accepts each chain's returns only up to a limit (a draining bucket: at most that much in flight, refilling at that amount per 24 hours; none set means no returns), which the guardian can freeze per chain (`SRXToken.inboundLimit`, `GuardianModule.freezeBridgeInbound`). **Gated** |
 
 ---
+
+## Environment variables the deploy and role scripts read
+
+One variable names one role (E-06, review E, 22 Oct 2026). Network-suffixed variables are `<NAME>_<NET>`
+(e.g. `_ETHEREUM`); the role scripts also accept the bare name.
+
+| Variable | Role it names | Read by |
+|---|---|---|
+| `ADMIN_ADDRESS` | The admin Safe | every deploy script, `migrate_roles.js`, `verify_roles.js` |
+| `DEPLOYER_EOA` | The deploying key (holds no role after the hand-over) | `verify_roles.js` |
+| `PAUSE_GUARDIAN` | `GUARDIAN_ROLE` on **GuardianModule**: the emergency pause. This is the admin Safe; the gate requires the Safe to hold it | `08_deploy_guardian.js` (required on every network, no fallback); `verify_all.js` (falls back to the admin Safe when unset) |
+| `CIRCUIT_BREAKER_ADDRESS` | `CIRCUIT_BREAKER_ROLE` on GuardianModule: the monitor that reports bridge volume (`scripts/ops/circuit_breaker_monitor.js`). Never the deployer | `08_deploy_guardian.js` (required, no fallback), `verify_roles.js` (must hold the role once the breaker is configured) |
+| `SSF_GUARDIAN_MULTISIG` | `GUARDIAN_ROLE` on the **StabilisationFund**: the capped 70% fast path. Granted after launch by governance | `verify_roles.js` (optional; unset is reported as INCOMPLETE) |
+| `DEPLOYER_MULTISIG` | `DEPLOYER_ROLE` on the StabilisationFund (30% fast path) | `verify_roles.js` (optional, as above) |
+| `ORACLE_REPORTER` | `ORACLE_REPORTER_ROLE` on the StabilisationFund | `verify_roles.js` (optional, as above) |
+| `GUARDIAN_MODULE_<NET>` | The deployed GuardianModule (`08` prints it). `GUARDIAN_<NET>` is still read, for old `.env` files | `migrate_roles.js`, `verify_roles.js`, TGE gate, `verify_all.js` |
+| `STABILISATION_FUND_<NET>` | The deployed StabilisationFund (`05b` prints it). `STABILISATION_<NET>` is still read | every script |
+| `TIMELOCK_DEPLOY_BLOCK_<NET>` | Block the Timelock was deployed in. **Required** by the gate: it lists the Timelock's pending operations and its PROPOSER / CANCELLER / admin holders from here | `verify_roles.js`, `migrate_roles.js` |
+| `SRX_TOKEN_DEPLOY_BLOCK_<NET>` | Block the hub SRXToken was deployed in. **Required** by the gate: it lists every `PeerSet` on the hub from here | `verify_roles.js` |
+| `TREASURY_<NET>` | The SRXTreasury **contract**. Required by Steps 03 and 10 (no fallback to `WALLET_TREASURY`) | `03`, `10`, `06`, `06b`, `verify_roles.js` |
+
+⛔ `GUARDIAN_MULTISIG` is **retired**. It used to mean GuardianModule's guardian in `08` and the StabilisationFund's
+`GUARDIAN_ROLE` in `verify_roles.js`, which cannot both be right. `08` refuses to run, and the gate fails, while it
+is set: remove it and set the two variables above.
 
 ## Hand-over procedure
 
@@ -141,11 +165,13 @@ idempotent (steps already correct on-chain are skipped). It has two phases,
 because the token's two-step ownership transfer needs the Timelock to accept:
 
 ```
-# Phase 1 — NOT freely reversible. Grants to the Timelock, GuardianModule and Governor; the
-# Safe gives up GOVERNANCE, SPENDER, PAUSER and BURN (it keeps WIND_DOWN_ROLE on SRXStaking and
-# StabilisationFund; there is no UPGRADER_ROLE to move); token delegate + ownership transfer; the
-# Timelock's acceptance of ownership is scheduled. Revoking the Safe's SPENDER_ROLE cannot be
-# undone by the Safe: SPENDER_ROLE administers itself, so putting it back needs a Timelock operation.
+# Phase 1 — before the irreversible phase 2. Grants to the Timelock, GuardianModule and Governor;
+# the Safe gives up GOVERNANCE, PAUSER and BURN where it holds them (it keeps WIND_DOWN_ROLE on
+# SRXStaking and StabilisationFund; there is no UPGRADER_ROLE to move); token delegate +
+# ownership transfer; the Timelock's acceptance of ownership is scheduled. The Safe never holds
+# SRXTreasury's SPENDER_ROLE: the constructor grants it to the Timelock only and makes it
+# administer itself, so there is no Safe SPENDER_ROLE to revoke (the migration lists it, and
+# skips it as already correct).
 npm run migrate:roles -- --network ethereum
 # → migrate_roles.phase1.ethereum.json; import at app.safe.global → Transaction Builder
 
@@ -155,8 +181,9 @@ npm run migrate:roles -- --network ethereum
 # admin rights, the Timelock admin last. Refuses to run before the delay has passed.
 # ⚠️ Open: internal audit M11 (design half pending). The Safe is a temporary Timelock
 # proposer from step 03 until phase 2, and an operation it schedules in that window survives
-# phase 2. The gate half of the fix (verify_roles fails on pending pre-hand-over Timelock
-# operations) is being built.
+# phase 2. The gate half of the fix exists: `gate_checks.checkNoPendingTimelockOps`, called by
+# `verify_roles.js`, fails on any pre-hand-over Timelock operation still pending (it needs
+# `TIMELOCK_DEPLOY_BLOCK_<NET>`).
 MIGRATE_FINALIZE=1 npm run migrate:roles -- --network ethereum
 ```
 
@@ -174,7 +201,8 @@ local chain, by `scripts/ops/rehearse_role_migration.js`. It requires:
 npm run verify:roles -- --network ethereum
 ```
 This MUST print `✅ ALL CHECKS PASSED` before mainnet is considered ready. Set
-`DEPLOYER_EOA`, `DEPLOYER_MULTISIG` and `GUARDIAN_MULTISIG`, or the run reports
+`DEPLOYER_EOA`, `DEPLOYER_MULTISIG` and `SSF_GUARDIAN_MULTISIG` (and `PAUSE_GUARDIAN` and
+`CIRCUIT_BREAKER_ADDRESS` before `08`; see the variable table above), or the run reports
 itself INCOMPLETE rather than passing.
 
 ### Step 5 — Test a Safe transaction
@@ -193,7 +221,7 @@ on it in production.
 | Start wind-down (exit-only mode) on SRXStaking or StabilisationFund | Safe, 3 of 5 (`WIND_DOWN_ROLE`). Irreversible; also open to the Timelock, and to anyone once the contract has been paused for a total of 30 days within one run of pauses (pauses less than 7 days apart are one run, and only time actually paused counts; L2) |
 | Cancel a scheduled Timelock operation (veto) | Safe, 3 of 5 |
 | Grant/revoke any core role, treasury spend, fee change, peer change | Governor proposal → Timelock, 48 h |
-| Presale, airdrop, buyback caps, migrator operations | Safe, 3 of 5 |
+| Presale, airdrop, buyback caps | Safe, 3 of 5 |
 | Change presale oracle bounds or staleness | Safe, 3 of 5 |
 
 ---

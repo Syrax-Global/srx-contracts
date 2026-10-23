@@ -57,8 +57,26 @@ and the 5% float are unchanged (`scripts/deploy/lib/genesis_seed.js`).
 are owed, unlocked (since 16 Oct, internal audit L6, it never takes the SRX that buyers are
 owed), so anything beyond what buyers are owed would be launch-day float in all but name.
 
+### ⭐ The deploy order (E-02, review E, 22 Oct 2026)
+
+```
+01 token → 02 governance → 05 treasury → 10 Genesis round → 03 vesting + distributor
+        → 04 staking → 05b stabilisation fund → 06 TGE → 06b Genesis buyers' vaults → 08 guardian
+        → migrate_roles (phase 1, wait, phase 2) → verify_roles
+```
+
+⛔ **The SRXTreasury (Step 5) runs right after Step 2, not fifth.** Every launch vault (Step 3) and
+the Genesis contract (Step 10, for every buyer's vault) fixes, at deployment, **where a revoked
+vault's unvested SRX goes** (`revokeRecipient` / `vaultRevokeRecipient`), and that address can
+never be changed. It must be the SRXTreasury **contract** (spend only through the Timelock), never
+a wallet. Steps 3 and 10 therefore **refuse to run** unless `TREASURY_<NETWORK>` is set to a deployed
+SRXTreasury of the launch token. There is no fallback to `WALLET_TREASURY`, and a placeholder cannot
+be "upgraded later". `06_execute_tge.js`, `06b_genesis_vaults.js` and `verify_roles.js` check the result
+(every launch vault, the Genesis contract and every buyer vault).
+
 The order this imposes:
-1. `01_deploy_token`, then `10_deploy_presale` against that token. The round runs.
+1. `01_deploy_token`, `02_deploy_governance` and `05_deploy_treasury`, then `10_deploy_presale` against
+   that token and treasury. The round runs.
 2. **Close the round (`finalize()`) before `03_deploy_vesting`.** Step 3 schedules the seed
    vault's grant (400M minus what was sold), and it refuses, sending nothing, while the round is
    open. Set `PRESALE_ROUND_<NETWORK>` to the Genesis contract, or to `none` if there is no
@@ -66,10 +84,23 @@ The order this imposes:
 3. ⛔ **No refund after Step 3.** A refund changes the amount sold, so the grant scheduled in
    Step 3 no longer matches, and Step 6 refuses (the operation ids differ). If one is
    unavoidable, re-run Step 3 and wait the Timelock delay again.
+   ⛔ **A re-run of Step 3 after Step 4 or 5b also requires re-running Step 4 and Step 5b (E-01).**
+   Step 3 deploys a **new** `TGEDistributor` every time, but `SRXStaking` and `StabilisationFund`
+   fix the distributor they were deployed against, for good (REG-50): it is their only reward
+   backing. Left as they are, they would be tied to a distributor that never launches; the 1.7B
+   staking allocation would arrive and could never back a reward, and the fund could deploy no
+   SRX at all. So: `03_deploy_vesting.js` **refuses to run** while `STAKING_<NETWORK>` or
+   `STABILISATION_FUND_<NETWORK>` is set, unless `ACK_REDEPLOY_STAKING_AND_FUND=yes` says you
+   know; after it, run `04` (staking and fee controller) and `05b` (fund) again against the new
+   `TGE_DISTRIBUTOR_<NETWORK>`, replace their addresses in `.env`, and redo `08` (or have governance
+   re-target its modules) if it already ran. `06_execute_tge.js` refuses to launch unless
+   `staking.tgeDistributor() == fund.tgeDistributor() == TGE_DISTRIBUTOR_<NETWORK>`.
 4. `06_execute_tge` sends the Genesis contract its amount. **Straight after, run
    `06b_genesis_vaults.js`, before `maxWalletBalance` is switched on (PSR-09).** It creates
-   each buyer's vault and starts its clock. It needs one Safe batch per 20 buyers
-   (`GENESIS_VAULT_CHUNK`), so re-run it until it prints `GENESIS VAULTS COMPLETE`. It refuses
+   each buyer's vault and starts its clock. It needs one Safe batch per 12 buyers
+   (`GENESIS_VAULT_CHUNK`, default 12): each buyer's vault costs about 961,000 gas to create and start,
+   and Ethereum allows one transaction 16,777,216 gas, so the script estimates every chunk and refuses
+   one above 15,000,000 gas (C5). Re-run it until it prints `GENESIS VAULTS COMPLETE`. It refuses
    if the Genesis contract holds more or less than its buyers are owed.
 5. `verify_tge.js` then checks every buyer's vault and that the Genesis contract holds 0 SRX.
 
@@ -107,13 +138,27 @@ Complete EVERY item and get sign-off from two team members before running.
       wallet** (a Safe). The TGE gate refuses a single-key wallet on a real network
 - [ ] StabilisationFund address set as strategic reserve destination (NOT a raw wallet)
 - [ ] Vesting vault addresses in `.env` match deployed vault addresses on Etherscan
+- [ ] `SRXStaking.tgeDistributor()` and `StabilisationFund.tgeDistributor()` both equal
+      `TGE_DISTRIBUTOR_<NETWORK>` (the distributor that launches; `06` checks it and refuses otherwise)
+- [ ] `TREASURY_<NETWORK>` was set **before** Steps 10 and 03, and every launch vault's
+      `revokeRecipient()`, `PreSaleRound.vaultRevokeRecipient()` and each Genesis buyer vault's
+      `revokeRecipient()` equal it (06 and `verify_roles.js` report this)
 
 ### Environment Setup
-- [ ] `.env` file contains all required vars for mainnet network
-- [ ] `SRX_TOKEN_MAINNET`, `TGE_DISTRIBUTOR_MAINNET`, `TREASURY_MAINNET`
-- [ ] `STABILISATION_FUND_MAINNET`, `STAKING_MAINNET`
-- [ ] `VESTING_FOUNDERS_MAINNET`, `VESTING_CORE_TEAM_MAINNET`, `VESTING_SEED_MAINNET`
-- [ ] `VESTING_PRESALE_MAINNET`, `VESTING_ECOSYSTEM_MAINNET`, `VESTING_LIQUIDITY_RESERVE_MAINNET`
+
+**Network names (E-08).** Every script takes the network from Hardhat's `--network` flag and reads
+`<NAME>_<NETWORK IN CAPITALS>`. Ethereum mainnet is the network `ethereum` (the key in
+`00_config.js` `LZ_ENDPOINTS` / `LZ_EIDS`), so every variable below ends `_ETHEREUM`, and BNB Chain is
+`bsc` / `_BSC`. There is no network called `mainnet`. ⚠️ `hardhat.config.js` does **not** define a mainnet
+network today: the `ethereum` block is commented out, waiting for an RPC URL and the hardware-wallet
+signer, so `--network ethereum` is rejected by Hardhat until that block is enabled. Enabling it is a
+deliberate release step (it is not done here, and no RPC configuration is added by this document).
+
+- [ ] `.env` file contains all required vars for the `ethereum` network
+- [ ] `SRX_TOKEN_ETHEREUM`, `TGE_DISTRIBUTOR_ETHEREUM`, `TREASURY_ETHEREUM`
+- [ ] `STABILISATION_FUND_ETHEREUM`, `STAKING_ETHEREUM`, `GUARDIAN_MODULE_ETHEREUM` (08 prints it; the older names `STABILISATION_ETHEREUM` and `GUARDIAN_ETHEREUM` are still read)
+- [ ] `VESTING_FOUNDERS_ETHEREUM`, `VESTING_CORE_TEAM_ETHEREUM`, `VESTING_SEED_ETHEREUM`
+- [ ] `VESTING_PRESALE_ETHEREUM`, `VESTING_ECOSYSTEM_ETHEREUM`, `VESTING_LIQUIDITY_RESERVE_ETHEREUM`
 - [ ] `WALLET_PRESALE`, `WALLET_LIQUIDITY`, `WALLET_MARKET_MAKER` (multi-signature wallets)
 - [ ] Deployer wallet has sufficient ETH for gas (estimate: 0.05–0.15 ETH at 30 gwei)
 - [ ] Gas price checked — do NOT execute during network congestion (>50 gwei)
@@ -134,19 +179,19 @@ Complete EVERY item and get sign-off from two team members before running.
 
 ```bash
 # Confirm genesis not yet complete (must return false)
-npx hardhat console --network mainnet
-> const t = await ethers.getContractAt("SRXToken", process.env.SRX_TOKEN_MAINNET)
+npx hardhat console --network ethereum
+> const t = await ethers.getContractAt("SRXToken", process.env.SRX_TOKEN_ETHEREUM)
 > await t.genesisComplete()    // must be: false
 
 # Confirm distribution not yet executed (must return false)
-> const d = await ethers.getContractAt("TGEDistributor", process.env.TGE_DISTRIBUTOR_MAINNET)
+> const d = await ethers.getContractAt("TGEDistributor", process.env.TGE_DISTRIBUTOR_ETHEREUM)
 > await d.distributed()        // must be: false
 ```
 
 ### Step 2 — Run TGE script
 
 ```bash
-npx hardhat run scripts/deploy/06_execute_tge.js --network mainnet
+npx hardhat run scripts/deploy/06_execute_tge.js --network ethereum
 ```
 
 The script will:
@@ -162,7 +207,7 @@ go in one Safe batch).
 ### Step 2b — Genesis buyers' vaults (straight after, before `maxWalletBalance` is switched on)
 
 ```bash
-npx hardhat run scripts/deploy/06b_genesis_vaults.js --network mainnet
+npx hardhat run scripts/deploy/06b_genesis_vaults.js --network ethereum
 ```
 
 Re-run after the Safe executes each batch, until it prints `GENESIS VAULTS COMPLETE`.
@@ -170,7 +215,7 @@ Re-run after the Safe executes each batch, until it prints `GENESIS VAULTS COMPL
 ### Step 3 — Post-execution verification (run immediately after)
 
 ```bash
-npx hardhat run scripts/ops/verify_tge.js --network mainnet
+npx hardhat run scripts/ops/verify_tge.js --network ethereum
 ```
 
 This script verifies:
@@ -180,6 +225,18 @@ This script verifies:
 - Each vault's `tgeTimestamp()` is the correct block timestamp
 - StabilisationFund received 1,500,000,000 SRX
 - Staking contract `rewardPool()` = 1,700,000,000 SRX
+
+Then record which compiled build produced the deployment, from the same clean checkout:
+
+```bash
+npx hardhat run scripts/ops/record_build.js --network ethereum
+```
+
+It writes `deployments/<network>.builds.json` (here, ethereum): per contract, the sha256 of the build-info file, the
+artifact and on-chain code hashes, and whether the on-chain code matches the build (immutables
+zeroed). It refuses if `contracts/` has uncommitted changes or any contract does not match. The
+Syrax Chain's base-token registration gate pins SRXToken's `buildInfoSha256` from this file; a
+later recompile is never what it reads (Chain, 23 Oct 2026).
 
 ---
 
@@ -218,7 +275,7 @@ false (and `expectedAllocation()` may be unset). The vault admin is the SRXTimel
 1. Check which Timelock operations are done. `Timelock.executeBatch` is atomic, so each of the two
    operations (declare every grant, then start every clock) either ran for all vaults or for none:
 ```bash
-npx hardhat console --network mainnet
+npx hardhat console --network ethereum
 > const vault = await ethers.getContractAt("VestingVault", "<VAULT_ADDRESS>")
 > await vault.tgeTriggered()   // false = the TRIGGER operation has not executed
 ```
@@ -227,8 +284,8 @@ npx hardhat console --network mainnet
    to anyone once the operation is ready).
 3. Continue with Step 4 if not yet executed:
 ```bash
-> const staking = await ethers.getContractAt("SRXStaking", process.env.STAKING_MAINNET)
-> const bal = await token.balanceOf(process.env.STAKING_MAINNET)
+> const staking = await ethers.getContractAt("SRXStaking", process.env.STAKING_ETHEREUM)
+> const bal = await token.balanceOf(process.env.STAKING_ETHEREUM)
 > await staking.notifyRewardAmount(bal)
 ```
 4. Run `verify_tge.js` to confirm full completion
@@ -241,9 +298,9 @@ npx hardhat console --network mainnet
 
 **Recovery:** Call `notifyRewardAmount()` manually (Step 4 is accounting-only):
 ```bash
-npx hardhat console --network mainnet
-> const staking = await ethers.getContractAt("SRXStaking", process.env.STAKING_MAINNET)
-> const bal = await token.balanceOf(process.env.STAKING_MAINNET)
+npx hardhat console --network ethereum
+> const staking = await ethers.getContractAt("SRXStaking", process.env.STAKING_ETHEREUM)
+> const bal = await token.balanceOf(process.env.STAKING_ETHEREUM)
 > await staking.notifyRewardAmount(bal)
 > await staking.rewardPool()   // must be > 0
 ```
@@ -266,19 +323,51 @@ This is why the pre-flight checklist requires 2 team members to sign off on addr
 ## Post-TGE Actions (After verify_tge.js passes)
 
 - [ ] Announce TGE to community with all allocation addresses for public transparency
-- [ ] Governance proposal to set staking emission rate:
-      `staking.setRewardRate(13_500_000_000_000_000_000)` — ~4-year distribution
+- [ ] Launch reward rates are set IN the 06 Safe batch, beside `notifyRewardAmount`, while the Safe
+      still holds GOVERNANCE_ROLE (Security ruling, 23 Oct 2026): staking 13.5 SRX/s (~4 years). After the
+      hand-over a rate is a governance vote, and governance can pass nothing until holders have delegated
+      400M SRX. The values come from 00_config `REWARD_RATES` and must match the manifest's `rewardRates`
+      byte for byte (`tge_targets.checkRewardRates`), or 06 refuses. ⚠️ OPEN: the StabilisationFund's rate
+      is null until Jared confirms it in writing; 06 then leaves it unset and says so. Public material says
+      the launch rates were set at TGE from the published schedule by the launch multisig, and that any
+      change is a governance vote.
 - [ ] Enable trading on DEXes (add liquidity to pools)
 - [ ] The Genesis round (`PreSaleRound`) is run and closed before launch (see the ordering above); there is no
       `openRound()` function to call at TGE
 - [ ] Confirm GuardianModule (`08_deploy_guardian.js`) is already deployed and wired. It is
       deployed before the role hand-over, not after TGE, and holds `PAUSER_ROLE` on SRXToken,
       SRXStaking, SRXTreasury, FeeController and StabilisationFund (`verify_roles.js` checks the
-      roles; adding the module registry and breaker settings to that check is being built, L16)
-- [ ] Run the bridge circuit-breaker monitor `scripts/ops/circuit_breaker_monitor.js`. The
-      breaker covers the bridge only, and the monitor reports bridge-outs (counting returns too
-      is being built, L14)
+      roles, the module registry and the breaker settings; CONTROL-10, L16)
+- [ ] Run the bridge circuit-breaker monitor `scripts/ops/circuit_breaker_monitor.js` if a breaker
+      is configured (mainnet has none today). The breaker covers the bridge only; the monitor reports
+      movements in both directions (L14). ⚠️ Open (A1/A4): round trips by one holder can trip it.
 - [ ] Revoke deployer EOA from all remaining roles within 24 hours of TGE
+
+### Governance activation (launch delegation, option 1 — Jared via the Command Centre, Security agreed, 23 Oct 2026)
+
+SRX counts as a vote only once its holder delegates (ERC20Votes). Almost all SRX at launch sits in contracts
+that cannot delegate (vesting vaults, staking, treasury, fund), and **Syrax-held or Syrax-controlled SRX is never
+delegated**: that would hand the vote to Syrax. Governance therefore stays dormant until holders bring the
+delegated supply past quorum (400M SRX). Option 2 (vault beneficiaries delegating locked SRX) was refused by
+Security: it gives insiders the vote.
+
+- [ ] Publish the holder instructions: "activate voting" = delegate to yourself, or to a delegate you choose.
+- [ ] Gas-free activation through a relayer that submits the holder's signed `delegateBySig` (EIP-712, already in
+      the token; proved in `test/governance/Delegation.test.js`). Security's conditions before it is built:
+  1. The relayer holds no authority; it only submits the holder's signature, and the token checks nonce and
+     expiry. Gas comes from a capped wallet with a daily ceiling that pages when it runs low.
+  2. Expiry at most 1 hour. The signing screen states plainly who the delegate is (address, and name if known)
+     and that the vote moves to them.
+  3. The app and site prefill only the holder's own address (self-delegation). Delegating to anyone else is an
+     explicit typed or selected choice, never a link parameter. The relayer logs and rate-limits per holder.
+  4. Rate limits per address and per IP, and Turnstile on the relay endpoint.
+  5. The M9 watch warns when one delegate gains more than 10% of quorum in a day
+     (`scripts/ops/lib/delegated_supply.js` → `concentrationWarnings`).
+- [ ] Start the M9 watch: delegated supply is read exactly with `scripts/ops/lib/delegated_supply.js` (the running
+      sum of `DelegateVotesChanged` from `SRX_TOKEN_DEPLOY_BLOCK_<NET>`), against quorum.
+- [ ] Plan no proposal until delegated supply is above 3× quorum (1.2B SRX).
+- [ ] Test networks only: `scripts/ops/testnet_activate_voting.js` self-delegates the configured test wallets (it
+      refuses any other network).
 
 ---
 

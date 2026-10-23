@@ -736,10 +736,13 @@ describe("GuardianModule", function () {
     it("emits CrossChainPauseSignal", async function () {
       const { guardian_module, guardian, MODULE_BRIDGE } = await loadFixture(deployFixture);
 
+      // The block is pinned, so the timestamp is exact even under coverage (slower mining).
+      const at = (await ethers.provider.getBlock("latest")).timestamp + 10;
+      await ethers.provider.send("evm_setNextBlockTimestamp", [at]);
       await expect(
         guardian_module.connect(guardian).signalCrossChainPause(BSC_EID, MODULE_BRIDGE, true, "alert")
       ).to.emit(guardian_module, "CrossChainPauseSignal")
-        .withArgs(BSC_EID, MODULE_BRIDGE, true, guardian.address, await ethers.provider.getBlock("latest").then(b => b.timestamp + 1));
+        .withArgs(BSC_EID, MODULE_BRIDGE, true, guardian.address, at);
     });
 
     it("guardian can signal unpause after investigation", async function () {

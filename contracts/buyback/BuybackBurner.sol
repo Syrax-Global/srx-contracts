@@ -164,7 +164,7 @@ contract BuybackBurner is AccessControl, Pausable, ReentrancyGuard {
      *         performs a low-level call with the provided calldata.
      *
      *         After the swap, the contract verifies at least `minSrxOut` SRX was received
-     *         before calling burnHeld().
+     *         before burning it through SRXToken.buyAndBurn().
      *
      * @param tokenIn       ERC-20 to sell (e.g. USDC address).
      * @param amountIn      Amount of tokenIn to sell (in tokenIn decimals).
