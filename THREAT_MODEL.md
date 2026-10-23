@@ -17,7 +17,7 @@
 
 | # | Domain | Status | Residual | Primary doc | Owner |
 |---|--------|--------|----------|-------------|-------|
-| D1 | Contract code correctness | ✅ internal rounds plus the 7 Oct 2026 external reports, all fixed with tests; the 16 Oct 2026 internal audit (12 Medium, 17 Low) fixed in part, the rest in progress or open for design decisions (see `REMEDIATION.md`) | Low | `docs/audits/`, `REMEDIATION.md` | Eng |
+| D1 | Contract code correctness | ✅ internal rounds plus the 7 Oct 2026 external reports, all fixed with tests; the 16 Oct 2026 internal audit (12 Medium, 17 Low) and the 22 Oct 2026 review round fixed in part, the rest in progress or open for design decisions (see `REMEDIATION.md`) | Low | `docs/audits/`, `REMEDIATION.md` | Eng |
 | D2 | Deployment & TGE execution | ✅ remediated R6 | Med | `DEPLOYMENT_SECURITY.md` | Eng/DevOps |
 | D3 | Economic / tokenomics | 🟡 draft | High | `ECONOMIC_THREAT_MODEL.md` | Founder/Eng |
 | D4 | Cross-chain / bridge | 🟡 draft | High | `BRIDGE_SECURITY_MODEL.md` | Eng |
@@ -57,7 +57,7 @@ A living list of every attack/failure angle to test or document. ✅ = covered, 
 ✅ Reentrancy · ✅ access control · ✅ integer over/underflow · ✅ oracle staleness/bounds ·
 ✅ no upgradeable contract (REG-53: SRXStaking, FeeController, StabilisationFund and SRXTreasury are plain contracts, so there is no upgrade path, upgrade key or storage layout to attack) · ✅ locked hub peer on every spoke (it accepts the hub or zero, nothing else) and the hub's per-chain inbound limit with guardian freeze ·
 ✅ launch-protection bypass on mint/burn · ✅ reward-pool solvency (`periodFinish`) ·
-✅ Merkle replay/second-preimage · ✅ tier-boundary math · ✅ 16 Foundry invariants (7 token, 4 bridge, 5 reward pools) · ✅ Slither (CI).
+✅ Merkle replay/second-preimage · ✅ tier-boundary math · ✅ 33 Foundry invariants (7 token, 5 staking accounting, 7 vesting, 4 bridge, 4 fund accounting, 6 reward pools) · ✅ Slither (CI).
 
 ### D2 — Deployment & TGE (✅ remediated)
 ✅ TGE destination allowlist gate (`verify_tge_targets.js`) · ✅ supply-sum invariant in the gate ·
@@ -71,10 +71,10 @@ A living list of every attack/failure angle to test or document. ✅ = covered, 
 ⬜ sniper/MEV launch-day modeling.
 
 ### D4 — Bridge (🟡)
-✅ hub-and-spoke: a spoke sends to and accepts from the hub only, at an address fixed at deployment · ✅ hub inbound limit per chain (a draining bucket; none set means no returns) with a guardian freeze that only governance lifts · ✅ each spoke's owner and LayerZero delegate behind that chain's own 48-hour Timelock · ⬜ the spoke pause and the Safe's roles on a spoke (internal audit M4, open) · ⬜ spoke burns counted on the hub (L9, open) ·
+✅ hub-and-spoke: a spoke sends to and accepts from the hub only, at an address fixed at deployment · ✅ hub inbound limit per chain (a draining bucket; none set means no returns) with a guardian freeze that only governance lifts, even after the guardian's sunset (deliberate: nobody else could re-freeze a compromised chain), and that also refuses sends into the frozen chain · ✅ each spoke's owner and LayerZero delegate behind that chain's own 48-hour Timelock · ⬜ the spoke pause and the Safe's roles on a spoke (internal audit M4, open) · ⬜ spoke burns counted on the hub (L9, open) · ⬜ the hub's per-chain inbound bucket counts gross returns, so one holder's repeated out-and-back sends can hold honest returns from that chain back and can trip the circuit breaker (internal review A1 and A4, Medium, open for a design decision: counting net returns would end the blocking but let honest sends into a compromised chain free room for forged returns; no funds are lost, returns are delayed) ·
 🟡 LayerZero DVN/executor config spec (≥2 independent DVNs) · ⬜ cross-chain supply reconciliation
 monitor · ⬜ circuit-breaker thresholds set · ⬜ peer-set ceremony runbook · ⬜ reorg-on-mint handling ·
-⬜ ZkSyncMigrator oracle = multisig + time-boxed.
+✅ no burn-and-claim oracle: ZkSyncMigrator is retired and not deployed (CH-13, 22 Oct 2026); SRX moves onto Syrax Chain through the chain's own bridge, locked 1:1 in the Ethereum vault, so no Syrax-run oracle, funded reserve or hot key sits in the path.
 
 ### D5 — Governance (🟡)
 ✅ flash-loan-vote resistance (timestamp clock + snapshot + delay) · ⬜ delegation-participation target ·
@@ -103,7 +103,7 @@ linkage · ⬜ sanctions screening · ⬜ exchange-listing legal readiness.
 program · ⬜ signer social-engineering defense · ⬜ launch-protection parameter values decided.
 
 ### D11 — Formal verification (🟡)
-✅ 7 single-contract Foundry invariants · ✅ 5 reward-pool invariants (REG-50, `RewardPoolsInvariant`) · ✅ cross-chain supply-conservation invariant (Foundry `BridgeConservationInvariant`, 8 Oct 2026; JS property test alongside) ·
+✅ 7 single-contract Foundry invariants · ✅ 6 reward-pool invariants (REG-50, `RewardPoolsInvariant`) · ✅ 16 accounting invariants for staking (5), vesting (7) and the Stabilisation Fund (4) · ✅ cross-chain supply-conservation invariant (Foundry `BridgeConservationInvariant`, 8 Oct 2026; JS property test alongside) ·
 ⬜ full-TGE-sequence property · ✅ bridge conservation (`test/BridgeConservation.property.test.js`, `test/security-triage-2026-10.test.js`) · ⬜ external formal verification
 (Certora/SMT) decision.
 

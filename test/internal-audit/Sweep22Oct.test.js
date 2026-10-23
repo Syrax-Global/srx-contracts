@@ -247,8 +247,13 @@ describe("Sweep 22 Oct: governance reopening resets the breaker; a new target st
   });
 
   it("updateModuleTarget drops the old target's flags and adopts the new target's pause as governance's", async function () {
-    const { admin, guardian, governance, gm, lz, BRIDGE } = await wired();
+    const { admin, guardian, governance, gm, tok, lz, BRIDGE } = await wired();
     await gm.connect(guardian).pauseModule(BRIDGE, "incident");
+    // review round 22 Oct (D-2): while the old target is actually paused, repointing is refused
+    // (ModuleAlreadyPaused); it proceeds once the flag is stale (the old target reopened directly).
+    await expect(gm.connect(governance).updateModuleTarget(BRIDGE, await tok.getAddress()))
+      .to.be.revertedWithCustomError(gm, "ModuleAlreadyPaused").withArgs(BRIDGE);
+    await tok.connect(admin).setBridgePaused(false);                          // flag in the module is now stale
     const tok2 = await (await ethers.getContractFactory("SRXToken")).deploy(await lz.getAddress(), admin.address);
     await gm.connect(governance).updateModuleTarget(BRIDGE, await tok2.getAddress());
     expect(await gm.isModulePaused(BRIDGE)).to.equal(false);                 // new target is open

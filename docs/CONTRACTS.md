@@ -1,6 +1,7 @@
 # SRX Token — Contract Reference
 
-The SRX suite is 16 production contracts. None of them is upgradeable: the token and
+The SRX suite is 14 contracts in audit scope (`AUDIT_SCOPE.md` §3), plus `GenesisAgreementRegistry` (out of scope by default,
+available on request) and `ZkSyncMigrator` (retired, not deployed), which is 16 contracts in all. None of them is upgradeable: the token and
 every other contract are non-upgradeable, and SRXStaking, FeeController, StabilisationFund
 and SRXTreasury are plain contracts deployed directly (REG-53). Their code can never change,
 no role can upgrade or replace them, and there is no `UPGRADER_ROLE`, `initialize()` or storage
@@ -15,9 +16,10 @@ in place (see [`MIGRATION.md`](MIGRATION.md)).
 ### SRXToken (`contracts/token/SRXToken.sol`)
 The canonical SRX ERC-20 on Ethereum. Non-upgradeable.
 - **Standards:** ERC-20, ERC-2612 Permit, ERC20Votes (governance), LayerZero V2 OFT.
-- **Supply:** fixed 10B, minted once via `genesis()`. Hub `totalSupply` never exceeds 10B (cap enforced in `_update`). A bridge send burns on the hub; a bridge return mints on the hub, only up to what was sent to that chain and within that chain's inbound limit. `buyAndBurn()` and `ZkSyncMigrator.migrate()` (which calls it) are the only permanent reductions (`totalBurned`); genuine SRX across all chains is 10B minus `totalBurned`. ⚠️ Open: internal audit M4 and L9 (design pending): a spoke's own `buyAndBurn` reduces supply there, but the hub's `totalBurned` does not change, so this holds only while no spoke burns.
-- **Bridge returns:** each remote chain has an inbound limit on the hub, a draining bucket (at most the limit in flight, draining at the limit per 24 hours). A chain with no limit set returns nothing, and no limit can exceed `MAX_SUPPLY`. The guardian can freeze one chain through `GuardianModule.freezeBridgeInbound`; only governance unfreezes. A refused return stays retryable in LayerZero. The exact bound for a compromised chain is its limit, plus one more limit for each day before the guardian freezes it (not just "the limit").
+- **Supply:** fixed 10B, minted once via `genesis()`. Hub `totalSupply` never exceeds 10B (cap enforced in `_update`). A bridge send burns on the hub; a bridge return mints on the hub, only up to what was sent to that chain and within that chain's inbound limit. `buyAndBurn()` is the only permanent reduction on the hub (`totalBurned`; the migrator is retired, CH-13); genuine SRX across all chains is 10B minus `totalBurned`. ⚠️ Open: internal audit M4 and L9 (design pending): a spoke's own `buyAndBurn` reduces supply there, but the hub's `totalBurned` does not change, so this holds only while no spoke burns.
+- **Bridge returns:** each remote chain has an inbound limit on the hub, a draining bucket (at most the limit in flight, draining at the limit per 24 hours). A chain with no limit set returns nothing, and no limit can exceed `MAX_SUPPLY`. The guardian can freeze one chain through `GuardianModule.freezeBridgeInbound`; only governance unfreezes, even after the guardian's sunset (deliberate: after it nobody else could re-freeze a compromised chain). While a chain is frozen, a send into that chain is refused too (`InboundChainFrozen`), so no SRX is burned that could not come back. A refused return stays retryable in LayerZero. The exact bound for a compromised chain is its limit, plus one more limit for each day before the guardian freezes it (not just "the limit").
 - **Launch protection:** optional, time-limited max-transfer / max-wallet limits with an exemption list. The wallet cap does not apply to SRX leaving a listed wind-down exit (SRXStaking, StabilisationFund), so a holder's own principal always comes back.
+- **Own address:** a plain transfer to the hub's own address is refused (`TransferToTokenContract`), as on the spoke. A bridge credit to it still lands, and `rescueTokens` recovers it.
 - **Emergency:** `pause()`/`unpause()` (PAUSER_ROLE, held by GuardianModule).
 - **Bridge:** `setPeer` has no pause guard (peers can be zeroed during an incident). Ownership is two-step and cannot be renounced; the owner and LayerZero delegate move to the Timelock at the launch hand-over.
 
@@ -52,6 +54,9 @@ ecosystem allocations (parameters: `scripts/deploy/00_config.js`).
 On-chain presale accepting ETH/USDC/USDT/WBTC with Chainlink pricing, participation-tier
 bonuses, and per-investor vault deployment. Oracle reads carry staleness + completeness +
 price-bound checks (per-feed staleness configurable). Invest paths are `nonReentrant`.
+A payer chooses where its refund goes (`claimRefund(asset, to)`). `quoteStable(stablecoin, stableAmount, investor)`
+quotes with that coin's own feed and decimals and reverts for a coin the round does not accept. The admin can put
+ETH back after withdrawing it (`returnFunds()`, payable), so a late refund can still be paid.
 
 ### SRXAirdrop (`contracts/airdrop/SRXAirdrop.sol`)
 Merkle-tree claimable airdrop. Leaves are chain-bound and double-hashed:
@@ -74,7 +79,7 @@ recorded delivering); no fee revenue, buy-back proceeds or later transfer can ex
 for them (REG-50). The former second "bonus" reward stream was removed from the code.
 Emission is bounded by the funded pool (`periodFinish`). 10% early-exit penalty is sent to the dead address
 (`0xdEaD`), which is out of circulation but not counted in `SRXToken.totalBurned`.
-Tier is based on the weighted stake (lock multiplier included) while a lock is running, and on the raw principal once the lock has ended or the contract has wound down. New SRX added with `addToPosition` always serves a full term of the position's lock duration. Tier thresholds must rise strictly with the tier, Slate needs more than 0, and discounts rise with the tier. There is no rescue function for the reward pool: after wind-down, unused allocation can leave only through `releaseRewardAllocation` to a named successor.
+Tier is based on the weighted stake (lock multiplier included) while a lock is running, and on the raw principal once the lock has ended or the contract has wound down. New SRX added with `addToPosition` always serves a full term of the position's lock duration. Tier thresholds must rise strictly with the tier, Slate needs more than 0, and discounts never fall as the tier rises (adjacent tiers may share a discount). There is no rescue function for the reward pool: after wind-down, unused allocation can leave only through `releaseRewardAllocation` to a named successor.
 
 **Wind-down (exit-only) mode.** Irreversible. `startWindDown()` can be called by the Timelock
 (`GOVERNANCE_ROLE`), by the admin Safe (`WIND_DOWN_ROLE`, which the Safe keeps after the launch
@@ -107,8 +112,9 @@ rewards use the pool-bounded Synthetix pattern and are paid in SRX only, from a 
 backed only by launch SRX the TGEDistributor delivered. Platform fees go to the Treasury,
 never the fund (`receiveFees()` was removed). No caller, governance included, can deploy
 depositors' principal or reward SRX; `recoverLiquidity()` was removed (finding R7-16). A
-contributor's withdrawal lock is fixed when they deposit: governance can change it only for
-later deposits, and to at most 90 days. Below `minTotalForEmission` (governance-set; inactive at 0)
+contributor's withdrawal lock is per position (per address): governance can change the lock length only for
+later deposits, and to at most 90 days (also enforced in the constructor); a top-up can extend the unlock time,
+never bring it forward. Below `minTotalForEmission` (governance-set; inactive at 0)
 emission does not accrue. There is no rescue function for the reward pool, as in SRXStaking.
 
 **Wind-down (exit-only) mode.** Irreversible, with the same three ways to start it as SRXStaking
@@ -145,14 +151,19 @@ swapped; router approvals are exact and reset.
 ### GuardianModule (`contracts/guardian/GuardianModule.sol`)
 Standalone, non-upgradeable security layer with an **immutable sunset**, at most 180 days after deployment (enforced in the constructor; it can only be reduced).
 A guardian pause of the token runs at most 14 days, after which anyone may lift it (`lapseTokenPause`); a full term is followed by a 7-day block, and guardian token pauses total at most 30 days. Pauses less than 7 days apart count as one run of at most 14 days, so unpausing early and pausing again buys nothing. Only governance can hold one longer (`governanceHoldTokenPause`), and a pause governance holds, or an outside pause that `pauseAll` adopted, can be lifted only by governance. The circuit breaker stops the bridge only (the token's `setBridgePaused`), never ordinary transfers.
-Per-module pause and unpause (`pauseModule` will not pause the same module again within an hour of its last pause; `pauseAll` ignores that per-module wait by design, with 30 minutes between uses of `pauseAll` itself; unpausing has no delay), an emergency pause-all, a per-chain bridge freeze (`freezeBridgeInbound`), a bridge-volume circuit
-breaker (a draining bucket; a trip lasts until governance calls `resetCircuitBreaker`, and the guardian cannot re-open it), and governance override (governance can always unpause, though the guardian can re-pause after its cooldown, except where the pause is governance's own). Governance is the 48 h Timelock in the deployed topology. Guardian powers, including breaker reporting, end at the sunset; after it, anyone may lift a pause the guardian left (`releaseAfterSunset`).
+Per-module pause and unpause (`pauseModule` will not pause the same module again within an hour of its last pause; `pauseAll` ignores that per-module wait by design, with 30 minutes between uses of `pauseAll` itself; unpausing has no delay), an emergency pause-all, a per-chain bridge freeze (`freezeBridgeInbound`, lifted only by governance, even after the sunset), a bridge-volume circuit
+breaker (a draining bucket; a trip lasts until governance calls `resetCircuitBreaker`, and the guardian cannot re-open it), and governance override (governance can always unpause, though the guardian can re-pause after its cooldown, except where the pause is governance's own). Governance is the 48 h Timelock in the deployed topology. Guardian powers, including breaker reporting, end at the sunset; after it, anyone may lift a pause the guardian left (`releaseAfterSunset`, which emits `ReleasedAfterSunset`). Only the six module ids can be registered, with one `pause()` module per target, and `updateModuleTarget` is refused while the guardian holds that module paused.
 
-### ZkSyncMigrator (`contracts/migration/ZkSyncMigrator.sol`)
-Burn-to-migrate path for the future Syrax Chain transition. Users burn SRX (through `buyAndBurn`,
-counted in `totalBurned`; not a transfer to a dead address); a bridge oracle issues native SRX on the
-destination. One-way enable; governance-closable window. Request ids are unique per (chainId,
-migrator contract), so consumers must key on the emitting address too.
+### ZkSyncMigrator (`contracts/migration/ZkSyncMigrator.sol`): RETIRED, not deployed
+Retired by decision CH-13 (Jared, 22 Oct 2026); the contract and its tests stay in the repository as
+history. SRX moves onto Syrax Chain through the chain's own bridge: a holder signs one deposit, the SRX
+is locked 1:1 in the Ethereum vault and appears on Syrax Chain, withdrawable back at any time. Holders
+on BNB Chain or ZKsync Era first return to the Ethereum hub over the existing OFT bridge. The retired
+design burned SRX on Ethereum and relied on a Syrax-run oracle to issue the SRX on the destination; on
+that chain SRX exists only as SRX locked on Ethereum, so it would have needed a funded reserve and a hot
+key, and would have shrunk supply twice. Any future helper must be stateless and hold no funds and no
+roles. `scripts/deploy/09_deploy_migrator.js` refuses to run and `scripts/verify/verify_roles.js` fails a
+network that declares a migrator.
 
 ---
 

@@ -1003,8 +1003,8 @@ describe("PreSaleRound", function () {
     });
 
     it("quoteStable returns correct SRX including bonus for 1 USDC", async function () {
-      const { round, investor1, ONE_USDC } = await loadFixture(deployFixture);
-      expect(await round.quoteStable(ONE_USDC, investor1.address))
+      const { round, investor1, ONE_USDC, mockUsdc } = await loadFixture(deployFixture);
+      expect(await round.quoteStable(mockUsdc.target, ONE_USDC, investor1.address))
         .to.equal(SRX_PER_USDC_1);
     });
 
@@ -1468,7 +1468,7 @@ describe("PreSaleRound", function () {
       await round.connect(admin).setStablecoinFeeds(await usdcFeed.getAddress(), ethers.ZeroAddress);
 
       const amount = ONE_USDC * 1000n; // 1,000 USDC
-      const quoted = await round.quoteStable(amount, investor1.address);
+      const quoted = await round.quoteStable(mockUsdc.target, amount, investor1.address);
 
       await mockUsdc.connect(investor1).approve(await round.getAddress(), amount);
       await round.connect(investor1).investWithUSDC(amount);

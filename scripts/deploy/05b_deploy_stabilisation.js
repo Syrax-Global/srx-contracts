@@ -1,5 +1,5 @@
 /**
- * Step 5b — Deploy StabilisationFund (UUPS proxy)
+ * Step 5b — Deploy StabilisationFund (a plain contract: not upgradeable, no proxy; REG-53)
  *
  * The Syrax Stabilisation Fund (SSF) replaces the raw "strategic wallet"
  * as the destination for the 1,500,000,000 SRX Strategic Reserve (15% of
@@ -12,19 +12,20 @@
  * use the SSF address as the strategic reserve destination in setAllocations().
  *
  * What this script does:
- *  1. Deploys the StabilisationFund implementation contract.
- *  2. Deploys an ERC1967Proxy wrapping it (UUPS pattern, consistent with
- *     SRXStaking and SRXTreasury).
- *  3. Grants GOVERNANCE_ROLE to the Timelock (sole governance authority
+ *  1. Deploys the StabilisationFund once, with its constructor (no proxy, no
+ *     initializer: its code can never change; verify_roles.js fails it if it is a proxy).
+ *     The constructor fixes TGE_DISTRIBUTOR_<NETWORK> (Step 3) for good (REG-50, E-01): if
+ *     Step 3 is ever re-run, this step must be re-run against the new distributor.
+ *  2. Grants GOVERNANCE_ROLE to the Timelock (sole governance authority
  *     over capital deployment, parameter changes, and stress resolution).
- *  4. PAUSER_ROLE is left with the deployer admin for now.
+ *  3. PAUSER_ROLE stays with the admin Safe (the deployer never holds a role) for now.
  *     Step 8 (GuardianModule) will:
  *       a. Grant PAUSER_ROLE on SSF to GuardianModule.
- *       b. Revoke PAUSER_ROLE from the deployer.
- *       c. Register MODULE_SSF inside GuardianModule.
+ *       b. Register MODULE_SSF inside GuardianModule.
  *
  * Post-deploy role grants (NOT done here — handled by governance or Step 8):
- *  - GUARDIAN_ROLE   → 4-of-7 multi-sig (founders + lead investors + DAO delegates)
+ *  - GUARDIAN_ROLE   → 4-of-7 multi-sig (founders + lead investors + DAO delegates);
+ *                      verify_roles.js knows it as SSF_GUARDIAN_MULTISIG (not GuardianModule's PAUSE_GUARDIAN)
  *  - DEPLOYER_ROLE   → Treasurer multi-sig (Gnosis Safe)
  *  - ORACLE_REPORTER_ROLE → Off-chain monitor / Chainlink Automation upkeep
  *
@@ -34,7 +35,7 @@
  *
  * Run: npx hardhat run scripts/deploy/05b_deploy_stabilisation.js --network sepolia
  */
-const { ethers, upgrades, network } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { WALLETS, SSF, ssfRewardAllocation } = require("./00_config");
 const { createAdminBatch }          = require("./lib/adminTx");
 
@@ -70,14 +71,14 @@ async function main() {
   const rewardAllocation = ssfRewardAllocation(network.name); // throws on mainnet until decided
   console.log(`  rewardAllocation:     ${ethers.formatUnits(rewardAllocation, 18)} SRX (fixed for good, REG-50)\n`);
 
-  // ── Deploy StabilisationFund (UUPS proxy) ───────────────────────────────
+  // ── Deploy StabilisationFund ───────────────────────────────
 
-  console.log("[1/2] Deploying StabilisationFund (UUPS proxy)...");
+  console.log("[1/2] Deploying StabilisationFund...");
   const StabilisationFund = await ethers.getContractFactory("StabilisationFund");
   const ssf = await StabilisationFund.deploy(...[srxToken, admin, SSF.MAX_DEPLOYER_BPS, SSF.MAX_GUARDIAN_BPS, SSF.WITHDRAW_LOCK_DURATION, rewardAllocation, tgeDistributor]);
   await ssf.waitForDeployment();
-  const proxyAddr = await ssf.getAddress();
-  console.log(`  Proxy: ${proxyAddr}`);
+  const fundAddr = await ssf.getAddress();
+  console.log(`  StabilisationFund: ${fundAddr}`);
 
   // ── Grant GOVERNANCE_ROLE to Timelock ────────────────────────────────────
 
@@ -106,7 +107,7 @@ async function main() {
   console.log(`  ✅ StabilisationFund deployed and wired`);
   console.log(`${"─".repeat(60)}`);
   console.log(`\n📋 Save to .env:`);
-  console.log(`STABILISATION_FUND_${NET}=${proxyAddr}`);
+  console.log(`STABILISATION_FUND_${NET}=${fundAddr}`);
 
   console.log(`\n📋 Remaining role grants (done via governance or Step 8):`);
   console.log(`  GUARDIAN_ROLE   → 4-of-7 multi-sig`);
@@ -115,7 +116,7 @@ async function main() {
   console.log(`  PAUSER_ROLE     → GuardianModule (Step 8 wires this)`);
 
   console.log(`\n📋 Next step:`);
-  console.log(`  Set STABILISATION_FUND_${NET}=${proxyAddr} in .env`);
+  console.log(`  Set STABILISATION_FUND_${NET}=${fundAddr} in .env`);
   console.log(`  Then run Step 6 (Execute TGE) — it will use this address`);
   console.log(`  as the strategic reserve destination in setAllocations().`);
 }

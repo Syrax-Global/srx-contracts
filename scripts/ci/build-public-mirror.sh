@@ -163,6 +163,22 @@ done
 cp "$SRC/NOTICE-public" "$OUT/NOTICE"
 echo "  + NOTICE (from NOTICE-public)"
 
+# ── The public repo runs its CI on GitHub's own runners ──────────────────────
+# ⛔ 22 Oct 2026: from 95cbc08 the private workflows ask for our self-hosted runner, and the
+#    mirror copied them verbatim, so every public run waited for a runner that never came
+#    (0d29906 sat "pending" with no job). It must stay that way for our runner: a public
+#    repository's workflows can be started by anyone's pull request, so a self-hosted
+#    runner there would run outside code on our machine (GitHub's own guidance). The public
+#    copy asks for GitHub's hosted runner, free for public repositories, as it did until
+#    16 Oct. The jobs install their own pinned toolchains, so nothing else changes.
+for wf in "$OUT"/.github/workflows/*.yml; do
+  [ -e "$wf" ] || continue
+  # A temporary file, not sed -i: BSD sed (macOS) reads a bare -i differently (Security, 22 Oct).
+  sed -E "s/^([[:space:]]*)[\"']?runs-on[\"']?[[:space:]]*:[[:space:]]*\[self-hosted[^]]*\][[:space:]]*\$/\1runs-on: ubuntu-latest/" "$wf" > "$wf.tmp"
+  mv "$wf.tmp" "$wf"
+done
+echo "  ~ .github/workflows: runs-on rewritten to ubuntu-latest for the public copy"
+
 # ── Verify, rather than assume ───────────────────────────────────────────────
 echo
 echo "── Verification ─────────────────────────────────────────────"
@@ -269,6 +285,42 @@ elif find "$OUT" -iname '*.pdf' -not -path '*/node_modules/*' | grep -q .; then
   fail=1
 else
   echo "  ✓ nothing marked confidential, and no PDF whose text cannot be read"
+fi
+
+# 8. every public job runs on a GitHub-hosted runner, named exactly (see the rewrite above)
+# ⛔ ALLOW-LIST (Security, 22 Oct 2026): a deny-list of our runner's labels published
+#    "runs-on: group: syrax-ci" and "runs-on: ${{ vars.RUNNER }}". Every runs-on line must be
+#    exactly ubuntu-latest or ubuntu-24.04; a group, label list, expression, matrix or
+#    multi-line form is refused. So is any other mention of our runner's labels. The key is
+#    found quoted or unquoted, anywhere on a line ("runs-on": and {runs-on: x} are YAML too;
+#    Security's mutation published a quoted key); only the exact unquoted form is allowed.
+RUNS_ON_OK='^[[:space:]]*runs-on:[[:space:]]*(ubuntu-latest|ubuntu-24\.04)[[:space:]]*(#.*)?$'
+bad_runs_on=$(cd "$OUT" && grep -rInE "[\"']?runs-on[\"']?[[:space:]]*:" .github 2>/dev/null | while IFS= read -r hit; do
+  line="${hit#*:*:}"
+  printf '%s\n' "$line" | grep -qE "$RUNS_ON_OK" || printf '%s\n' "$hit"
+done)
+labels=$(grep -rInE -i "self-hosted|syrax-ephemeral|syrax-large|syrax-ci" "$OUT/.github" 2>/dev/null || true)
+if [ -n "$bad_runs_on$labels" ]; then
+  echo "  ✗ a public workflow does not run on a named GitHub-hosted runner:"
+  printf '%s\n%s\n' "$bad_runs_on" "$labels" | grep . | sed "s|^$OUT/|      |"
+  fail=1
+elif ! grep -rqE "[\"']?runs-on[\"']?[[:space:]]*:" "$OUT/.github" 2>/dev/null; then
+  echo "  ✗ no runs-on found in the public workflows: the check would be checking nothing"
+  fail=1
+else
+  echo "  ✓ every public job runs on ubuntu-latest or ubuntu-24.04, nothing else"
+fi
+# ⛔ Security, 22 Oct 2026: nor may a public workflow run with privileges for outside code.
+#    pull_request_target and workflow_run run a fork's change with the base repo's token and
+#    secrets; and no public workflow needs any secret. "needs.secrets.result" names a JOB
+#    called secrets (and a bare "secrets:" key names that job), so the match requires secrets
+#    not to follow a dot or word character, and a "secrets:" key to carry a value (inherit).
+if grep -rInE "pull_request_target|workflow_run|(^|[^.[:alnum:]_])secrets([[:space:]]*(\.|\[)|[[:space:]]*:[[:space:]]*[^[:space:]#])" "$OUT/.github" 2>/dev/null | grep -q .; then
+  echo "  ✗ a public workflow uses a privileged trigger or a secret:"
+  grep -rInE "pull_request_target|workflow_run|(^|[^.[:alnum:]_])secrets([[:space:]]*(\.|\[)|[[:space:]]*:[[:space:]]*[^[:space:]#])" "$OUT/.github" | sed "s|^$OUT/|      |"
+  fail=1
+else
+  echo "  ✓ no pull_request_target or workflow_run trigger, and no secret, in public workflows"
 fi
 
 [ "$fail" -eq 0 ] || { echo; echo "⛔ VERIFICATION FAILED — do not publish this tree."; exit 1; }

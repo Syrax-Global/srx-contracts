@@ -73,7 +73,7 @@ The contract uses the **Synthetix staking reward model**:
 - Each staker tracks `userRewardPerTokenPaid` — a snapshot of the accumulator at their last interaction
 - `earned(wallet)` (the SRX accrued so far) = `(rewardPerTokenStored − userRewardPerTokenPaid) × weightedAmount ÷ 1e18`
 
-**Governance controls the rate.** `setRewardRate(amount)` is GOVERNANCE_ROLE only and flows through the Timelock. The rate can be adjusted up or down by governance vote at any time — this sets how fast the fixed allocation is paid out, not how much there is.
+**Governance controls the rate.** `setRewardRate(amount)` is GOVERNANCE_ROLE only and flows through the Timelock. The launch rate is set once at TGE, by the launch multisig while it still holds GOVERNANCE_ROLE, from the published schedule (13.5 SRX/s, about four years for the 1.7B pool), because voting starts only once holders have delegated enough SRX to reach quorum. After the role hand-over the rate can be adjusted up or down only by governance vote — this sets how fast the fixed allocation is paid out, not how much there is, and the period ends when the pool runs out.
 
 The 1.7B SRX reward pool is designed to last for many years. The exact rate at mainnet will be set by the founding governance vote after token launch.
 

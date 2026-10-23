@@ -1,7 +1,16 @@
 /**
  * Step 10 — Deploy PreSaleRound (Pre-Presale Investor Round)
  *
- * Deploys the SRXToken (if not already deployed) and the PreSaleRound contract.
+ * Deploys the PreSaleRound contract against the launch SRXToken (Step 1).
+ *
+ * ⛔ Needs the SRXTreasury first (Step 5, which runs right after Step 2): `vaultRevokeRecipient`
+ *    (where a revoked buyer vault's unvested SRX goes) is fixed at deployment, shared by every
+ *    buyer vault, and must be the SRXTreasury contract. TREASURY_<NETWORK> is REQUIRED and there
+ *    is no fallback to WALLET_TREASURY (E-02, review E, 22 Oct 2026). Because the Treasury belongs
+ *    to the launch token, this script no longer deploys a token of its own: SRX_TOKEN_<NETWORK>
+ *    is required too.
+ *
+ * Documented order: 01 → 02 → 05 → 10 → 03 → 04 → 05b → 06 → 06b → 08.
  *
  * Pricing model:
  *   SRX seed price = $0.0125
@@ -25,8 +34,9 @@
  */
 
 const { ethers, network } = require("hardhat");
-const { LZ_ENDPOINTS, WALLETS } = require("./00_config");
+const { WALLETS } = require("./00_config");
 const { assertGenesisChain } = require("./lib/genesis_seed");
+const { requireTreasury } = require("./lib/launch_order");
 
 // ── SRX seed price ─────────────────────────────────────────────────────────────
 // $0.0125 expressed as 8-decimal fixed point (matching Chainlink format)
@@ -133,17 +143,10 @@ async function requireFeed(address, expected) {
   console.log(`  ✓ ${address} is "${got}"`);
 }
 
-// ── Existing token address (optional — leave blank to deploy fresh) ────────────
+// ── The launch token (SRX_TOKEN_<NETWORK>, from Step 1) ────────────────────────
 // ⭐ The Genesis round is funded from the seed allocation at launch
-//    (lib/genesis_seed.js), so it is deployed against the launch token BEFORE the
-//    launch steps 02-06, and closed (finalize()) before Step 3.
-const EXISTING_TOKEN = {
-  sepolia:   process.env.SRX_TOKEN_SEPOLIA   || "",
-  ethereum:  process.env.SRX_TOKEN_ETHEREUM  || "",
-  localhost: process.env.SRX_TOKEN_LOCALHOST || "", // the rehearsal's suite token
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
+//    (lib/genesis_seed.js), so it is deployed against the launch token and the launch
+//    SRXTreasury (Steps 1, 2 and 5) BEFORE Step 3, and closed (finalize()) before Step 3.
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -171,26 +174,20 @@ async function main() {
   console.log(`Hard Cap:  ${ethers.formatUnits(HARD_CAP_SRX, 18)} SRX`);
   console.log(`Bonus:     ${FLAT_BONUS_ENABLED ? `flat +${Number(FLAT_BONUS_BPS) / 100}% for every participant` : "10–20% tier ladder"}\n`);
 
-  // ── Step 1: Deploy or load SRXToken ────────────────────────────────────────
+  // ── Step 1: load the launch SRXToken and its SRXTreasury ───────────────────
 
-  let tokenAddress = EXISTING_TOKEN[net];
-
-  if (tokenAddress) {
-    console.log(`[1/3] Using existing SRXToken at: ${tokenAddress}`);
-  } else {
-    console.log(`[1/3] Deploying SRXToken...`);
-    const lzEndpoint = LZ_ENDPOINTS[net];
-    if (!lzEndpoint) throw new Error(`No LayerZero endpoint for network "${net}"`);
-
-    const SRXToken = await ethers.getContractFactory("SRXToken");
-    const token    = await SRXToken.deploy(lzEndpoint, admin);
-    await token.waitForDeployment();
-    tokenAddress = await token.getAddress();
-
-    console.log(`  ✅ SRXToken deployed: ${tokenAddress}`);
-    console.log(`     Genesis has NOT been called — tokens are not minted yet.`);
-    console.log(`     That happens at the full TGE, not during the presale.\n`);
+  const tokenAddress = (process.env[`SRX_TOKEN_${net.toUpperCase()}`] || "").trim();
+  if (!tokenAddress) {
+    throw new Error(`SRX_TOKEN_${net.toUpperCase()} is not set — run Step 1 first. The Genesis round is deployed against the launch token. Nothing was deployed.`);
   }
+  console.log(`[1/3] Using the launch SRXToken at: ${tokenAddress}`);
+
+  // Internal audit M2 / E-02: a revoked buyer vault's unvested SRX goes here, fixed at
+  // deployment. It must be the SRXTreasury contract: required, no fallback to a wallet.
+  const vaultRevokeRecipient = await requireTreasury({
+    networkName: net, provider: ethers.provider, tokenAddress,
+    forWhat: "The Genesis round (every buyer vault's revokeRecipient)",
+  });
 
   // ── Step 2: Deploy PreSaleRound ────────────────────────────────────────────
 
@@ -208,9 +205,6 @@ async function main() {
   console.log(`  ${nativeSymbol}/USD feed:          ${nativeTokenFeed}`);
   console.log(`  BTC/USD feed:          ${btcUsd}`);
   console.log(`  Admin:                 ${admin}`);
-  // Internal audit M2: a revoked buyer vault's unvested SRX goes here, fixed at deployment.
-  const vaultRevokeRecipient = process.env[`TREASURY_${net.toUpperCase()}`] || WALLETS.treasury;
-  if (!vaultRevokeRecipient) throw new Error("No treasury address (TREASURY_<NET> or WALLET_TREASURY) for vaultRevokeRecipient. Nothing was deployed.");
   console.log(`  Vault revoke recipient: ${vaultRevokeRecipient}`);
 
   const PreSaleRound = await ethers.getContractFactory("PreSaleRound");
@@ -300,8 +294,11 @@ async function main() {
                   Contract calculates SRX + the flat +50% bonus automatically.
        On-chain:  investors call invest() / investWithUSDC() / investWithUSDT() / investWithWBTC()
 
-  4. Deploy vaults when ready, in batches of 20-50:
-       presaleRound.batchDeployVaults(startIndex, endIndex)
+  4. Buyers' vaults are created after launch by 06b_genesis_vaults.js, not by hand: it queues them
+     in chunks of at most 12 buyers (GENESIS_VAULT_CHUNK; about 961,000 gas a buyer for the deploy
+     and the trigger, against the 16,777,216 gas Ethereum allows one transaction) and refuses a
+     chunk estimated above 15,000,000 gas. If it must be done by hand:
+       presaleRound.batchDeployVaults(startIndex, endIndex)   // never more than 12 buyers per transaction (C5)
      ⛔ BEFORE SRXToken's maxWalletBalance is switched on (PSR-09): a new vault
         cannot be exempted in advance, so a large allocation would revert.
 

@@ -107,6 +107,8 @@ reporters in OFAC-restricted jurisdictions cannot receive payment.
 | Proof pass 2 | 2026-09-23 | Internal | Full pre-external-audit sweep, contracts and deploy path | `REMEDIATION.md` |
 | Internal audit | 2026-10-16 | Internal | Every contract, six review groups: twin and sibling sweep, privileged functions, accounting, entry points, funds with no exit, every documented guarantee against a test | `REMEDIATION.md` |
 | Class sweep + second static analyser | 2026-10-22 | Internal | Every contract, per class of mistake reported publicly; Aderyn alongside Slither; accounting invariants | `REMEDIATION.md`, `docs/audits/STATIC_ANALYSIS_TRIAGE.md` |
+| Review round | 2026-10-22 | Internal | Five independent reviews of the contracts and deploy scripts, each finding proven by a test before the fix. Two Mediums (A1, A4: the bridge's per-chain inbound bucket counts gross returns) are open for a design decision | `REMEDIATION.md` |
+| Mutation and boundary testing | 2026-10-23 | Internal | Every access modifier and guard removed, and every guard comparison flipped, one at a time against the whole suite: every non-equivalent mutant is now killed (656 mutants; tests added for 45). In-scope coverage 99.08% of statements, 98.41% of branches | `AUDIT_SCOPE.md` §5 |
 | External | TBD (pre-mainnet) | External firm | Not yet commissioned | Pending |
 
 Across rounds R1–R5, 42 findings were identified and all actionable items remediated. Those
@@ -114,7 +116,7 @@ rounds did not catch everything: two later proof passes, which count a finding o
 test demonstrates it, found 31 defects on 10 September and, on 23 September, a Critical, three
 Highs and a further deployment High. Fixes and the items still open are in `REMEDIATION.md`.
 Verification coverage:
-- **1,261 Hardhat tests** (0 pending, 22 Oct 2026) + **32 Foundry invariants** (256 runs × depth 50) and **5 property-fuzz tests** (1,000 runs each; 10,000 in the nightly profile).
+- **1,624 Hardhat tests** (0 failing, 23 Oct 2026; 99.08% of statements and 98.41% of branches of the in-scope contracts) + **33 Foundry invariants** (256 runs × depth 50) and **5 property-fuzz tests** (1,000 runs each; 10,000 in the nightly profile).
 - Aderyn 0.6.8 alongside Slither; every finding of both is fixed or explained in `docs/audits/STATIC_ANALYSIS_TRIAGE.md`.
 - Slither static analysis in CI: version pinned (0.11.6), failing on Medium and High. No detector that can report a High is excluded repo-wide; each reviewed exception is a dated comment beside the code. Foundry is pinned too (forge v1.8.5, forge-std v1.16.1).
 - Foundry invariant campaign (nightly, in CI). Echidna is a local harness only.

@@ -14,9 +14,9 @@
  *     <NAME>_<NETWORK>_TGE twin, so an old address left in .env can never be mixed into
  *     the new deployment (.env is never opened or printed: only these keys are set to
  *     empty in the child environment);
- *   - runs 01 → 02 → 03 → 04 → 05 → 05b → 06 (until the staking pool is registered)
- *     → verify_tge → 08 → 09 → 10, passing each script the addresses the earlier ones
- *     printed;
+ *   - runs 01 → 02 → 05 → 03 → 04 → 05b → 06 (until the staking pool is registered)
+ *     → verify_tge → 08 → 10, passing each script the addresses the earlier ones
+ *     printed (the SRXTreasury, 05, runs right after 02: 03 and 10 require it);
  *   - before 06, writes deploy/addresses.<network>.json (gitignored) from the list the
  *     TGE gate itself builds, because 06 refuses to run on a public network without it;
  *   - verify_tge must pass (every balance, every vault, the 5% launch float);
@@ -95,7 +95,7 @@ async function main() {
     [`PRESALE_ROUND_${NET}`]: "none",
     DEPLOYER_EOA: deployer.address,
     // Test-network role holders: the deployer. On a real network these are Safes.
-    GUARDIAN_MULTISIG: deployer.address,
+    PAUSE_GUARDIAN: deployer.address,
     CIRCUIT_BREAKER_ADDRESS: deployer.address,
     ORACLE_ADDRESS: deployer.address,
   }, state.env);
@@ -133,9 +133,10 @@ async function main() {
     setEnv(`SRX_TOKEN_${NET}`, m[1]);
   });
   step("02 governance", "scripts/deploy/02_deploy_governance.js");
+  // E-02: the SRXTreasury before Steps 3 and 10, which fix it as every revoked vault's recipient.
+  step("05 treasury", "scripts/deploy/05_deploy_treasury.js");
   step("03 vesting + distributor", "scripts/deploy/03_deploy_vesting.js");
   step("04 staking", "scripts/deploy/04_deploy_staking.js");
-  step("05 treasury", "scripts/deploy/05_deploy_treasury.js");
   step("05b stabilisation fund", "scripts/deploy/05b_deploy_stabilisation.js");
 
   // The manifest 06 checks against, built from the gate's own list.
@@ -183,7 +184,7 @@ async function main() {
     console.log("  ✅ every balance and vault checked, and the 5% launch float");
   });
   step("08 guardian", "scripts/deploy/08_deploy_guardian.js");
-  step("09 migrator", "scripts/deploy/09_deploy_migrator.js");
+  // Step 09 (ZkSyncMigrator) is retired by CH-13 and refuses to run.
   step("10 presale", "scripts/deploy/10_deploy_presale.js", (r) => {
     const pm = r.out.match(/PreSaleRound deployed:\s*(0x[0-9a-fA-F]{40})/);
     if (!pm) throw new Error("10 did not print the PreSaleRound address");
@@ -205,7 +206,7 @@ async function main() {
       SRXTimelock: pick("TIMELOCK"), SRXGovernor: pick("GOVERNOR"),
       SRXStaking: pick("STAKING"), FeeController: pick("FEE_CONTROLLER"),
       SRXTreasury: pick("TREASURY"), StabilisationFund: pick("STABILISATION_FUND"),
-      GuardianModule: pick("GUARDIAN"), ZkSyncMigrator: pick("MIGRATOR"),
+      GuardianModule: pick("GUARDIAN_MODULE") || pick("GUARDIAN"), ZkSyncMigrator: pick("MIGRATOR"),
       PreSaleRound: pick("PRESALE_ROUND"),
     },
     vaults: Object.fromEntries(TGE_PLAN.filter((r) => r.kind === "vault").map((r) => [r.label, pick(r.vaultEnv)])),
@@ -215,6 +216,12 @@ async function main() {
   save();
   fs.writeFileSync(path.join(ROOT, "deployments", `${net}.json`), JSON.stringify(out, null, 2) + "\n");
   console.log(`\n✅ ${net} suite deployed — deployments/${net}.json`);
+  // The build that produced this deployment, pinned by sha256 (scripts/deploy/lib/build_record.js).
+  try {
+    const rec = await require("../deploy/lib/build_record").buildRecord(require("hardhat"), out.contracts);
+    fs.writeFileSync(path.join(ROOT, "deployments", `${net}.builds.json`), JSON.stringify({ network: net, chainId, deploymentCommit: out.commit, ...rec }, null, 2) + "\n");
+    console.log(`  build record: deployments/${net}.builds.json`);
+  } catch (e) { console.warn(`  ⚠️  build record not written (${String(e.message).split("\n")[0]}); run scripts/ops/record_build.js`); }
   try { console.log(`  balance after: ${ethers.formatEther(await ethers.provider.getBalance(deployer.address))} ETH`); } catch { /* the deploy is complete; only this read failed */ }
 }
 

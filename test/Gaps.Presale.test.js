@@ -82,8 +82,8 @@ describe("Gaps — PreSaleRound", function () {
       await r.connect(i1).invest({ value: E(1) });
       await r.connect(i1).investWithUSDC(U6(10_000));
       await r.connect(admin).refundInvestor(i1.address);
-      await expect(r.connect(i1).claimRefund(ZERO)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
-      await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalances(usdc, [r, i1], [-U6(10_000), U6(10_000)]);
+      await expect(r.connect(i1).claimRefund(ZERO, i1.address)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
+      await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalances(usdc, [r, i1], [-U6(10_000), U6(10_000)]);
       expect(await r.totalRefundOwed(ZERO)).to.equal(0n);
       expect(await r.totalRefundOwed(usdc.target)).to.equal(0n);
     });
@@ -244,7 +244,7 @@ describe("Gaps — PreSaleRound", function () {
       await expect(r.connect(admin).withdrawETH(admin.address)).to.be.revertedWithCustomError(r, "ZeroAmount");
       expect(await ethers.provider.getBalance(r.target)).to.equal(E(1));
       // the refund is still whole
-      await expect(r.connect(i1).claimRefund(ZERO)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
+      await expect(r.connect(i1).claimRefund(ZERO, i1.address)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
     });
 
     it("withdrawETH takes everything but the owed ETH", async function () {
@@ -267,10 +267,10 @@ describe("Gaps — PreSaleRound", function () {
       await expect(r.connect(admin).withdrawWBTC(admin.address)).to.be.revertedWithCustomError(r, "ZeroAmount");
 
       // the refunded investor is paid in full, in every asset
-      await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalance(usdc, i1, U6(10_000));
-      await expect(r.connect(i1).claimRefund(usdt.target)).to.changeTokenBalance(usdt, i1, U6(5_000));
-      await expect(r.connect(i1).claimRefund(wbtc.target)).to.changeTokenBalance(wbtc, i1, 10n ** 7n);
-      await expect(r.connect(i1).claimRefund(ZERO)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
+      await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalance(usdc, i1, U6(10_000));
+      await expect(r.connect(i1).claimRefund(usdt.target, i1.address)).to.changeTokenBalance(usdt, i1, U6(5_000));
+      await expect(r.connect(i1).claimRefund(wbtc.target, i1.address)).to.changeTokenBalance(wbtc, i1, 10n ** 7n);
+      await expect(r.connect(i1).claimRefund(ZERO, i1.address)).to.changeEtherBalances([r, i1], [-E(1), E(1)]);
       for (const a of [ZERO, usdc.target, usdt.target, wbtc.target]) {
         expect(await r.totalRefundOwed(a)).to.equal(0n);
       }
@@ -307,8 +307,8 @@ describe("Gaps — PreSaleRound", function () {
       await usdc.connect(admin).transfer(r.target, U6(10_000));
       await r.connect(admin).refundInvestor(i2.address);
       expect(await r.totalRefundOwed(usdc.target)).to.equal(U6(20_000));
-      await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalance(usdc, i1, U6(10_000));
-      await expect(r.connect(i2).claimRefund(usdc.target)).to.changeTokenBalance(usdc, i2, U6(10_000));
+      await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalance(usdc, i1, U6(10_000));
+      await expect(r.connect(i2).claimRefund(usdc.target, i2.address)).to.changeTokenBalance(usdc, i2, U6(10_000));
     });
 
     it("a third party calling claimRefund gets nothing and moves nothing; the owner still claims", async function () {
@@ -318,17 +318,17 @@ describe("Gaps — PreSaleRound", function () {
       await r.connect(admin).refundInvestor(i1.address);
 
       for (const asset of [ZERO, usdc.target]) {
-        await expect(r.connect(other).claimRefund(asset)).to.be.revertedWithCustomError(r, "ZeroAmount");
+        await expect(r.connect(other).claimRefund(asset, other.address)).to.be.revertedWithCustomError(r, "ZeroAmount");
       }
-      await expect(r.connect(admin).claimRefund(ZERO)).to.be.revertedWithCustomError(r, "ZeroAmount");
+      await expect(r.connect(admin).claimRefund(ZERO, admin.address)).to.be.revertedWithCustomError(r, "ZeroAmount");
       expect(await ethers.provider.getBalance(r.target)).to.equal(E(1));
       expect(await usdc.balanceOf(r.target)).to.equal(U6(10_000));
       expect(await r.refundOwed(i1.address, ZERO)).to.equal(E(1));
       expect(await r.refundOwed(i1.address, usdc.target)).to.equal(U6(10_000));
 
       // control: the payer claims, and is paid to their own address
-      await expect(r.connect(i1).claimRefund(ZERO)).to.changeEtherBalances([r, i1, other], [-E(1), E(1), 0n]);
-      await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalances(usdc, [r, i1, other], [-U6(10_000), U6(10_000), 0n]);
+      await expect(r.connect(i1).claimRefund(ZERO, i1.address)).to.changeEtherBalances([r, i1, other], [-E(1), E(1), 0n]);
+      await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalances(usdc, [r, i1, other], [-U6(10_000), U6(10_000), 0n]);
     });
 
     it("refundInvestor is admin-only and refuses a buyer with no on-chain payment (NoAllocation)", async function () {
@@ -607,7 +607,7 @@ describe("Gaps — PreSaleRound", function () {
       expect(await r.totalAllocated()).to.equal(0n);
       expect((await r.investors(i1.address)).srxAllocation).to.equal(0n);
       expect(await r.refundOwed(i1.address, usdc.target)).to.equal(U6(10_000)); // not 15,000
-      await expect(r.connect(i1).claimRefund(usdc.target)).to.changeTokenBalance(usdc, i1, U6(10_000));
+      await expect(r.connect(i1).claimRefund(usdc.target, i1.address)).to.changeTokenBalance(usdc, i1, U6(10_000));
     });
   });
 });

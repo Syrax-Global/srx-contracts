@@ -22,7 +22,7 @@ cross-chain migration path.
 
 Deployed on Sepolia and BSC testnet only ([`docs/ADDRESSES.md`](docs/ADDRESSES.md)); there is no mainnet deployment and no
 mainnet upgrade manifest (no SRX contract is upgradeable). Those testnet contracts predate REG-50,
-REG-53 and REG-54 and the 16 October 2026 internal-audit fixes, and will be redeployed. Mainnet
+REG-53 and REG-54 and the 16 and 22 October 2026 internal-audit fixes, and will be redeployed. Mainnet
 deployment is gated on an external audit that has not yet been performed. It is upcoming and has
 not been engaged.
 
@@ -46,7 +46,7 @@ has been established.
 | `buyback/BuybackBurner.sol` | Buy-and-burn execution |
 | `guardian/GuardianModule.sol` | Circuit breaker and coordinated pause |
 | `governance/SRXGovernor.sol` | Governor + Timelock |
-| `migration/ZkSyncMigrator.sol` | Burn-and-migrate to Syrax Chain |
+| `migration/ZkSyncMigrator.sol` | Retired, not deployed (CH-13, 22 Oct 2026); kept as history. SRX moves onto Syrax Chain through the chain's own bridge (a signed deposit locks it 1:1 in the Ethereum vault) |
 | `airdrop/SRXAirdrop.sol` | Merkle-proof airdrop |
 | `presale/PreSaleRound.sol` | Presale with oracle-priced contributions |
 
@@ -54,8 +54,10 @@ has been established.
 
 ```bash
 npm ci
-npx hardhat test          # over 1,200 passing (1,204 on 16 Oct 2026)
-forge test                # 16 invariants + 5 property-fuzz tests
+npx hardhat test          # 1,624 passing (23 Oct 2026)
+# Foundry needs forge-std, which is not stored in the repository (CI pins the same tag):
+git clone --depth 1 --branch v1.16.1 https://github.com/foundry-rs/forge-std lib/forge-std
+forge test                # 33 invariants + 5 property-fuzz tests
 ```
 
 ⭐ `test/audit-poc/` holds **executable proofs of vulnerabilities found during the
@@ -78,8 +80,8 @@ reintroducing any of those defects turns the suite red. Read
 vulnerabilities proven by executable test, their dispositions, and the mistakes
 made while fixing them — including two cases where a control could not fail and
 one where documentation described a guarantee the code did not provide. Its top section is the
-16 October 2026 internal audit (12 Medium, 17 Low; the fixes with their tests, and the items
-still open for design decisions).
+22 October 2026 internal review round (the fixes with their tests, and two Medium items still
+open for a design decision); the 16 October 2026 internal audit (12 Medium, 17 Low) follows.
 
 ## Things a reviewer should know up front
 

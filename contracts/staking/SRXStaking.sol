@@ -87,9 +87,10 @@ import { ISuccessorOf } from "../token/ISuccessorOf.sol";
  *
  * Early withdrawal: 10% principal penalty sent to the dead address (0xdEaD), out of
  * circulation for good but not counted in SRXToken.totalBurned or deducted from
- * totalSupply. Any incentives
- * accrued up to the point of exit are paid out — the penalty applies only to
- * the principal.
+ * totalSupply. Incentives accrued up to the point of exit are paid out as far as the
+ * reward pool holds them (the rest stays pending), and while the contract is paused
+ * they stay pending until it reopens (internal audit L11); the penalty applies only
+ * to the principal.
  *
  * ⛔ NOT UPGRADEABLE (REG-53, Jared, 12 Oct 2026). A plain contract: its code can never
  *    change and no role can replace it. The pause (PAUSER_ROLE, held by GuardianModule)
@@ -697,8 +698,9 @@ contract SRXStaking is AccessControl, Pausable {
 
     /**
      * @notice Emergency exit before lock expiry. A 10% principal penalty is sent
-     *         to the canonical dead address (not counted in SRXToken.totalBurned). Any incentives earned up to this point
-     *         are paid out in full — the penalty applies only to the principal.
+     *         to the canonical dead address (not counted in SRXToken.totalBurned). Incentives
+     *         earned up to this point are paid as far as the reward pool holds them, and stay
+     *         pending while the contract is paused (L11); the penalty applies only to the principal.
      *
      * ⚠️  This function intentionally omits `whenNotPaused` so users can exit
      *     staking positions during a guardian-triggered emergency. However, SRXToken
@@ -1088,10 +1090,11 @@ contract SRXStaking is AccessControl, Pausable {
         // never block the exit, so it is attempted through an external self-call.
         try this.syncAllocation() {} catch {}
         _updateReward(address(0)); // bank everything accrued up to now
+        uint256 stoppedRate = rewardRate; // logged below (it was always logged as 0; MONEY-11)
         rewardRate   = 0;
         periodFinish = block.timestamp;
         windDown     = true;
-        emit RewardRateSet(rewardRate, 0);
+        emit RewardRateSet(stoppedRate, 0);
         emit WindDownStarted(msg.sender, byTimeout);
     }
 
@@ -1156,8 +1159,17 @@ contract SRXStaking is AccessControl, Pausable {
         rewardBacking -= fromUnregistered;
         rewardPool    -= amount - fromUnregistered;
 
-        releasedTo[successor] += amount;
+        // ⛔ Review round 22 Oct (B1): naming this contract as its source was the only check,
+        //    so a successor already wound down, or with a reward cap below the release, took
+        //    it as free SRX (deployable from a fund), or froze it for good (a wound-down
+        //    staking). The successor's reward backing comes only from this contract, so after
+        //    it syncs, its backing must cover everything ever released to it; syncAllocation
+        //    reverts on a wound-down successor. All state is written before the calls.
+        uint256 released = releasedTo[successor] + amount;
+        releasedTo[successor] = released;
         srx.safeTransfer(successor, amount);
+        ISuccessorOf(successor).syncAllocation();
+        if (ISuccessorOf(successor).rewardBacking() < released) revert NotASuccessor(successor);
         emit RewardAllocationReleased(successor, amount);
     }
 

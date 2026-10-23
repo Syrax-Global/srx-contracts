@@ -137,8 +137,16 @@ async function runSequence(seed, steps) {
     if (r < 18) { // honest: Ethereum -> spoke, delivered at once
       const amt = amount(2_000_000);
       label = `send ${amt / E(1)} to spoke`;
-      await token.connect(alice).send(sp(SPOKE, alice.address, amt), fee, alice.address);
-      await onSpoke(alice.address, amt);
+      if (model.frozen) {
+        // review round 22 Oct (A2): SRX is not sent INTO a frozen chain either; the send is
+        // refused, nothing is burned, and the model does not move.
+        label += " (refused: chain frozen)";
+        await expect(token.connect(alice).send(sp(SPOKE, alice.address, amt), fee, alice.address))
+          .to.be.revertedWithCustomError(token, "InboundChainFrozen");
+      } else {
+        await token.connect(alice).send(sp(SPOKE, alice.address, amt), fee, alice.address);
+        await onSpoke(alice.address, amt);
+      }
     } else if (r < 36) { // honest: spoke -> Ethereum
       const bal = await native.balanceOf(alice.address);
       if (bal === 0n) continue;

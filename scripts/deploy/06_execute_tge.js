@@ -16,17 +16,22 @@
  *                                         as the ecosystem participation incentive pool.
  *
  * Steps 1–3 are irreversible. Step 4 is accountingonly (tokens already arrived in
- * the staking contract via step 2). Incentive emissions don't start until governance
- * separately calls staking.setRewardRate() — step 4 just arms the pool.
+ * the staking contract via step 2). Emissions start when step 4 also sets the launch
+ * reward rate, in the same batch, from the published plan (Security ruling, 23 Oct 2026);
+ * every later change is a governance vote.
  *
  * ⚠️  THIS IS A ONE-WAY OPERATION. Once called, it CANNOT be undone.
  *
  * Pre-flight checklist — verify EVERY item before running:
  *  [ ] All vesting vaults deployed and verified on block explorer
  *  [ ] TGEDistributor deployed (setAllocations will be called fresh by this script)
- *  [ ] Treasury contract deployed (TREASURY_<NETWORK> set in .env)
+ *  [ ] Treasury contract deployed (TREASURY_<NETWORK> set in .env) — Step 5, run right after
+ *      Step 2; the gate checks every vault's revokeRecipient is this contract (E-02)
  *  [ ] StabilisationFund deployed (STABILISATION_FUND_<NETWORK> set in .env) ← Step 5b
  *  [ ] Staking contract deployed (STAKING_<NETWORK> set in .env)
+ *  [ ] SRXStaking.tgeDistributor() == StabilisationFund.tgeDistributor() == TGE_DISTRIBUTOR_<NETWORK>:
+ *      both fix the distributor at deployment, so a Step 3 re-run after Step 4 / 5b strands the
+ *      1.7B staking allocation. The destination controls check it and stop the run (E-01)
  *  [ ] SRXToken genesisComplete == false
  *  [ ] TGEDistributor distributed == false
  *  [ ] deploy/addresses.<network>.json written from the signed-off records
@@ -62,7 +67,7 @@
  */
 const { ethers, network } = require("hardhat");
 const readline = require("readline");
-const { ALLOCATIONS } = require("./00_config");
+const { ALLOCATIONS, rewardRatesFor } = require("./00_config");
 const { runTgeTargetChecks } = require("./lib/tge_targets");
 const { createAdminBatch } = require("./lib/adminTx");
 const { vaultOps } = require("./lib/vaultOps");
@@ -139,6 +144,7 @@ async function main() {
   for (const a of finalAllocations) {
     console.log(`✅ ${a.label.padEnd(18)} ${a.destination}  ${ethers.formatUnits(a.amount, 18)} SRX`);
   }
+  for (const note of gate.notes || []) console.log(note);
   const byLabel     = Object.fromEntries(finalAllocations.map((a) => [a.label, a.destination]));
   const stakingAddr = byLabel.Staking;
   const ssfAddr     = byLabel.StabilisationFund;
@@ -337,6 +343,25 @@ async function main() {
     } else {
       console.warn(`  ⚠️  Staking contract has 0 balance — check TGE distribution.`);
     }
+
+    // Launch reward rates (Security ruling, 23 Oct 2026): set once here, from the published
+    // plan the manifest check above has just compared byte for byte; after the hand-over every
+    // change is a governance vote. A rate cannot promise more than the pool holds (the period
+    // ends when it runs out).
+    const rates = rewardRatesFor(network.name);
+    if ((await staking.rewardRate()) === rates.staking) {
+      console.log(`  ✓ (already done) staking reward rate ${ethers.formatUnits(rates.staking, 18)} SRX/s`);
+    } else {
+      await batch.send(staking, "setRewardRate", [rates.staking], `SRXStaking.setRewardRate(${ethers.formatUnits(rates.staking, 18)} SRX/s)`);
+    }
+    if (rates.stabilisationFund === null) {
+      console.warn(`  ⚠️  OPEN: no StabilisationFund reward rate in the plan (00_config REWARD_RATES); it is not set at launch, so the fund pays depositors nothing until a rate is set.`);
+    } else {
+      const fund = await ethers.getContractAt("StabilisationFund", ssfAddr);
+      if ((await fund.rewardRate()) !== rates.stabilisationFund) {
+        await batch.send(fund, "setRewardRate", [rates.stabilisationFund], `StabilisationFund.setRewardRate(${ethers.formatUnits(rates.stabilisationFund, 18)} SRX/s)`);
+      }
+    }
   }
 
   const finalWrote = await batch.flush();
@@ -356,8 +381,7 @@ async function main() {
   console.log(`\n  Next steps:`);
   console.log(`    [ ] Verify all vault balances on block explorer`);
   console.log(`    [ ] Verify each vault's tgeTimestamp matches expected TGE date`);
-  console.log(`    [ ] Set incentive emission rate via governance:`);
-  console.log(`          staking.setRewardRate(13_500_000_000_000_000_000)  // ~4yr distribution`);
+  console.log(`    [ ] Launch reward rates were set in this batch from the published plan; any change is now a governance vote`);
   if (gate.genesisSold > 0n) {
     console.log(`    [ ] NOW: npx hardhat run scripts/deploy/06b_genesis_vaults.js --network ${network.name}`);
     console.log(`          creates each Genesis buyer's vault and starts its clock (before maxWalletBalance is switched on)`);
@@ -367,7 +391,7 @@ async function main() {
   console.log(`          npx hardhat console --network ${network.name}`);
   console.log(`          > (await ethers.getContractAt("StabilisationFund","${ssfAddr}")).srxBalance()`);
   console.log(`    [ ] Deploy GuardianModule (Step 8) if not yet done — wires PAUSER_ROLE on SSF`);
-  console.log(`    [ ] Deploy ZkSyncMigrator (Step 9) when Syrax Chain is ready`);
+  console.log(`    [ ] Syrax Chain: holders move SRX through the chain's own bridge (CH-13); no migrator is deployed`);
 }
 
 main().catch((err) => {

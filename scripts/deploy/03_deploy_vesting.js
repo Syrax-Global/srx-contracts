@@ -28,8 +28,14 @@
  * Prerequisites:
  *  - SRXToken deployed (Step 1) — SRX_TOKEN_<NETWORK> set in .env
  *  - Governance deployed (Step 2) — TIMELOCK_<NETWORK> set in .env
- *  - Treasury deployed (Step 4 sets TREASURY_<NETWORK> — run Step 4 first OR
- *    use WALLET_TREASURY as placeholder and upgrade later)
+ *  - ⛔ SRXTreasury deployed (Step 5, which runs right after Step 2) — TREASURY_<NETWORK> set
+ *    in .env. REQUIRED, with no fallback: every vault's `revokeRecipient` is fixed at
+ *    deployment and can never be changed, and it must be the SRXTreasury CONTRACT, never a
+ *    wallet. A placeholder wallet cannot be "upgraded later": the recipient is immutable
+ *    (E-02, review E, 22 Oct 2026). The script stops, having deployed nothing, if it is
+ *    missing, has no code, or is not the SRXTreasury of this token.
+ *
+ * Documented order: 01 → 02 → 05 → 10 → 03 → 04 → 05b → 06 → 06b → 08 (see lib/launch_order.js).
  *
  * Run: npx hardhat run scripts/deploy/03_deploy_vesting.js --network sepolia
  */
@@ -38,13 +44,13 @@ const { WALLETS, ALLOCATIONS, VESTING, TGE_PLAN } = require("./00_config");
 const { createAdminBatch } = require("./lib/adminTx");
 const { vaultOps } = require("./lib/vaultOps");
 const { launchPlan, readGenesisSold } = require("./lib/genesis_seed");
+const { requireTreasury, assertStep3MayRun, REDEPLOY_ACK } = require("./lib/launch_order");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
   console.log(`\nDeploying Vesting Vaults + TGEDistributor on ${network.name}`);
 
   const srxToken  = process.env[`SRX_TOKEN_${network.name.toUpperCase()}`];
-  const treasury  = process.env[`TREASURY_${network.name.toUpperCase()}`] || WALLETS.treasury;
   const staking   = process.env[`STAKING_${network.name.toUpperCase()}`]  || WALLETS.staking;
   const admin     = WALLETS.admin;
   const timelockAddr = process.env[`TIMELOCK_${network.name.toUpperCase()}`];
@@ -52,6 +58,21 @@ async function main() {
   if (!srxToken) throw new Error(`SRX_TOKEN_${network.name.toUpperCase()} not set in .env`);
   if (!timelockAddr) throw new Error(`TIMELOCK_${network.name.toUpperCase()} not set in .env — run Step 2 first; the vaults' admin is the Timelock`);
   const timelock = await ethers.getContractAt("SRXTimelock", timelockAddr);
+
+  // ⛔ E-01: this step deploys a NEW TGEDistributor. Refuse if staking or the fund (which fix the
+  //    distributor immutably) were already built against the current one, unless acknowledged.
+  const rerun = assertStep3MayRun({ networkName: network.name, env: process.env });
+  if (rerun.redeploying) {
+    console.warn(`\n⛔ ${REDEPLOY_ACK}=yes: ${rerun.declared.join(" and ")} stay bound to the OLD TGEDistributor. 06 will refuse to launch until`);
+    console.warn(`   Step 4 (staking + fee controller) and Step 5b (stabilisation fund) are re-run against the new one and their addresses replaced in .env`);
+    console.warn(`   (and Step 8, if it already ran, is redone or its modules re-targeted by governance).`);
+  }
+
+  // ⛔ The vaults' revokeRecipient is immutable: it is the SRXTreasury, which must exist already.
+  const treasury = await requireTreasury({
+    networkName: network.name, provider: ethers.provider, tokenAddress: srxToken,
+    forWhat: "Step 3 (every launch vault's revokeRecipient)",
+  });
 
   // ── The Genesis round is funded from the seed allocation ─────────────────
   //
@@ -80,7 +101,7 @@ async function main() {
     const vault = await VestingVault.deploy(
       srxToken, WALLETS[row.beneficiary], timelockAddr,
       v.cliffDuration, v.vestingDuration, v.tgeUnlockBps,
-      treasury // revokeRecipient, fixed at deployment (internal audit M2)
+      treasury // revokeRecipient: the SRXTreasury contract, fixed at deployment (internal audit M2, E-02)
     );
     await vault.waitForDeployment();
     vaults[row.label] = await vault.getAddress();
@@ -163,7 +184,7 @@ async function main() {
   console.log(`\n⏳ The vault setup executes in Step 6, at least ${minDelay}s after the Safe runs this batch.`);
   console.log(`\nNext steps:`);
   console.log(`  4. Deploy Staking + FeeController (Step 4)`);
-  console.log(`  5. Deploy Treasury (Step 5)`);
+  console.log(`  5b. Deploy the Stabilisation Fund (Step 5b)`);
   console.log(`  6. Execute TGE (Step 6) — mints + distributes + triggers vesting`);
 
   return { vaults, tgeAddress };

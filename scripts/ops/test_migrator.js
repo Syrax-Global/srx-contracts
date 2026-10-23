@@ -35,6 +35,7 @@
 const { ethers, network } = require("hardhat");
 const path = require("path");
 const fs   = require("fs");
+const { TESTNET_CHAINS } = require("../deploy/00_config");
 require("dotenv").config({ path: path.join(__dirname, "../../.env") });
 
 // ── Pass/fail tracking ─────────────────────────────────────────────────────────
@@ -82,6 +83,12 @@ function printSummary() {
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // ZkSyncMigrator is retired (CH-13, 22 Oct 2026): this script is kept to replay the old
+  // testnet run only, and refuses any network that is not a testnet.
+  if (!TESTNET_CHAINS.has(network.name)) {
+    console.error(`Refused: ZkSyncMigrator is retired (CH-13); ${network.name} is not a testnet.`);
+    process.exit(1);
+  }
   const [deployer] = await ethers.getSigners();
   const NET    = network.name.toUpperCase();
   const suffix = `_${NET}_TGE`;

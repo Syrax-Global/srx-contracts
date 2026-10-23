@@ -175,13 +175,21 @@ describe("PreSaleRound — approved buyers only", function () {
         .to.be.revertedWithCustomError(r, "ZeroAmount");
     });
 
-    it("cannot lower a cap below what the buyer has already been credited", async function () {
+    it("a cap set below what the buyer has already been credited is raised to it, and the existing agreement ref is kept", async function () {
       const { r, admin, buyer, approve } = await loadFixture(fixture);
       await approve(buyer, usd(10_000));
       await r.connect(buyer).investWithUSDC(u6(6_000));
-      await expect(approve(buyer, usd(5_999))).to.be.revertedWithCustomError(r, "CapBelowAllocated");
-      await expect(r.connect(admin).setBuyerApprovals([buyer.address], [0n], [ethers.ZeroHash]))
-        .to.be.revertedWithCustomError(r, "CapBelowAllocated");
+      // review round 22 Oct (C2): this used to revert CapBelowAllocated, which let a buyer front-run the
+      // whole approval batch with one more purchase. The cap now stops the buyer where they are.
+      await approve(buyer, usd(5_999));
+      let a = await r.buyerApprovals(buyer.address);
+      expect(a.capUsd8Dec).to.equal(usd(6_000));
+      const ref = a.agreementRef;
+      expect(ref).to.not.equal(ethers.ZeroHash);
+      await r.connect(admin).setBuyerApprovals([buyer.address], [0n], [ethers.ZeroHash]);
+      a = await r.buyerApprovals(buyer.address);
+      expect(a.capUsd8Dec).to.equal(usd(6_000));
+      expect(a.agreementRef).to.equal(ref);
     });
 
     it("stops further purchases when the cap is set to exactly what was credited", async function () {
@@ -221,7 +229,7 @@ describe("PreSaleRound — approved buyers only", function () {
       expect(a.agreementRef).to.equal(ethers.ZeroHash);
       await expect(r.connect(buyer).investWithUSDC(u6(2_500))).to.be.revertedWithCustomError(r, "NotApproved");
       const before = await usdc.balanceOf(buyer.address);
-      await r.connect(buyer).claimRefund(usdc.target);
+      await r.connect(buyer).claimRefund(usdc.target, buyer.address);
       expect(await usdc.balanceOf(buyer.address)).to.equal(before + u6(5_000));
     });
 

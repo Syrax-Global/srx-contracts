@@ -140,6 +140,10 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
     // ── State ──────────────────────────────────────────────────────────────────
 
     mapping(bytes32 => ModuleConfig)   public modules;
+    /// @notice The module whose pause() a target receives (every module but the bridge,
+    ///         whose stop is the token's own setBridgePaused). One per target, so the
+    ///         token's run limits cannot be sidestepped through another module id.
+    mapping(address => bytes32) public pauseTargetOf;
     mapping(bytes32 => CircuitBreaker) public circuitBreakers;
 
     // Cross-chain pause intent: dstEid => moduleId => signaled
@@ -202,6 +206,8 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
     /// @notice Local paused-state was corrected to match the target contract's own view,
     ///         after a direct pause/unpause by another PAUSER_ROLE holder desynced it.
     event ModuleStateReconciled(bytes32 indexed moduleId, bool paused);
+    /// @notice Anyone lifted a pause the guardian left at its sunset (releaseAfterSunset).
+    event ReleasedAfterSunset(bytes32 indexed moduleId, address indexed by);
 
     /// @notice A guardian token pause started; it ends at `endsAt` at the latest.
     event TokenPauseStarted(uint256 endsAt, uint256 usedBefore);
@@ -237,6 +243,8 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
     error GovernanceOnlyUnpause(bytes32 moduleId);
     /// @notice A reason longer than MAX_REASON_LENGTH bytes was refused.
     error ReasonTooLong(uint256 maxLength);
+    /// @notice Not one of the six modules, or a pause() target another module already has.
+    error InvalidModuleTarget(bytes32 moduleId, address target);
     /// @notice The guardian has not reached its sunset yet.
     error GuardianNotExpired(uint256 sunset);
 
@@ -317,6 +325,7 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
     {
         if (target == address(0))         revert ZeroAddress();
         if (modules[moduleId].registered) revert ModuleAlreadyRegistered(moduleId);
+        _checkTarget(moduleId, target);
 
         modules[moduleId] = ModuleConfig({
             target:         target,
@@ -341,6 +350,12 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
     {
         if (newTarget == address(0)) revert ZeroAddress();
         address old = modules[moduleId].target;
+        // Review round 22 Oct (D-2): repointing a module this guardian holds paused left the
+        // old contract paused with no lapse and no release after the sunset. Lift it first
+        // (governanceUnpause, in the same Timelock batch if need be), then repoint.
+        if (modules[moduleId].paused && _actualPaused(moduleId, old)) revert ModuleAlreadyPaused(moduleId);
+        if (pauseTargetOf[old] == moduleId) pauseTargetOf[old] = bytes32(0);
+        _checkTarget(moduleId, newTarget);
         modules[moduleId].target = newTarget;
         // Sweep 22 Oct (Info): the pause flags described the OLD target. Start from the new
         // target's own state: a pause it already carries is governance's (as any adopted
@@ -407,6 +422,7 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
         // 22 Oct: the strict unpause reverted and the flag could not be cleared).
         if (!_actualPaused(moduleId, m.target)) {
             _forgetStale(moduleId);
+            emit GuardianAction(moduleId, msg.sender, ActionType.Unpause, reason, block.timestamp);
             return;
         }
         // ⛔ G-L1: a breaker that tripped is governance's to reset. The guardian
@@ -645,7 +661,9 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
         m.lastUnpauseTime = block.timestamp;
         if (moduleId == MODULE_TOKEN) _endTokenPause();
         _callUnpause(moduleId, m.target);
-        emit GuardianAction(moduleId, msg.sender, ActionType.Unpause, "released after sunset", block.timestamp);
+        // Review round 22 Oct (D-3): logged as GuardianAction, this named a stranger as the
+        // guardian who acted.
+        emit ReleasedAfterSunset(moduleId, msg.sender);
     }
 
     /**
@@ -988,6 +1006,19 @@ contract GuardianModule is AccessControl, ReentrancyGuard {
             emit ModuleCallSkipped(moduleId, target, false);
             _reconcilePausedState(moduleId, target);
         }
+    }
+
+    /// @dev Review round 22 Oct (lead from D): limits and pauseAll follow the module id, so
+    ///      an extra id, or a second id on the token, gave the guardian an unbounded token
+    ///      pause. Only the six known ids, and one pause() module per target.
+    function _checkTarget(bytes32 moduleId, address target) internal {
+        if (moduleId != MODULE_TOKEN && moduleId != MODULE_BRIDGE && moduleId != MODULE_STAKING &&
+            moduleId != MODULE_FEE && moduleId != MODULE_TREASURY && moduleId != MODULE_SSF)
+            revert InvalidModuleTarget(moduleId, target);
+        if (moduleId == MODULE_BRIDGE) return;
+        bytes32 holder = pauseTargetOf[target];
+        if (holder != bytes32(0) && holder != moduleId) revert InvalidModuleTarget(moduleId, target);
+        pauseTargetOf[target] = moduleId;
     }
 
     /// @dev The target's own paused view (paused() / bridgePaused()) when it answers; this

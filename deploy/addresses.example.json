@@ -12,6 +12,11 @@
     "deployerMultisig": "0x0000000000000000000000000000000000000000",
     "deployer": "0x0000000000000000000000000000000000000000"
   },
+  "rewardRates": {
+    "_note": "The launch reward rates, SRX wei per second as a decimal string, or null for not set at launch. They must equal 00_config REWARD_RATES for this network exactly, or 06 refuses to run (Security ruling, 23 Oct 2026): 13.5 SRX/s = 13500000000000000000. The fund rate stays null until Jared confirms it in writing.",
+    "staking": "13500000000000000000",
+    "stabilisationFund": null
+  },
   "tgeAllocations": {
     "_note": "Destinations MUST match 06_execute_tge.js finalAllocations exactly. Vaults are deployed contracts; PresaleLaunch, LiquidityPool and MarketMaker are MULTI-SIGNATURE wallets (a single-key wallet is refused on a real network) and Staking, Treasury and StabilisationFund are contracts; together PresaleLaunch + LiquidityPool + MarketMaker are the 5% launch float. For each vesting vault, beneficiary is the address the vault pays out to; it is compared with the deployed vault's beneficiary() and is REQUIRED on a real network.",
     "Founders": {

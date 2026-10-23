@@ -9,18 +9,17 @@
  * Usage:
  *   npx hardhat run scripts/verify/verify_all.js --network sepolia
  *
- * Notes on UUPS proxy contracts (SRXStaking, FeeController, SRXTreasury):
- *   This script verifies the implementation contract.
- *   After the implementation is verified, open the proxy address on the
- *   block explorer and click "Is this a proxy?" — the explorer will
- *   automatically link the proxy to its verified implementation.
+ * Notes on SRXStaking, FeeController, SRXTreasury and StabilisationFund:
+ *   Since REG-53 no SRX contract is upgradeable. These four are plain contracts
+ *   deployed once by their constructor, so each is verified at its own address
+ *   with its constructor arguments. There is no proxy and no implementation to link.
  *
  * If a contract is already verified the error is caught and the script
  * continues. All failures are collected and printed at the end.
  */
 
 const { ethers, network, run } = require("hardhat");
-const { LZ_ENDPOINTS, LZ_EIDS, WALLETS, VESTING, GOVERNANCE, TGE_PLAN, TESTNET_CHAINS } = require("../deploy/00_config");
+const { LZ_ENDPOINTS, LZ_EIDS, WALLETS, VESTING, GOVERNANCE, TGE_PLAN, TESTNET_CHAINS, SSF, ssfRewardAllocation } = require("../deploy/00_config");
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -32,13 +31,6 @@ function envReq(key) {
   const v = process.env[key];
   if (!v) throw new Error(`Missing required env var: ${key}`);
   return v;
-}
-
-/** Read the ERC-1967 implementation slot from a proxy address. */
-async function readImplAddress(proxyAddr) {
-  const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
-  const raw = await ethers.provider.getStorage(proxyAddr, IMPL_SLOT);
-  return ethers.getAddress("0x" + raw.slice(26));
 }
 
 /**
@@ -138,49 +130,36 @@ async function main() {
     [srxTokenAddr, admin]
   ));
 
-  // ── Steps 4 + 5: UUPS proxy implementations ──────────────────────────────
-  //   Verify the implementation contracts (no constructor args).
-  //   The ERC1967 proxy itself is linked on the explorer via "Is this a proxy?".
+  // ── Steps 4 + 5: SRXStaking, FeeController, SRXTreasury, StabilisationFund ──
+  //   Plain contracts (REG-53): each is verified at its own address with the constructor
+  //   arguments its deploy script used.
+  //     SRXStaking          constructor(address _srx, address _admin, address _tgeDistributor)      (04)
+  //     FeeController       constructor(address _stakingContract, address _admin)                   (04)
+  //     SRXTreasury         constructor(address _srxToken, address _admin, address _timelock)       (05)
+  //     StabilisationFund   constructor(srx, admin, maxDeployerBps, maxGuardianBps,
+  //                                     withdrawLockDuration, rewardAllocation, tgeDistributor)     (05b)
 
-  const stakingProxyAddr   = envOpt(`STAKING_${NET}`);
-  const feeProxyAddr       = envOpt(`FEE_CONTROLLER_${NET}`);
-  const treasuryProxyAddr  = envOpt(`TREASURY_${NET}`);
+  const stakingAddr   = envOpt(`STAKING_${NET}`);
+  const feeAddr       = envOpt(`FEE_CONTROLLER_${NET}`);
+  const treasuryAddr  = envOpt(`TREASURY_${NET}`);
+  const ssfAddr       = envOpt(`STABILISATION_FUND_${NET}`);
 
-  // SRXStaking implementation
-  if (stakingProxyAddr) {
-    const stakingImplAddr = await readImplAddress(stakingProxyAddr);
-    results.push(await verify("SRXStaking (implementation)", stakingImplAddr, []));
+  results.push(await verify("SRXStaking", stakingAddr, [srxTokenAddr, admin, tgeDistributorAddr]));
+  results.push(await verify("FeeController", feeAddr, [stakingAddr, admin]));
+  results.push(await verify("SRXTreasury", treasuryAddr, [srxTokenAddr, admin, timelockAddr]));
+
+  // The fund's reward allocation is fixed for good (REG-50) and, on mainnet, undecided until
+  // 00_config.js records it; verification cannot guess it.
+  let ssfRewardAlloc = null;
+  try { ssfRewardAlloc = ssfRewardAllocation(network.name); } catch (e) { console.log(`  [SKIP]  StabilisationFund — ${e.message.split(String.fromCharCode(10))[0]}`); }
+  if (ssfAddr && ssfRewardAlloc === null) {
+    results.push({ label: "StabilisationFund", status: "skipped" });
   } else {
-    results.push({ label: "SRXStaking (implementation)", status: "skipped" });
-    console.log(`  [SKIP]  SRXStaking — STAKING_${NET} not set`);
-  }
-
-  // FeeController implementation
-  if (feeProxyAddr) {
-    const feeImplAddr = await readImplAddress(feeProxyAddr);
-    results.push(await verify("FeeController (implementation)", feeImplAddr, []));
-  } else {
-    results.push({ label: "FeeController (implementation)", status: "skipped" });
-    console.log(`  [SKIP]  FeeController — FEE_CONTROLLER_${NET} not set`);
-  }
-
-  // SRXTreasury implementation
-  if (treasuryProxyAddr) {
-    const treasuryImplAddr = await readImplAddress(treasuryProxyAddr);
-    results.push(await verify("SRXTreasury (implementation)", treasuryImplAddr, []));
-  } else {
-    results.push({ label: "SRXTreasury (implementation)", status: "skipped" });
-    console.log(`  [SKIP]  SRXTreasury — TREASURY_${NET} not set`);
-  }
-
-  // StabilisationFund implementation (Step 5b)
-  const ssfProxyAddr = envOpt(`STABILISATION_FUND_${NET}`);
-  if (ssfProxyAddr) {
-    const ssfImplAddr = await readImplAddress(ssfProxyAddr);
-    results.push(await verify("StabilisationFund (implementation)", ssfImplAddr, []));
-  } else {
-    results.push({ label: "StabilisationFund (implementation)", status: "skipped" });
-    console.log(`  [SKIP]  StabilisationFund — STABILISATION_FUND_${NET} not set`);
+    results.push(await verify(
+      "StabilisationFund",
+      ssfAddr,
+      [srxTokenAddr, admin, SSF.MAX_DEPLOYER_BPS, SSF.MAX_GUARDIAN_BPS, SSF.WITHDRAW_LOCK_DURATION, ssfRewardAlloc, tgeDistributorAddr]
+    ));
   }
 
   // ── Step 7: Bridge (SRXOFTNative on remote chains only) ──────────────────
@@ -209,8 +188,8 @@ async function main() {
   // ── Step 8: GuardianModule ───────────────────────────────────────────────
   //   constructor(address _admin, address _guardian, address _governance, uint256 _maxSunset)
 
-  const guardianAddr       = envOpt(`GUARDIAN_${NET}`);
-  const guardianMultisig   = process.env.GUARDIAN_MULTISIG || admin;
+  const guardianAddr       = envOpt(`GUARDIAN_MODULE_${NET}`) || envOpt(`GUARDIAN_${NET}`); // 08 prints GUARDIAN_MODULE_<NET>; the older name is still read (E-08)
+  const guardianMultisig   = process.env.PAUSE_GUARDIAN || admin; // GuardianModule's guardian, as 08 deployed it (GUARDIAN_MULTISIG is retired, E-06)
   const sunsetDays         = parseInt(process.env.GUARDIAN_SUNSET_DAYS || "180", 10);
   const sunsetSeconds      = sunsetDays * 86400;
 
@@ -223,12 +202,11 @@ async function main() {
   // ── Step 9: ZkSyncMigrator ───────────────────────────────────────────────
   //   constructor(address _token, address _admin)
 
+  // Retired by CH-13 (22 Oct 2026); verified only where an old testnet deployment exists.
   const migratorAddr = envOpt(`MIGRATOR_${NET}`);
-  results.push(await verify(
-    "ZkSyncMigrator",
-    migratorAddr,
-    [srxTokenAddr, admin]
-  ));
+  if (migratorAddr && migratorAddr.toLowerCase() !== "none") {
+    results.push(await verify("ZkSyncMigrator", migratorAddr, [srxTokenAddr, admin]));
+  }
 
   // ── Summary ──────────────────────────────────────────────────────────────
 
@@ -249,22 +227,6 @@ async function main() {
     console.log(`\n  Failures:`);
     for (const r of failed) {
       console.log(`    - ${r.label}: ${r.error.split("\n")[0]}`);
-    }
-  }
-
-  // Proxy linking reminder — only relevant for contracts that were verified
-  const proxyContracts = [
-    { label: "SRXStaking proxy",          addr: stakingProxyAddr },
-    { label: "FeeController proxy",       addr: feeProxyAddr },
-    { label: "SRXTreasury proxy",         addr: treasuryProxyAddr },
-    { label: "StabilisationFund proxy",   addr: ssfProxyAddr },
-  ].filter((p) => p.addr);
-
-  if (proxyContracts.length > 0) {
-    console.log(`\n  Proxy contracts — link implementations on the explorer:`);
-    console.log(`  Open each proxy address on the explorer and click "Is this a proxy?"`);
-    for (const p of proxyContracts) {
-      console.log(`    ${p.label}: ${p.addr}`);
     }
   }
 

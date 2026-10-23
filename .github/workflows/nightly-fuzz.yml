@@ -23,7 +23,7 @@ permissions:
 jobs:
   invariant-campaign:
     name: Foundry invariant — heavy profile
-    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -56,7 +56,7 @@ jobs:
         run: mkdir -p lib && git clone --depth 1 --branch v1.16.1 https://github.com/foundry-rs/forge-std lib/forge-std   # pinned tag (was HEAD, so two runs of one commit could differ)
 
       - name: Run heavy invariant campaign
-        run: forge test --match-path "test/foundry/invariant/*" -vvv
+        run: forge test --match-path "test/foundry/invariant/*" -vvv --threads 2   # CI-04: full depth, fewer threads
 
       - name: Upload failure traces on failure
         if: failure()

@@ -1,5 +1,76 @@
 # SRX pre-external-audit remediation
 
+## 22 October 2026 — internal review round
+
+**Why.** After the 16 Oct audit and the class sweep below, five independent internal reviews
+went through the contracts and the deploy scripts again, at `9395487`. Each finding was proven
+by a test against `9395487` before it was fixed. The contract fixes are in `688b0e9`; the
+launch-gate and deploy-script fixes are in `668adb2` to `050a983`. Hardhat: 1,567 passing, 0
+failing. Foundry: 33 invariants and 5 property-fuzz tests. The regression tests for the
+contract fixes are in `test/internal-audit/Review22Oct.Fixes.test.js` (20 tests; all but the D-1
+pin fail on `9395487`). This is an internal review, not the external audit, which is upcoming.
+
+**Result: no Critical, one High (a deploy-process finding, E-01), four Medium (A1 and A4 open,
+C1 and C7/E-02 fixed), the rest Low and Info.** Two items are open for a design decision.
+
+### Open: waiting for a design decision (Jared and Security)
+
+| ID | Severity | What is wrong | Why it is not fixed yet | Test |
+|---|---|---|---|---|
+| A1 and A4 | Medium | The hub's per-chain inbound bucket counts gross returns. One holder sending the same SRX out and back, paying the fees each time, can keep the bucket full and hold honest returns from that chain back. The same round trips can trip the bridge circuit breaker (configured on testnet only; mainnet has none). | Counting net returns would end the blocking, but would let honest sends into a compromised chain free room for forged returns, which weakens the containment bound. Kept gross for now. No funds are lost; returns are delayed. | Proven in the review; behaviour is unchanged, so no regression test. The natspec on the bucket records it as open |
+
+### Contracts (`688b0e9`)
+
+| ID | Severity | Defect | Fix | Tests |
+|---|---|---|---|---|
+| A2 | Low | `SRXToken`: a send into a chain whose returns are frozen was accepted, burning SRX that could not come back. | Refused with `InboundChainFrozen`; nothing is burned and `outstandingByEid` does not grow. | `Review22Oct.Fixes` "A2" |
+| A3 | Low | `SRXToken`: a plain transfer to the hub's own address was accepted (the spoke already refused it), stranding the SRX. | Refused with `TransferToTokenContract`. Bridge credits to the address still land, and `rescueTokens` recovers them. | `Review22Oct.Fixes` "A3" |
+| A5 | Info | The wallet-cap exemption for listed exits was not explained in the code. | Natspec. | none needed |
+| B1 | Low | `releaseRewardAllocation` (`SRXStaking`, `StabilisationFund`) did not check what the successor did with the SRX, so a wound-down successor, or one whose reward cap was too small, could take SRX that could never be paid out as rewards. | After the successor syncs (`syncAllocation`), its reward backing must cover everything ever released to it (that backing comes only from this contract); all state is written before the calls. A wound-down or too-small successor is refused, so released SRX can only become the successor's rewards (REG-50). | `Review22Oct.Fixes` "B1 (a)" to "B1 (d)" |
+| B2 | Low | `StabilisationFund.triggerStressEvent` took its snapshot before syncing the allocation, so SRX delivered since the last sync counted as free SRX and widened the caps. | The snapshot reads the allocation first. | `Review22Oct.Fixes` "B2" |
+| B3 | Info | The 90-day withdraw-lock ceiling was not enforced in the fund's constructor. | `InvalidDuration` above 90 days; exactly 90 is accepted. | `Review22Oct.Fixes` "B3" |
+| B4 | Info | A dust top-up could move a position's unlock time earlier after the lock was shortened. The docs said the lock was "per deposit"; it is per position. | A top-up can extend the unlock, never bring it forward. Docs say "per position". | `Review22Oct.Fixes` "B4" |
+| C1 | Medium | `PreSaleRound`: once the raised ETH was withdrawn and the round finalised, a late refund could not be paid. | New `returnFunds()` (admin, payable) puts ETH back. It credits no one. | `Review22Oct.Fixes` "C1" |
+| C2 | Low | `setBuyerApprovals` reverted the whole batch when one cap was below what that buyer had already bought. | The cap is raised to what the buyer bought, the agreement ref is kept, and the rest of the batch applies. | `Review22Oct.Fixes` "C2" |
+| C3 | Low | `claimRefund(asset)` always paid the payer, so a payer that cannot receive ETH, or a blacklisted token holder, could not be refunded. | `claimRefund(asset, to)`: the payer chooses where its refund goes. A zero `to` reverts; nobody can claim another's refund. | `Review22Oct.Fixes` "C3" |
+| C4 | Info | `quoteStable(amount, investor)` named no coin and always used USDC's feed and decimals, so a USDT quote (own feed, 18 decimals) disagreed with what a purchase credited, and a disabled coin still quoted. | `quoteStable(coin, amount, investor)` uses that coin's own decimals and feed, and reverts `CurrencyDisabled` for a coin the round does not accept (disabled, unknown or zero). | `Review22Oct.Fixes` "C4" (two tests) |
+| C6 | Low | `removeInvestor` was refused after finalize, even for a wire buyer with no on-chain payment. | It works after finalize for a wire buyer. An on-chain payer is still `HasOnChainPayment`; a deployed vault is still `VaultAlreadyDeployed`. | `Review22Oct.Fixes` "C6" |
+| D-2 | Low | `GuardianModule.updateModuleTarget` could repoint a module the guardian was holding paused, leaving the old contract paused with no lapse and no release after the sunset. | Refused with `ModuleAlreadyPaused` while the guardian holds that module paused; allowed once governance has unpaused it, or when the flag is stale. | `Review22Oct.Fixes` "D-2" |
+| D-3 | Info | `releaseAfterSunset` was logged as a `GuardianAction`, which named a stranger as the guardian who acted. The stale-flag path of `unpauseModule` logged nothing. | `releaseAfterSunset` emits `ReleasedAfterSunset(moduleId, caller)`; a stale-flag `unpauseModule` emits its `GuardianAction`. | `Review22Oct.Fixes` "D-3 (a)" and "D-3 (b)" |
+| (lead, from D-2) | Not rated | `GuardianModule` accepted any module id, and a second id on the token's target. The limits and `pauseAll` follow the module id, so an extra id gave the guardian an unbounded token pause. | Only the six `MODULE_*` ids can be registered, and only one `pause()` module per target (the bridge may share the token's). Repointing frees the old target. | `Review22Oct.Fixes` "lead" |
+| Info | Info | `addWindDownExit` accepted address 0; a failed ETH rescue reverted with the unrelated `ZeroAmount`. | Address 0 refused; a failed rescue reverts `ETHRescueFailed` (the spoke too). | `Review22Oct.Fixes` |
+
+**D-1 (not a defect; documentation corrected).** A per-chain inbound freeze is lifted only by
+governance, even after the guardian's sunset. This is deliberate: after the sunset nobody else
+could re-freeze a compromised chain. Any document that said the sunset bounds a freeze was
+wrong and has been corrected. Pinned by `Review22Oct.Fixes` "D-1" (it passes on `9395487` too).
+
+### Deploy scripts and the launch gate (`668adb2` to `050a983`)
+
+| ID | Severity | Defect | Fix | Tests |
+|---|---|---|---|---|
+| E-01 | High (deploy process) | `SRXStaking` and `StabilisationFund` fix their `TGEDistributor` at deployment (REG-50), and 03 deploys a new distributor on every run. After a 03 re-run both pointed at a distributor that never launches: the 1.7B staking allocation arrives and can never back a reward, and the fund can deploy no SRX. Nothing compared the three addresses. | The 06 gate requires `staking.tgeDistributor()`, `fund.tgeDistributor()` and the launching distributor to be the same contract for the launch token. 03 refuses to run while staking or the fund exists unless `ACK_REDEPLOY_STAKING_AND_FUND=yes`, and a 03 re-run needs 04 and 05b re-run. (`206f1ae`) | `test/deploy/LaunchOrder.test.js` |
+| C7 / E-02 | Medium | Revoked vesting SRX went to a wallet: 03 and 10 fixed where a revoked vault's unvested SRX goes before `SRXTreasury` existed, so both fell back to the treasury wallet. | `SRXTreasury` is deployed before 10 and 03 (order 01, 02, 05, 10, 03, 04, 05b, 06, 06b, 08). 03 and 10 require a real `SRXTreasury` of the launch token; the gate checks every `revokeRecipient`. (`668adb2`) | `test/deploy/LaunchOrder.test.js` |
+| E-03 | Low | The role gate could not see any holder of the Timelock's proposer, canceller or admin role beyond the ones it asked about, and took the Governor address on trust, so a key with the proposer role passed as "Governor only". | It lists every proposer, canceller and admin from events (from `TIMELOCK_DEPLOY_BLOCK_<NET>`) and fails on any proposer other than the Governor, any canceller other than the Governor and the admin Safe, and any admin other than the Timelock; the Governor must be a contract tied to the Timelock and the token. (`dc852cb`) | `test/deploy/LaunchRoles.test.js` |
+| E-04 | Low | The gate did not require the Safe to hold the emergency pause and the veto, or that anyone could report to the circuit breaker. | The Safe must hold `GuardianModule` `GUARDIAN_ROLE` and Timelock `CANCELLER_ROLE`; once the breaker is configured, `CIRCUIT_BREAKER_ADDRESS` must be stated and hold `CIRCUIT_BREAKER_ROLE`. 08 has no defaults. (`71be60b`) | `test/deploy/LaunchRoles.test.js` |
+| E-05 | Low | The DVN check ran only for chains in `LZ_EIDS`; a hub peer on any other endpoint id was never looked at. | The hub's peers are listed from `PeerSet` events (from `SRX_TOKEN_DEPLOY_BLOCK_<NET>`); every non-zero peer must be a declared chain's declared OFT, and every peer gets the DVN check. (`f5b4a1b`) | `test/deploy/LaunchRoles.test.js` |
+| E-06 | Low | `GUARDIAN_MULTISIG` meant two different multisigs in 08 and in the gate. | Split into `PAUSE_GUARDIAN` (`GuardianModule`) and `SSF_GUARDIAN_MULTISIG` (`StabilisationFund`). 08 refuses to run, and the gate fails, while the old name is set. (`ce43ad4`) | `test/deploy/LaunchRoles.test.js` |
+| C5 | Low | The Genesis vault batch defaulted to 20 buyers, about 19M gas, more than one Ethereum transaction can hold (16,777,216). | Default 12 (about 11.5M gas); a batch above 15,000,000 gas is refused. (`66d32ac`) | `test/deploy/GenesisChunk.test.js` |
+| E-08 | Info | 04, 05 and 05b still described UUPS proxies; the runbook used a network called `mainnet` that does not exist; two scripts printed different names for the same address. | Wording corrected (no SRX contract is upgradeable since REG-53); the network is `ethereum`; canonical names are `STABILISATION_FUND_<NET>` and `GUARDIAN_MODULE_<NET>`. (`050a983`) | `test/deploy/DeployText.test.js` |
+
+### Other changes in the round
+
+- **Public mirror CI (`d686a77` to `22a4257`).** The public mirror's workflows run on
+  GitHub-hosted runners only; check 8 of the mirror check allows `runs-on` of exactly
+  `ubuntu-latest` or `ubuntu-24.04` and refuses `pull_request_target`, `workflow_run` and any
+  secret in a public workflow.
+- **CI-04 (`bab6c9c`).** Pull-request CI runs `FOUNDRY_FUZZ_RUNS=256` and
+  `FOUNDRY_INVARIANT_RUNS=64`, because the runner has little memory. The full depth (1,024 × 100
+  and 10,000) runs nightly.
+- **Contract size.** `PreSaleRound` (24,421 bytes) and `SRXToken` (23,645 bytes) sit close to
+  the 24,576-byte limit, so both are built with optimizer `runs: 1` through a per-file override
+  in `hardhat.config.js`. Behaviour is identical; gas is slightly higher.
+
 ## 22 October 2026 — Security's pre-external-audit work order
 
 **Why.** Outside researchers kept reporting issues that were already fixed in development,
@@ -112,7 +183,7 @@ one is informational, and the other three became M2, M3 and L9 below.
 | L6 | Low | `PreSaleRound.recoverSRX` took the whole balance, including SRX owed to buyers whose vaults did not exist yet. A 1-wei donation then forced the operator through it. | It takes only the surplus above `pendingDeployment()`. | `test/internal-audit/L6.GenesisRecoverSRX.test.js` |
 | L10 | Low | The wallet cap could block a staker's own principal coming back from a staking or fund exit (`unlock`, `exitAfterWindDown`) when it was above the cap. | The cap does not apply to SRX leaving a listed wind-down exit. Ordinary transfers still respect it. | `test/internal-audit/L10.ExitAboveWalletCap.test.js` |
 | L11 | Low | `earlyWithdraw` paid rewards while paused, when `claimRewards` refuses. | While paused, the principal still leaves and the rewards stay pending until the pause ends (or wind-down starts). | `StakingFund.Fixes.test.js` (L11) |
-| L12 | Low | A typo in a tier threshold could give every address a discount (Slate at 0), and a lower tier could carry a bigger discount than a higher one. | Slate needs more than 0; thresholds rise strictly with the tier; discounts rise with the tier. | `StakingFund.Fixes.test.js` (L12) |
+| L12 | Low | A typo in a tier threshold could give every address a discount (Slate at 0), and a lower tier could carry a bigger discount than a higher one. | Slate needs more than 0; thresholds rise strictly with the tier; discounts never fall as the tier rises (two adjacent tiers may share a discount; pinned by `BoundaryGaps23Oct` B275, B281, B286). | `StakingFund.Fixes.test.js` (L12) |
 | L13 | Low | After wind-down a position kept its multiplied tier. | After wind-down a position counts its principal only. | `StakingFund.Fixes.test.js` (L13) |
 | L15 | Low | A guardian pause still standing at the guardian's sunset could then be lifted only by a vote. | `releaseAfterSunset(moduleId)`: after the sunset anyone may lift a pause the guardian left. A pause that is governance's (a hold, an adopted outside pause, a tripped breaker) stays governance's. Pauses on other modules are still bounded only by the sunset (at most 180 days). | `test/internal-audit/L15.ReleaseAfterSunset.test.js` |
 | L17 | Low | The documents said a compromised spoke could return "at most the inbound limit before the guardian freezes it". The true bound is the limit plus one more limit for each day of reaction time. | No code change: the wording is corrected in `AUDIT_SCOPE.md`, `SRX_TOKEN_COMPLETE_OVERVIEW.md` and `docs/CONTRACTS.md`. (`INCIDENT_RESPONSE.md` and the property test already used limit × (1 + days).) | `test/BridgeConservation.property.test.js` (unchanged) |

@@ -35,8 +35,8 @@ interface IWindDownExit {
  *  one-shot mint of 10B. A bridge send BURNS on this chain (OFT _debit); a bridge
  *  return MINTS here, but only up to what was sent to that chain (outstandingByEid)
  *  and within that chain's inbound limit (a draining bucket, see below). The only
- *  PERMANENT supply reductions are buyAndBurn and ZkSyncMigrator.migrate (which
- *  calls buyAndBurn); both add to totalBurned. Genuine SRX across all chains is
+ *  PERMANENT supply reduction on the hub is buyAndBurn, which adds to totalBurned
+ *  (the ZkSyncMigrator is retired and not deployed, CH-13). Genuine SRX across all chains is
  *  therefore 10B minus totalBurned (⚠️ open, internal audit M4/L9: a spoke's own
  *  buyAndBurn is a permanent reduction the hub does not see). A compromised spoke
  *  can forge SRX on that spoke, but can bring back to Ethereum at most the inbound
@@ -58,7 +58,8 @@ interface IWindDownExit {
  * their own deposit back into their own wallet; they cannot move it on until the
  * pause ends. A pause therefore never blocks an exit-only withdrawal.
  *  GOVERNANCE_ROLE     — launch limits (maxTransferAmount, maxWalletBalance), the
- *                        limit exemptions, setInboundLimit and unfreezeInbound.
+ *                        limit exemptions, the wind-down exits (addWindDownExit),
+ *                        setInboundLimit and unfreezeInbound.
  *  BURN_ROLE           — treasury-controlled buy-and-burn.
  *
  * ⚠ Hand-over prerequisite:
@@ -109,7 +110,9 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
      * @notice Addresses exempt from the launch limits. An exempt sender OR recipient
      *         bypasses maxTransferAmount; only an exempt RECIPIENT bypasses
      *         maxWalletBalance (an exempt sender still cannot push an ordinary
-     *         wallet over the cap).
+     *         wallet over the cap). One exception: SRX paid out by a listed exit
+     *         (isWindDownExit: staking, the fund) is not held to the wallet cap,
+     *         principal and rewards alike (internal audit L10).
      *         Must include: all vesting vaults, staking contract, treasury, SSF,
      *         presale contract, DEX liquidity pool addresses, and the bridge.
      *         Set via setExemptFromLimits() before enabling launch protection.
@@ -190,6 +193,11 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     //    refused message reverts, and LayerZero V2 keeps it verified and retryable,
     //    so a real return is delayed, never lost. A single return above the limit
     //    waits for governance to raise it.
+    // ⚠️ Open (review round 22 Oct, A1; design decision pending): the bucket counts gross
+    //    returns, so one holder sending the same SRX out and back can keep it full and
+    //    hold honest returns from that chain back for as long as they keep paying fees.
+    //    Counting net returns (a send frees room, as Wormhole NTT's "backflow") ends that,
+    //    but lets honest sends into a compromised chain free room for forged returns.
     // ⛔ The first version (7 Oct, same day) counted returns in fixed 24-hour windows
     //    that reset at once, so a full limit just before a reset and another just
     //    after brought back twice the limit within seconds (internal review).
@@ -213,6 +221,8 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     error WalletExceedsMaxBalance(uint256 resultingBalance, uint256 limit);
 
     error OwnershipCannotBeRenounced();
+    error TransferToTokenContract();
+    error ETHRescueFailed();
 
     // ── Bridge ownership (N-02) ─────────────────────────────────────────────────
     //
@@ -280,15 +290,15 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
 
     /**
      * @notice Permanently burn SRX tokens held by the caller.
-     *         Must be called by an address holding BURN_ROLE (treasury, migrator, etc.).
+     *         Must be called by an address holding BURN_ROLE (treasury, buyback burner, etc.).
      *         Burns only from msg.sender's own balance — BURN_ROLE holders cannot burn
      *         tokens from third-party wallets (A2-H-01 fix).
      *
      *         Callers should transfer or receive tokens before calling this function:
      *           - Treasury: holds SRX from open-market purchases, then calls buyAndBurn.
-     *           - ZkSyncMigrator: pulls tokens from user via safeTransferFrom, then burns.
+     *           - BuybackBurner: holds SRX bought on the market, then burns.
      *
-     *         While the token is paused, burns, migrations and buybacks stop: a burn
+     *         While the token is paused, burns and buybacks stop: a burn
      *         is a token movement, and a pause stops every token movement. This is
      *         intended (external disclosure C, 4 Oct 2026). Admin controls such as
      *         setPeer keep working while paused.
@@ -356,6 +366,7 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     ///         silently break the exit promise. A listing only lets that contract's own
     ///         transfers out continue during a pause, and only while it is wound down.
     function addWindDownExit(address account) external onlyRole(GOVERNANCE_ROLE) {
+        if (account == address(0)) revert ZeroAddress(); // review round 22 Oct (Info)
         isWindDownExit[account] = true;
         emit WindDownExitAdded(account);
     }
@@ -458,7 +469,7 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
             // with a bridge delivery (lzReceive is payable) had no way out. token == 0 is ETH.
             // slither-disable-next-line arbitrary-send-eth -- reviewed 22 Oct 2026: DEFAULT_ADMIN_ROLE (the Timelock, 48 h) only; moves only ETH stranded at this contract, which holds none for anyone
             (bool ok, ) = to.call{value: amount}("");
-            if (!ok) revert ZeroAmount();
+            if (!ok) revert ETHRescueFailed(); // review round 22 Oct: was ZeroAmount
         } else {
             IERC20(token).safeTransfer(to, amount);
         }
@@ -477,7 +488,7 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         return Time.timestamp();
     }
 
-    function CLOCK_MODE() public view override returns (string memory) {
+    function CLOCK_MODE() public pure override returns (string memory) {
         return "mode=timestamp";
     }
 
@@ -489,6 +500,9 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
         returns (uint256 amountSentLD, uint256 amountReceivedLD)
     {
         if (bridgePaused) revert BridgeStopped();
+        // Review round 22 Oct (A2): a frozen chain is one declared compromised, so SRX
+        // is not sent into it either (it would be burned here and could not come back).
+        if (inboundFrozen[_dstEid]) revert InboundChainFrozen(_dstEid);
         (amountSentLD, amountReceivedLD) = super._debit(_from, _amountLD, _minAmountLD, _dstEid);
         uint256 outstanding = outstandingByEid[_dstEid] + amountSentLD;
         outstandingByEid[_dstEid] = outstanding;
@@ -539,6 +553,10 @@ contract SRXToken is OFT, Ownable2Step, ERC20Permit, ERC20Votes, AccessControl, 
     {
         // The external call is made only for a listed exit, and only while paused.
         if (paused()) _requireWindDownExit(from);
+        // Review round 22 Oct (A3), as on the spoke: SRX sent here by a plain transfer
+        // could leave only through a 48-hour rescue. A bridge credit (a mint) may still
+        // arrive here; rescueTokens recovers it.
+        if (to == address(this) && from != address(0)) revert TransferToTokenContract();
 
         // ── Supply cap ─────────────────────────────────────────────────────────
         // ⛔ THE HEADLINE GUARANTEE OF THIS CONTRACT WAS NOT ENFORCED ANYWHERE.

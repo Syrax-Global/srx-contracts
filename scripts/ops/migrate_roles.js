@@ -15,10 +15,10 @@
  *    GOVERNANCE_ROLE path to send all 1.5B SRX anywhere — none of it delayed.
  *
  * ── Two phases, because ownership of the token needs the Timelock to accept ──
- *   PHASE 1 (default) — before the irreversible phase 2. Most steps can still be undone
- *   while the Safe is admin, BUT revoking the Safe's SPENDER_ROLE
- *   cannot be: each of those roles administers itself, so the Safe cannot re-grant it
- *   and putting it back needs a Timelock operation:
+ *   PHASE 1 (default) — before the irreversible phase 2. Every step can still be undone
+ *   while the Safe is admin. (The Safe never holds SRXTreasury's SPENDER_ROLE: the
+ *   constructor grants it to the Timelock only and it administers itself, so its revoke
+ *   below is a no-op kept for older deployments; review round 22 Oct 2026.)
  *     1. grant the Timelock DEFAULT_ADMIN / GOVERNANCE / SPENDER,
  *        GuardianModule PAUSER, the Governor PROPOSER + CANCELLER on the Timelock;
  *     2. revoke the Safe's GOVERNANCE / SPENDER / PAUSER / BURN (it keeps WIND_DOWN on staking and the fund);
@@ -44,7 +44,8 @@
  * execution from the loaded signer with `--execute` (testnet and fork rehearsal only).
  *
  * Required .env (per network, e.g. _ETHEREUM): SRX_TOKEN, TREASURY, STAKING,
- *   FEE_CONTROLLER, STABILISATION, TIMELOCK, GOVERNOR, GUARDIAN_MODULE, and ADMIN_ADDRESS.
+ *   FEE_CONTROLLER, STABILISATION_FUND, TIMELOCK, GOVERNOR, GUARDIAN_MODULE, and ADMIN_ADDRESS
+ *   (the names the deploy scripts print; the older STABILISATION and GUARDIAN are still read, E-08).
  *
  * Covers GuardianModule and ZkSyncMigrator since 30 Sep 2026 (both left the Safe as
  * DEFAULT_ADMIN). Optional env: MIGRATOR (its address, or "none").
@@ -62,6 +63,7 @@ const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
 const { pendingTimelockOps, parseOpList, parseBlock } = require("../deploy/lib/gate_checks");
+const { lookupEnv } = require("../deploy/lib/launch_order");
 
 const NET  =network.name.toUpperCase();
 const ARGS = process.argv.slice(2);
@@ -83,9 +85,10 @@ const ROLE = {
 const ACCEPT_SALT = ethers.id("SRX:SRXToken.acceptOwnership:launch");
 
 function envAddr(key, { required = true } = {}) {
-  const v = process.env[`${key}_${NET}`] || process.env[key];
-  if (!v && required) throw new Error(`Missing required address: ${key}_${NET} (or ${key}) in .env`);
-  return v ? ethers.getAddress(v) : null;
+  // E-08: the canonical name first, then the older spelling (STABILISATION, GUARDIAN), each as <NAME>_<NET> then bare.
+  const found = lookupEnv(key, network.name);
+  if (!found && required) throw new Error(`Missing required address: ${key}_${NET} (or ${key}) in .env`);
+  return found ? ethers.getAddress(found.value) : null;
 }
 
 async function main() {
@@ -108,11 +111,11 @@ async function main() {
     { name: "SRXTreasury",       addr: envAddr("TREASURY"),       roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE", "SPENDER_ROLE"] },
     { name: "SRXStaking",        addr: envAddr("STAKING"),        roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
     { name: "FeeController",     addr: envAddr("FEE_CONTROLLER"), roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
-    { name: "StabilisationFund", addr: envAddr("STABILISATION"),  roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
+    { name: "StabilisationFund", addr: envAddr("STABILISATION_FUND"),  roles: ["GOVERNANCE_ROLE", "PAUSER_ROLE"] },
     // ⛔ 30 Sep 2026: GuardianModule was not handed over. 08 makes the Safe its
     //    DEFAULT_ADMIN, from which it could grant itself GOVERNANCE_ROLE and
     //    un-pause everything or reset a tripped circuit breaker with no delay. The
-    //    Safe keeps GUARDIAN_ROLE (pause) via GUARDIAN_MULTISIG and nothing else.
+    //    Safe keeps GUARDIAN_ROLE (pause) via PAUSE_GUARDIAN and nothing else.
     { name: "GuardianModule",    addr: guardianM,                  roles: ["GOVERNANCE_ROLE"] },
   ];
   // ZkSyncMigrator: the Safe is its constructor admin; since 30 Sep 2026 (Jared) it
@@ -142,7 +145,7 @@ async function main() {
   };
 
   if (!FINALIZE) {
-    console.log("\nPHASE 1 — grants, revocations and ownership transfer (the Safe's SPENDER revocation cannot be undone by the Safe)\n");
+    console.log("\nPHASE 1 — grants, revocations and ownership transfer (all reversible while the Safe is admin)\n");
     // 1. grants
     for (const t of targets) {
       role(t.addr, "grantRole", "DEFAULT_ADMIN_ROLE", timelock, `${t.name}: grant DEFAULT_ADMIN → Timelock`);
@@ -156,8 +159,8 @@ async function main() {
     role(timelock, "grantRole", "PROPOSER_ROLE",  governor, "Timelock: grant PROPOSER → Governor");
     role(timelock, "grantRole", "CANCELLER_ROLE", governor, "Timelock: grant CANCELLER → Governor");
     role(timelock, "grantRole", "CANCELLER_ROLE", admin,    "Timelock: grant CANCELLER → Safe (veto only; kept at launch)");
-    // 2. the Safe gives up every operational role. SPENDER_ROLE administers itself, so the
-    //    Safe cannot undo that revocation; the rest it still could. (It keeps WIND_DOWN_ROLE.)
+    // 2. the Safe gives up every operational role (it keeps WIND_DOWN_ROLE). It never holds
+    //    SRXTreasury's SPENDER_ROLE (Timelock only, self-administered), so that revoke is a no-op.
     for (const t of targets) for (const r of t.roles) role(t.addr, "revokeRole", r, admin, `${t.name}: revoke ${r} from the Safe`);
     // 3. bridge authority: delegate, then two-step ownership
     steps.push({

@@ -476,6 +476,8 @@ contract StabilisationFund is AccessControl, Pausable {
         srxToken               = IERC20(_srxToken);
         maxDeployerBps         = _maxDeployerBps;
         maxGuardianBps         = _maxGuardianBps;
+        // Review round 22 Oct (B3): the ceiling was enforced only in the setter.
+        if (_withdrawLockDuration > MAX_WITHDRAW_LOCK) revert InvalidDuration();
         withdrawLockDuration   = _withdrawLockDuration;
         stressCooldownDuration = 7 days; // A6-E-03: default 7-day cooldown between stress events
         lastUpdateTime         = block.timestamp;
@@ -534,7 +536,10 @@ contract StabilisationFund is AccessControl, Pausable {
 
         contributions[msg.sender].srxAmount  += amount;
         contributions[msg.sender].depositTime = block.timestamp;
-        contributionUnlockAt[msg.sender]      = block.timestamp + withdrawLockDuration;
+        // Review round 22 Oct (B4): after a shorter lock was set, a 1-wei top-up re-timed the
+        // whole position earlier. A deposit's unlock time never moves earlier.
+        uint256 unlockAt = block.timestamp + withdrawLockDuration;
+        if (unlockAt > contributionUnlockAt[msg.sender]) contributionUnlockAt[msg.sender] = unlockAt;
         totalContributions                   += amount;
 
         srxToken.safeTransferFrom(msg.sender, address(this), amount);
@@ -596,14 +601,14 @@ contract StabilisationFund is AccessControl, Pausable {
      *         path, not a deposit product; stable deposits earn nothing and are never repaid.
      *         Caller must have pre-approved this contract for `amount`.
      *
-     * @param token  ERC-20 stable token address.
+     * @param asset  ERC-20 stable token address.
      * @param amount Amount in that token's native decimals.
      */
-    function depositStableReserve(address token, uint256 amount) external onlyRole(TREASURY_ROLE) nonReentrant whenNotPaused {
+    function depositStableReserve(address asset, uint256 amount) external onlyRole(TREASURY_ROLE) nonReentrant whenNotPaused {
         if (windDown)    revert WoundDown();
         if (amount == 0) revert ZeroAmount();
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        emit StableReserveDeposited(msg.sender, token, amount);
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        emit StableReserveDeposited(msg.sender, asset, amount);
     }
 
     // ── Synthetix reward accounting ────────────────────────────────────────────
@@ -744,6 +749,9 @@ contract StabilisationFund is AccessControl, Pausable {
         // The caps are a share of what the fund may actually spend: its SRX less
         // contributor principal and the reward pool. ⛔ The whole balance was
         // snapshotted, so a 70% cap could reach into contributors' own deposits.
+        // Review round 22 Oct (B2): read the live allocation first, as deployLiquidity does,
+        // or a released-but-unsynced allocation counted as free SRX and widened the caps.
+        if (ITGEAllocationSource(tgeDistributor).distributed()) _syncAllocation();
         stressStartSRXBalance  = _freeSRX();
         deployerSRXUsed        = 0;
         guardianSRXUsed        = 0;
@@ -784,7 +792,7 @@ contract StabilisationFund is AccessControl, Pausable {
      * ├─────────────────┼─────────────┼──────────┼────────────────────────────────┤
      * │ DEPLOYER_ROLE   │ Yes         │ SRX only │ maxDeployerBps of snapshot     │
      * │ GUARDIAN_ROLE   │ Yes         │ SRX only │ maxGuardianBps combined w/ dep │
-     * │ GOVERNANCE_ROLE │ No          │ Any      │ None (Timelock delay is guard) │
+     * │ GOVERNANCE_ROLE │ No          │ Any      │ SRX: free SRX only; else none  │
      * └─────────────────┴─────────────┴──────────┴────────────────────────────────┘
      *
      * Fast paths (DEPLOYER / GUARDIAN) are intentionally SRX-only because the
@@ -792,13 +800,13 @@ contract StabilisationFund is AccessControl, Pausable {
      * Deploying ETH or stablecoins during stress is rare and can wait for governance.
      *
      * @param target Address to send tokens to (DEX pool, market maker, etc.).
-     * @param token  ERC-20 token to deploy. Fast paths require this == srxToken.
+     * @param asset  ERC-20 token to deploy. Fast paths require this == srxToken.
      * @param amount Amount to deploy.
      * @param reason On-chain justification string (required for audit trail).
      */
     function deployLiquidity(
         address        target,
-        address        token,
+        address        asset,
         uint256        amount,
         string calldata reason
     ) external nonReentrant whenNotPaused {
@@ -815,7 +823,7 @@ contract StabilisationFund is AccessControl, Pausable {
         if (!isGovernance) {
             // ── Fast-path rules ──────────────────────────────────────────────
             if (!stressActive)                  revert FastPathRequiresStress();
-            if (token != address(srxToken))     revert FastPathSRXOnly();
+            if (asset != address(srxToken))     revert FastPathSRXOnly();
             // SC-TRUST-003: fast-path may only send to a governance-approved target.
             // Closes the arbitrary-destination drain vector for compromised fast-path roles.
             if (!approvedDeployTarget[target])  revert TargetNotApproved(target);
@@ -851,14 +859,14 @@ contract StabilisationFund is AccessControl, Pausable {
         //    deployable by anyone. Otherwise backing SRX could be sent out and later
         //    replaced by fee SRX, and governance could spend depositors' deposits.
         //    The backing is read first, so no launch SRX can leave before it is known.
-        if (token == address(srxToken)) {
+        if (asset == address(srxToken)) {
             _syncAllocation(); // read live (internal audit M1)
             if (amount > _freeSRX()) revert InsufficientFreeBalance(_freeSRX(), amount);
         }
 
         totalDeployed += amount;
-        IERC20(token).safeTransfer(target, amount);
-        emit LiquidityDeployed(msg.sender, target, token, amount, reason);
+        IERC20(asset).safeTransfer(target, amount);
+        emit LiquidityDeployed(msg.sender, target, asset, amount, reason);
     }
 
     // ── Reward pool governance ─────────────────────────────────────────────────
@@ -1112,6 +1120,7 @@ contract StabilisationFund is AccessControl, Pausable {
         // never block the exit, so it is attempted through an external self-call.
         try this.syncAllocation() {} catch {}
         _updateReward(address(0)); // bank everything accrued up to now
+        uint256 stoppedRate = rewardRate; // logged below (it was always logged as 0; MONEY-11)
         rewardRate   = 0;
         periodFinish = block.timestamp;
         if (stressActive) {        // the fast paths close with it, visibly (sweep 22 Oct, Info)
@@ -1120,7 +1129,7 @@ contract StabilisationFund is AccessControl, Pausable {
             emit StressEventResolved(stressEventCount, deployerSRXUsed, guardianSRXUsed, block.timestamp);
         }
         windDown     = true;
-        emit RewardRateSet(rewardRate, 0);
+        emit RewardRateSet(stoppedRate, 0);
         emit WindDownStarted(msg.sender, byTimeout);
     }
 
@@ -1185,8 +1194,17 @@ contract StabilisationFund is AccessControl, Pausable {
         rewardBacking -= fromUnregistered;
         rewardPool    -= amount - fromUnregistered;
 
-        releasedTo[successor] += amount;
+        // ⛔ Review round 22 Oct (B1): naming this contract as its source was the only check,
+        //    so a successor already wound down, or with a reward cap below the release, took
+        //    it as free SRX (deployable from a fund), or froze it for good (a wound-down
+        //    staking). The successor's reward backing comes only from this contract, so after
+        //    it syncs, its backing must cover everything ever released to it; syncAllocation
+        //    reverts on a wound-down successor. All state is written before the calls.
+        uint256 released = releasedTo[successor] + amount;
+        releasedTo[successor] = released;
         srxToken.safeTransfer(successor, amount);
+        ISuccessorOf(successor).syncAllocation();
+        if (ISuccessorOf(successor).rewardBacking() < released) revert NotASuccessor(successor);
         emit RewardAllocationReleased(successor, amount);
     }
 
@@ -1232,8 +1250,8 @@ contract StabilisationFund is AccessControl, Pausable {
     }
 
     /// @notice Current balance of any ERC-20 token held by the fund.
-    function tokenBalance(address token) external view returns (uint256) {
-        return IERC20(token).balanceOf(address(this));
+    function tokenBalance(address asset) external view returns (uint256) {
+        return IERC20(asset).balanceOf(address(this));
     }
 
     /**

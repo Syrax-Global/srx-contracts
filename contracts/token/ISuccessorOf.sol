@@ -7,4 +7,8 @@ pragma solidity ^0.8.24;
 ///      identically; Aderyn H-3, 22 Oct 2026).
 interface ISuccessorOf {
     function tgeDistributor() external view returns (address);
+    /// @dev Review round 22 Oct (B1): the release re-reads the successor's backing around
+    ///      the transfer, so every released SRX must become the successor's reward backing.
+    function rewardBacking() external view returns (uint256);
+    function syncAllocation() external;
 }

@@ -20,6 +20,14 @@ concurrency:
 
 env:
   FOUNDRY_PROFILE: default
+  # CI-04 (Security ruling, 22 Oct 2026): the runner slot is capped at 3 GiB and will not be
+  # raised (it shares VPS4 with the chain). Every test still runs; the random cases are fewer
+  # here, and the full depth (foundry.toml [profile.ci]) runs nightly, on GitHub-hosted runners
+  # for the public mirror. Node sizes its heap from the machine's 12 GB, not the slot, so it
+  # is capped to collect before the slot fills (a full Hardhat run peaks near 1.2 GB).
+  FOUNDRY_FUZZ_RUNS: 256
+  FOUNDRY_INVARIANT_RUNS: 64
+  NODE_OPTIONS: --max-old-space-size=2048
 
 # Least privilege (board 79e7b84b, 11 Oct 2026): this workflow only reads the repository.
 permissions:
@@ -29,7 +37,7 @@ jobs:
   # ── Hardhat unit tests ──────────────────────────────────────────────────────
   hardhat:
     name: Hardhat tests
-    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -56,7 +64,7 @@ jobs:
   # ── Foundry tests (invariants + property fuzz) ─────────────────────────────
   foundry:
     name: Foundry tests
-    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -89,15 +97,15 @@ jobs:
         run: mkdir -p lib && git clone --depth 1 --branch v1.16.1 https://github.com/foundry-rs/forge-std lib/forge-std   # pinned tag (was HEAD, so two runs of one commit could differ)
 
       - name: Verify build
-        run: forge build
+        run: forge build --threads 2
 
       - name: Run Foundry tests (invariant + property fuzz)
-        run: forge test -vv
+        run: forge test -vv --threads 2
 
   # ── Slither static analysis ────────────────────────────────────────────────
   slither:
     name: Slither static analysis
-    runs-on: [self-hosted, syrax-ephemeral, syrax-large]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -155,7 +163,7 @@ jobs:
   # ── Solhint linting ────────────────────────────────────────────────────────
   solhint:
     name: Solhint lint
-    runs-on: [self-hosted, syrax-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -182,7 +190,7 @@ jobs:
   # the full history, now fetched with plain git and the job's own token sent as a one-off header, never stored.
   secrets:
     name: Secret scan
-    runs-on: [self-hosted, syrax-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout with history (plain git, token never stored)
@@ -237,7 +245,7 @@ jobs:
   # ── Dependency audit ───────────────────────────────────────────────────────
   npm-audit:
     name: npm dependency audit
-    runs-on: [self-hosted, syrax-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -258,7 +266,7 @@ jobs:
 
   doc-refs:
     name: Documentation references resolve
-    runs-on: [self-hosted, syrax-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
       - name: Checkout by SHA (plain git, token never stored)
@@ -287,7 +295,7 @@ jobs:
   # ── Gate job — fails if any required job failed ────────────────────────────
   all-checks:
     name: All required checks passed
-    runs-on: [self-hosted, syrax-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: [hardhat, foundry, slither, solhint, secrets, doc-refs]
     if: always()
