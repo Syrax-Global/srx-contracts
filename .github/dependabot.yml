@@ -1,0 +1,21 @@
+# SECPROG-02 (board 0f750211): inert until this branch is merged; merging is the Command Centre's go.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      all-updates:
+        patterns:
+          - "*"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      all-updates:
+        patterns:
+          - "*"
